@@ -271,7 +271,7 @@ export default function NavLive() {
             <div style={{ ...card, padding: 10 }}>
               <div style={{ height: 420, borderRadius: 14, overflow: "hidden" }}>
                 <MapContainer center={center} zoom={14} style={{ height: "100%", width: "100%" }}>
-                  <TileLayer attribution="" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                   {routeLine.length > 0 && <Polyline positions={routeLine} />}
                   {me && <Marker position={[me.lat, me.lng]} icon={meIcon} />}
                   {target && <Marker position={[target.lat, target.lng]} />}

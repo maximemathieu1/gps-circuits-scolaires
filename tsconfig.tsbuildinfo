@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/ui.ts","./src/vite-env.d.ts","./src/lib/api.ts","./src/lib/geo.ts","./src/lib/usewakelock.ts","./src/pages/navlive.tsx","./src/pages/portal.tsx","./src/pages/record.tsx"],"version":"5.9.3"}
