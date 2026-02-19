@@ -1,7 +1,8 @@
 // src/pages/Record.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { callFn, supabase } from "@/lib/api";
+import { callFn } from "@/lib/api";
+import { supabase } from "@/lib/supabaseClient";
 import { page, container, card, h1, muted, row, btn, bigBtn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
