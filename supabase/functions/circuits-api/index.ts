@@ -7,8 +7,7 @@ function cors(req: Request) {
     "Access-Control-Allow-Origin": origin,
     "Vary": "Origin",
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Headers":
-      "authorization, apikey, x-app-key, x-client-info, content-type",
+    "Access-Control-Allow-Headers": "authorization, apikey, x-app-key, x-client-info, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
 }
@@ -32,13 +31,15 @@ const SERVICE_ROLE = getEnv("SERVICE_ROLE_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")?.trim();
 if (!SUPABASE_URL) throw new Error("SUPABASE_URL introuvable dans l'environnement Edge");
 
+// ✅ Service role (bypass RLS) — mais on garde APP_KEY pour bloquer l’accès public
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 type TCode = "B" | "C" | "S";
 
 type Req =
   | { action: "list_circuits"; transporteur_code: TCode }
-  | { action: "create_circuit"; transporteur_code: TCode; nom: string }
+  // ✅ on accepte created_by / user_id venant du front
+  | { action: "create_circuit"; transporteur_code: TCode; nom: string; created_by?: string; user_id?: string }
   | { action: "rename_circuit"; circuit_id: string; nom: string }
   | { action: "start_update"; circuit_id: string; note?: string }
   | { action: "get_active_version"; circuit_id: string }
@@ -72,9 +73,22 @@ serve(async (req) => {
       const nom = (body.nom ?? "").trim();
       if (!nom) return json(req, 400, { error: "Nom requis" });
 
+      // ✅ IMPORTANT: created_by est NOT NULL dans ta table
+      // On le prend depuis created_by (ou user_id si tu l’envoies sous ce nom)
+      const createdBy = (body.created_by ?? body.user_id ?? "").trim();
+      if (!createdBy) {
+        return json(req, 400, {
+          error: "Utilisateur non connecté (created_by manquant). Connecte-toi puis réessaie.",
+        });
+      }
+
       const { data: c, error: e1 } = await supabase
         .from("circuits")
-        .insert({ transporteur_code: body.transporteur_code, nom })
+        .insert({
+          transporteur_code: body.transporteur_code,
+          nom,
+          created_by: createdBy, // ✅ FIX
+        })
         .select("id")
         .single();
 
@@ -82,7 +96,12 @@ serve(async (req) => {
 
       const { data: v, error: e2 } = await supabase
         .from("circuit_versions")
-        .insert({ circuit_id: c.id, version_no: 1, is_active: true, note: "Version 1" })
+        .insert({
+          circuit_id: c.id,
+          version_no: 1,
+          is_active: true,
+          note: "Version 1",
+        })
         .select("id, version_no")
         .single();
 

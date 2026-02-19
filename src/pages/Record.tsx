@@ -1,7 +1,7 @@
 // src/pages/Record.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { callFn } from "@/lib/api";
+import { callFn, supabase } from "@/lib/api";
 import { page, container, card, h1, muted, row, btn, bigBtn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
@@ -52,7 +52,46 @@ export default function Record() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // auth (pour éviter created_by = null)
+  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
   const canGeo = typeof navigator !== "undefined" && "geolocation" in navigator;
+
+  async function refreshAuth() {
+    try {
+      const { data, error } = await supabase.auth.getUser();
+      if (error) {
+        setAuthed(false);
+        setUserId(null);
+        return;
+      }
+      const u = data?.user ?? null;
+      setAuthed(Boolean(u));
+      setUserId(u?.id ?? null);
+    } catch {
+      setAuthed(false);
+      setUserId(null);
+    }
+  }
+
+  async function requireAuth(): Promise<string> {
+    const { data, error } = await supabase.auth.getUser();
+    const u = data?.user ?? null;
+
+    if (error || !u?.id) {
+      setAuthed(false);
+      setUserId(null);
+      alert("Tu dois être connecté pour créer / modifier un circuit.");
+      // si tu as une page login, décommente :
+      // nav("/login");
+      throw new Error("NOT_AUTHENTICATED");
+    }
+
+    setAuthed(true);
+    setUserId(u.id);
+    return u.id;
+  }
 
   async function loadCircuits() {
     const r = await callFn<{ circuits: Circuit[] }>("circuits-api", {
@@ -80,6 +119,12 @@ export default function Record() {
   useEffect(() => {
     if (selectedCircuit) localStorage.setItem(LS_C, selectedCircuit);
   }, [selectedCircuit]);
+
+  // auth au chargement
+  useEffect(() => {
+    refreshAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // petit “check GPS” au chargement (ça évite une surprise au moment de démarrer)
   useEffect(() => {
@@ -113,6 +158,8 @@ export default function Record() {
 
     setBusy(true);
     try {
+      const uid = await requireAuth();
+
       // test GPS (force permission)
       if (canGeo) {
         const p = await getPos();
@@ -124,6 +171,9 @@ export default function Record() {
         action: "create_circuit",
         transporteur_code: transporteur,
         nom,
+        // ✅ IMPORTANT: éviter created_by = null côté DB
+        created_by: uid,
+        user_id: uid, // (au cas où ta function attend user_id)
       });
 
       setSelectedCircuit(r.circuit_id);
@@ -131,8 +181,11 @@ export default function Record() {
       setRecording(true);
       setPoints([]);
       setNewNom("");
+
+      // refresh liste (optionnel mais pratique)
+      await loadCircuits();
     } catch (e: any) {
-      alert(e.message);
+      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
       setBusy(false);
     }
@@ -143,6 +196,8 @@ export default function Record() {
 
     setBusy(true);
     try {
+      await requireAuth();
+
       if (canGeo) {
         const p = await getPos();
         setGpsOk(true);
@@ -159,7 +214,7 @@ export default function Record() {
       setRecording(true);
       setPoints([]);
     } catch (e: any) {
-      alert(e.message);
+      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
       setBusy(false);
     }
@@ -167,17 +222,20 @@ export default function Record() {
 
   async function renameSelected() {
     if (!selectedCircuit) return;
-    const current = circuits.find((c) => c.id === selectedCircuit)?.nom ?? "";
-    const nom = (window.prompt("Nouveau nom du circuit :", current) ?? "").trim();
-    if (!nom) return;
 
     setBusy(true);
     try {
+      await requireAuth();
+
+      const current = circuits.find((c) => c.id === selectedCircuit)?.nom ?? "";
+      const nom = (window.prompt("Nouveau nom du circuit :", current) ?? "").trim();
+      if (!nom) return;
+
       await callFn("circuits-api", { action: "rename_circuit", circuit_id: selectedCircuit, nom });
       await loadCircuits();
       alert("Nom mis à jour ✅");
     } catch (e: any) {
-      alert(e.message);
+      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
       setBusy(false);
     }
@@ -185,8 +243,11 @@ export default function Record() {
 
   async function addStop() {
     if (!versionId) return;
+
     setBusy(true);
     try {
+      await requireAuth();
+
       const pos = await getPos();
       setGpsOk(true);
       setGpsAccuracy(typeof pos.accuracy === "number" ? Math.round(pos.accuracy) : null);
@@ -202,11 +263,10 @@ export default function Record() {
         label,
       });
 
-      // recharge la liste (petite pause si DB very fast)
       await sleep(80);
       await loadPointsByVersion(versionId);
     } catch (e: any) {
-      alert(e.message);
+      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
       setBusy(false);
     }
@@ -218,17 +278,17 @@ export default function Record() {
 
     setBusy(true);
     try {
+      await requireAuth();
+
       const r = await callFn<{ ok: boolean; deleted: boolean; idx?: number }>("circuits-api", {
         action: "delete_last_point",
         version_id: versionId,
       });
 
-      if (!r.deleted) {
-        alert("Aucun arrêt à annuler.");
-      }
+      if (!r.deleted) alert("Aucun arrêt à annuler.");
       await loadPointsByVersion(versionId);
     } catch (e: any) {
-      alert(e.message);
+      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
       setBusy(false);
     }
@@ -251,6 +311,10 @@ export default function Record() {
               <h1 style={h1}>Mode Enregistrement</h1>
               <div style={muted}>
                 À chaque arrêt : clique <b>Ajouter arrêt</b>. GPS requis.
+              </div>
+              <div style={{ ...muted, marginTop: 6 }}>
+                Connexion :{" "}
+                {authed === null ? "vérification…" : authed ? `OK (${userId?.slice(0, 8)}…)` : "non connecté"}
               </div>
             </div>
             <button style={btn("ghost")} onClick={() => nav("/")}>
@@ -345,9 +409,14 @@ export default function Record() {
                 )}
 
                 <div style={{ ...muted, marginTop: 6 }}>
-                  GPS :{" "}
-                  {gpsOk === null ? "vérification…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué / refusé"}
+                  GPS : {gpsOk === null ? "vérification…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué / refusé"}
                 </div>
+
+                {authed === false && (
+                  <div style={{ ...muted, border: "1px solid #fee2e2", background: "#fff1f2", padding: 10, borderRadius: 12 }}>
+                    ⚠️ Tu n’es pas connecté. La création du circuit échouera (created_by requis).
+                  </div>
+                )}
               </div>
             </div>
           </>
