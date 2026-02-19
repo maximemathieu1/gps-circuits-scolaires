@@ -5,7 +5,7 @@ function cors(req: Request) {
   const origin = req.headers.get("origin") ?? "*";
   return {
     "Access-Control-Allow-Origin": origin,
-    "Vary": "Origin",
+    Vary: "Origin",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Headers": "authorization, apikey, x-app-key, x-client-info, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -73,7 +73,7 @@ serve(async (req) => {
       const nom = (body.nom ?? "").trim();
       if (!nom) return json(req, 400, { error: "Nom requis" });
 
-      // ✅ IMPORTANT: created_by est NOT NULL dans ta table
+      // ✅ IMPORTANT: created_by est NOT NULL dans tes tables (circuits ET circuit_versions)
       // On le prend depuis created_by (ou user_id si tu l’envoies sous ce nom)
       const createdBy = (body.created_by ?? body.user_id ?? "").trim();
       if (!createdBy) {
@@ -87,13 +87,14 @@ serve(async (req) => {
         .insert({
           transporteur_code: body.transporteur_code,
           nom,
-          created_by: createdBy, // ✅ FIX
+          created_by: createdBy, // ✅ OK
         })
         .select("id")
         .single();
 
       if (e1 || !c) return json(req, 400, { error: e1?.message ?? "Erreur create_circuit" });
 
+      // ✅ FIX: created_by aussi dans circuit_versions
       const { data: v, error: e2 } = await supabase
         .from("circuit_versions")
         .insert({
@@ -101,6 +102,7 @@ serve(async (req) => {
           version_no: 1,
           is_active: true,
           note: "Version 1",
+          created_by: createdBy, // ✅ FIX
         })
         .select("id, version_no")
         .single();
@@ -121,6 +123,18 @@ serve(async (req) => {
     }
 
     if (body.action === "start_update") {
+      // ✅ Récupérer created_by depuis la table circuits (source de vérité)
+      const { data: cir, error: eCir } = await supabase
+        .from("circuits")
+        .select("created_by")
+        .eq("id", body.circuit_id)
+        .single();
+
+      if (eCir) return json(req, 400, { error: eCir.message });
+
+      const createdBy = String((cir as any)?.created_by ?? "").trim();
+      if (!createdBy) return json(req, 400, { error: "created_by introuvable pour ce circuit" });
+
       const { data: rows, error: eMax } = await supabase
         .from("circuit_versions")
         .select("version_no")
@@ -140,6 +154,7 @@ serve(async (req) => {
 
       if (eOff) return json(req, 400, { error: eOff.message });
 
+      // ✅ FIX: created_by aussi dans les nouvelles versions
       const { data: v, error: eNew } = await supabase
         .from("circuit_versions")
         .insert({
@@ -147,6 +162,7 @@ serve(async (req) => {
           version_no: nextNo,
           is_active: true,
           note: body.note ?? null,
+          created_by: createdBy, // ✅ FIX
         })
         .select("id, version_no")
         .single();
