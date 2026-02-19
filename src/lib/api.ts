@@ -25,23 +25,38 @@ function fnUrl(name: string) {
  * Appels Edge Functions (comme avant).
  * NOTE: on garde tes headers x-app-key + apikey.
  */
-export async function callFn<T>(fnName: "circuits-api" | "nav-api", payload: any): Promise<T> {
-  // ✅ si connecté, on utilise le token user (RLS/auth côté functions si tu l'utilises)
+export async function callFn<T>(
+  fnName: "circuits-api" | "nav-api",
+  payload: any
+): Promise<T> {
   const { data } = await supabase.auth.getSession();
   const accessToken = data.session?.access_token;
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    apikey: ANON_KEY,
+    "x-app-key": APP_KEY,
+  };
+
+  // ✅ seulement si user connecté
+  if (accessToken) {
+    headers["Authorization"] = `Bearer ${accessToken}`;
+  }
+
   const r = await fetch(fnUrl(fnName), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken || ANON_KEY}`,
-      apikey: ANON_KEY,
-      "x-app-key": APP_KEY,
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 
   const dataJson = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((dataJson as any)?.error ?? (dataJson as any)?.message ?? `HTTP ${r.status}`);
+  if (!r.ok)
+    throw new Error(
+      (dataJson as any)?.error ??
+        (dataJson as any)?.message ??
+        `HTTP ${r.status}`
+    );
+
   return dataJson as T;
 }
+
