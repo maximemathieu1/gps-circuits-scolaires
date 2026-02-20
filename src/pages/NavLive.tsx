@@ -14,7 +14,7 @@ import { page, container, card, h1, muted, row, btn, bigBtn } from "@/ui";
 type Step = {
   distance: number;
   duration: number;
-  name: string;
+  name: string; // nom de rue si dispo
   instruction: string;
   type: string;
   modifier: string;
@@ -184,6 +184,21 @@ function maneuverArrow(mod?: string) {
   return "⬆️";
 }
 
+/** Ajoute le nom de rue si dispo (et si pas déjà dans l'instruction) */
+function enrichInstruction(step: Step | undefined, meters: number) {
+  if (!step?.instruction) return "";
+  const base = (step.instruction ?? "").trim();
+  const name = (step.name ?? "").trim();
+
+  if (!name) return `${base} dans ${Math.round(meters)} mètres`;
+
+  const b = base.toLowerCase();
+  const n = name.toLowerCase();
+  const already = n.length >= 4 && b.includes(n);
+
+  return already ? `${base} dans ${Math.round(meters)} mètres` : `${base} sur ${name} dans ${Math.round(meters)} mètres`;
+}
+
 /** Ding court (WebAudio) — sans fichier externe */
 function playDing() {
   try {
@@ -263,19 +278,20 @@ export default function NavLive() {
   // Annonces
   const spokenNearStepRef = useRef<number | null>(null);
 
-  const stopWarn200Ref = useRef<number | null>(null);
+  const stopWarnRef = useRef<number | null>(null);
   const stopWarn50Ref = useRef<number | null>(null);
   const lastArrivedIdxRef = useRef<number | null>(null);
 
-  // ✅ Arrêt confirmé après immobilisation
-  const stopHoldRef = useRef<{ idx: number; since: number } | null>(null);
-
-  // Bandeau arrêt scolaire (UI)
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null }>({
+  // Bandeau arrêt scolaire (UI) — max figé + distance monotone
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
     show: false,
     meters: 0,
     label: null,
+    max: 150,
   });
+
+  const stopWarnMaxRef = useRef<number | null>(null); // 150 ou 200 figé pour l’arrêt courant
+  const stopBannerLastMRef = useRef<number | null>(null); // distance affichée monotone (descend seulement)
 
   // bearing fallback (optionnel)
   const lastMeForBearingRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -287,17 +303,20 @@ export default function NavLive() {
 
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
-  const WARN_STOP_M = 200;
-  const WARN_STOP_50_M = 60; // annonce "maintenant" ~50m
+
+  // 150m si <80 km/h, 200m si >=80 km/h
+  function warnStopMeters() {
+    const v = speedRef.current ?? null; // m/s
+    const kmh = v != null ? v * 3.6 : 0;
+    return kmh >= 80 ? 200 : 150;
+  }
+
+  const WARN_STOP_50_M = 60; // annonce "bientôt" ~50m
   const SAY_NEAR_M = 80;
   const STEP_ADVANCE_M = 14;
 
   const OFF_ROUTE_M = 35;
   const ON_ROUTE_M = 18;
-
-  const STOP_SPEED_MPS = 0.4; // ~1.4 km/h (arrêt complet)
-  const STOP_HOLD_MS = 2000; // ✅ 2 secondes immobile
-  const STOP_HYST_M = 12; // si on s'éloigne, on reset le hold
 
   // Warmup voix iOS
   useEffect(() => {
@@ -326,11 +345,13 @@ export default function NavLive() {
     offRouteStrikeRef.current = 0;
     lastRerouteAtRef.current = 0;
 
-    stopWarn200Ref.current = null;
+    stopWarnRef.current = null;
     stopWarn50Ref.current = null;
     lastArrivedIdxRef.current = null;
-    stopHoldRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null });
+
+    stopWarnMaxRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
 
     meSmoothRef.current = null;
     setFinished(false);
@@ -415,21 +436,19 @@ export default function NavLive() {
       return;
     }
 
-    const got = await new Promise<{ lat: number; lng: number; acc?: number | null; heading?: number | null }>(
-      (resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(
-          (p) =>
-            resolve({
-              lat: p.coords.latitude,
-              lng: p.coords.longitude,
-              acc: p.coords.accuracy ?? null,
-              heading: (p.coords as any).heading ?? null,
-            }),
-          (e) => reject(new Error(e.message)),
-          { enableHighAccuracy: true, maximumAge: 800, timeout: 15000 }
-        );
-      }
-    );
+    const got = await new Promise<{ lat: number; lng: number; acc?: number | null; heading?: number | null }>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        (p) =>
+          resolve({
+            lat: p.coords.latitude,
+            lng: p.coords.longitude,
+            acc: p.coords.accuracy ?? null,
+            heading: (p.coords as any).heading ?? null,
+          }),
+        (e) => reject(new Error(e.message)),
+        { enableHighAccuracy: true, maximumAge: 800, timeout: 15000 }
+      );
+    });
 
     const initial = { lat: got.lat, lng: got.lng };
     meSmoothRef.current = initial;
@@ -556,57 +575,59 @@ export default function NavLive() {
 
     const dStop = haversineMeters(me, target);
 
-    // Bandeau visuel (200m -> arrivée)
-    if (!finished && dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
-      setStopBanner({
-        show: true,
-        meters: Math.max(0, Math.round(dStop)),
-        label: target.label ?? null,
-      });
-    } else {
-      setStopBanner((s) => (s.show ? { show: false, meters: 0, label: null } : s));
+    // ✅ Détermine 150/200 selon vitesse (mais on FIGE le max dès qu'on entre dans la zone)
+    const dynamicMax = warnStopMeters();
+    if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
+    const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
+
+    const rawMeters = Math.round(dStop);
+
+    // ✅ Si on est hors zone, on cache le bandeau et on reset monotone (mais on garde WARN_STOP_M figé)
+    if (rawMeters > WARN_STOP_M) {
+      if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
+      stopBannerLastMRef.current = null;
     }
 
-    // ✅ Annonce arrêt à 200m (ding + voix) — une seule fois
-    if (!finished && dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
-      if (stopWarn200Ref.current !== targetIdx) {
-        stopWarn200Ref.current = targetIdx;
+    // ✅ Dans la zone : distance monotone (ne remonte JAMAIS)
+    if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
+      const prevShown = stopBannerLastMRef.current;
+      let shown = prevShown == null ? rawMeters : Math.min(prevShown, rawMeters);
+
+      // arrondit aux 5m pour éviter le jitter visuel
+      shown = Math.round(shown / 5) * 5;
+
+      stopBannerLastMRef.current = shown;
+
+      setStopBanner({
+        show: true,
+        meters: shown,
+        label: target.label ?? null,
+        max: WARN_STOP_M,
+      });
+    } else {
+      if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
+      stopBannerLastMRef.current = null;
+    }
+
+    // ✅ Annonce arrêt à 150/200 (figé) — une seule fois
+    if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
+      if (stopWarnRef.current !== targetIdx) {
+        stopWarnRef.current = targetIdx;
         playDing();
-        speak("Ralentissez. Arrêt scolaire dans deux cents mètres.");
+        speak(`Ralentissez. Arrêt scolaire dans ${WARN_STOP_M} mètres.`);
       }
     }
 
-    // ✅ Annonce arrêt "maintenant" ~50m — une seule fois
-    if (!finished && dStop <= WARN_STOP_50_M && dStop > ARRIVE_STOP_M) {
+    // ✅ Annonce arrêt "bientôt" ~50m — une seule fois
+    if (!finished && rawMeters <= WARN_STOP_50_M && rawMeters > ARRIVE_STOP_M) {
       if (stopWarn50Ref.current !== targetIdx) {
         stopWarn50Ref.current = targetIdx;
         speak("Arrêt scolaire bientôt. Préparez-vous à vous arrêter.");
       }
     }
 
-    // ✅ Arrivée: seulement après 2 secondes IMMOBILE proche de l'arrêt
-    const v = speedRef.current; // m/s (peut être null)
-    const isStopped = v == null ? true : v <= STOP_SPEED_MPS;
-
+    // ✅ Arrivée arrêt (SANS règle d'arrêt complet) — pour enchaîner correctement
     if (!finished && dStop <= ARRIVE_STOP_M) {
-      const now = Date.now();
-
-      // si pas arrêté -> on reset le hold
-      if (!isStopped) {
-        stopHoldRef.current = null;
-        return;
-      }
-
-      // démarrage / maintien du "hold"
-      if (!stopHoldRef.current || stopHoldRef.current.idx !== targetIdx) {
-        stopHoldRef.current = { idx: targetIdx, since: now };
-        return;
-      }
-
-      // hold atteint?
-      if (now - stopHoldRef.current.since < STOP_HOLD_MS) return;
-
-      // confirmé
       if (lastArrivedIdxRef.current !== targetIdx) {
         lastArrivedIdxRef.current = targetIdx;
 
@@ -618,10 +639,12 @@ export default function NavLive() {
           speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`);
           setTargetIdx(next);
 
-          stopWarn200Ref.current = null;
+          // reset annonces + UI + max figé pour le prochain arrêt
+          stopWarnRef.current = null;
           stopWarn50Ref.current = null;
-          stopHoldRef.current = null;
-          setStopBanner({ show: false, meters: 0, label: null });
+          stopWarnMaxRef.current = null;
+          stopBannerLastMRef.current = null;
+          setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
           if (nextTarget) {
             calcRoute(me, nextTarget).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
@@ -629,17 +652,16 @@ export default function NavLive() {
         } else {
           speak("Circuit terminé.");
           setFinished(true);
-          stopHoldRef.current = null;
-          setStopBanner({ show: false, meters: 0, label: null });
+
+          stopWarnMaxRef.current = null;
+          stopBannerLastMRef.current = null;
+          setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
         }
       }
       return;
-    } else {
-      // si on s'éloigne un peu, on reset le hold
-      if (dStop > ARRIVE_STOP_M + STOP_HYST_M) stopHoldRef.current = null;
     }
 
-    // ✅ Instructions Mapbox (1 seule annonce proche, pas de “NOW”)
+    // ✅ Instructions Mapbox (1 seule annonce proche, + nom de rue)
     if (finished) return;
 
     const currStep = steps[stepIdx];
@@ -650,7 +672,7 @@ export default function NavLive() {
     if (dManeuver <= SAY_NEAR_M) {
       if (spokenNearStepRef.current !== stepIdx) {
         spokenNearStepRef.current = stepIdx;
-        speak(`${currStep.instruction} dans ${Math.round(dManeuver)} mètres`);
+        speak(enrichInstruction(currStep, dManeuver));
       }
     }
 
@@ -678,11 +700,14 @@ export default function NavLive() {
             </div>
 
             {/* ✅ SEULS BOUTONS AUTORISÉS */}
-           <div>
-  <button style={btn("ghost")} onClick={() => nav("/")}>
-    Retour
-  </button>
-</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={btn("ghost")} onClick={() => nav("/")}>
+                Retour
+              </button>
+              <button style={btn("ghost")} onClick={stop}>
+                Terminer
+              </button>
+            </div>
           </div>
         </div>
 
@@ -696,95 +721,94 @@ export default function NavLive() {
           </div>
         ) : (
           <div style={{ ...card, position: "relative" }}>
-            {/* Bandeau Waze-like + barre progression intelligente */}
-            {stopBanner.show && (() => {
-              const MAX = 200;
-              const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
-              const m = Math.max(0, Math.min(MAX, Math.round(meters)));
-              const pct = Math.round((1 - m / MAX) * 100);
+            {/* Bandeau Waze-like + barre progression intelligente (MAX figé 150/200) */}
+            {stopBanner.show &&
+              (() => {
+                const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
+                const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
+                const m = Math.max(0, Math.min(MAX, Math.round(meters)));
+                const pct = Math.round((1 - m / MAX) * 100);
 
-              let bg = "#FBBF24";
-              let accent = "#111827";
-              let iconBg = "#111827";
-              let iconColor = "#FBBF24";
+                let bg = "#FBBF24";
+                let accent = "#111827";
+                let iconBg = "#111827";
+                let iconColor = "#FBBF24";
 
-              if (m <= 40) {
-                bg = "#EF4444";
-                accent = "#ffffff";
-                iconBg = "#ffffff";
-                iconColor = "#EF4444";
-              } else if (m <= 80) {
-                bg = "#F97316";
-                accent = "#111827";
-                iconBg = "#111827";
-                iconColor = "#F97316";
-              }
+                if (m <= 40) {
+                  bg = "#EF4444";
+                  accent = "#ffffff";
+                  iconBg = "#ffffff";
+                  iconColor = "#EF4444";
+                } else if (m <= 80) {
+                  bg = "#F97316";
+                  accent = "#111827";
+                  iconBg = "#111827";
+                  iconColor = "#F97316";
+                }
 
-              const pulse = m <= 40;
+                const pulse = m <= 40;
 
-              return (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: 10,
-                    left: 10,
-                    right: 10,
-                    zIndex: 9999,
-                    background: bg,
-                    color: accent,
-                    border: "1px solid rgba(0,0,0,.12)",
-                    borderRadius: 14,
-                    padding: "10px 12px",
-                    boxShadow: pulse
-                      ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)"
-                      : "0 8px 22px rgba(0,0,0,.18)",
-                    display: "grid",
-                    gap: 8,
-                    transition: "background 180ms ease, box-shadow 180ms ease",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div
-                      style={{
-                        width: 34,
-                        height: 34,
-                        borderRadius: 12,
-                        background: iconBg,
-                        color: iconColor,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 18,
-                        fontWeight: 900,
-                        transition: "all 180ms ease",
-                      }}
-                      aria-hidden
-                    >
-                      🧒
-                    </div>
+                return (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 10,
+                      left: 10,
+                      right: 10,
+                      zIndex: 9999,
+                      background: bg,
+                      color: accent,
+                      border: "1px solid rgba(0,0,0,.12)",
+                      borderRadius: 14,
+                      padding: "10px 12px",
+                      boxShadow: pulse
+                        ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)"
+                        : "0 8px 22px rgba(0,0,0,.18)",
+                      display: "grid",
+                      gap: 8,
+                      transition: "background 180ms ease, box-shadow 180ms ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 12,
+                          background: iconBg,
+                          color: iconColor,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 18,
+                          fontWeight: 900,
+                          transition: "all 180ms ease",
+                        }}
+                        aria-hidden
+                      >
+                        🧒
+                      </div>
 
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
-                      <div style={{ fontSize: 12, opacity: 0.85 }}>
-                        {stopBanner.label ?? "Zone d’embarquement / débarquement"}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                       </div>
                     </div>
-                  </div>
 
-                  <div style={{ height: 10, borderRadius: 999, background: "rgba(0,0,0,.2)", overflow: "hidden" }}>
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${pct}%`,
-                        background: accent,
-                        borderRadius: 999,
-                        transition: "width 140ms linear, background 180ms ease",
-                      }}
-                    />
+                    <div style={{ height: 10, borderRadius: 999, background: "rgba(0,0,0,.2)", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${pct}%`,
+                          background: accent,
+                          borderRadius: 999,
+                          transition: "width 140ms linear, background 180ms ease",
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
-              );
-            })()}
+                );
+              })()}
 
             {/* Affichage “conduite” gros, simple */}
             <div style={{ display: "grid", gap: 10, paddingTop: 70 }}>
@@ -807,6 +831,13 @@ export default function NavLive() {
                   <div style={{ fontWeight: 950, fontSize: 28, lineHeight: "32px" }}>
                     {finished ? "✅ Circuit terminé" : nextStep?.instruction ? nextStep.instruction : "…"}
                   </div>
+
+                  {!finished && nextStep?.name && (
+                    <div style={{ fontSize: 18, opacity: 0.75, marginTop: 6 }}>
+                      <b>{nextStep.name}</b>
+                    </div>
+                  )}
+
                   {!finished && me && nextStep?.location && (
                     <div style={{ fontSize: 22, opacity: 0.8, marginTop: 6 }}>
                       dans <b>{Math.round(haversineMeters(me, nextStep.location))} m</b>
