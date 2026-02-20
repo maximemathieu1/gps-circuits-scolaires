@@ -14,10 +14,10 @@ import { page, container, card, h1, muted, row, btn, bigBtn } from "@/ui";
 type Step = {
   distance: number;
   duration: number;
-  name?: string;
+  name: string; // nom de rue si dispo
   instruction: string;
-  type?: string;
-  modifier?: string;
+  type: string;
+  modifier: string;
   location: { lat: number; lng: number };
 };
 
@@ -150,91 +150,10 @@ function minDistanceToPolylineMeters(me: { lat: number; lng: number }, line: [nu
 }
 
 /* =========================
-   Audio / Speech
+   Voix + Ding
 ========================= */
 
-const speechUnlockedRef = { current: false };
-const speechCooldownRef = { current: 0 };
-const lastSpokenTextRef = { current: "" };
-
-async function unlockAudioAndSpeech() {
-  try {
-    const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
-    if (AC) {
-      const ctx = new AC();
-      try {
-        if (ctx.state === "suspended") await ctx.resume();
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        g.gain.value = 0.00001;
-        o.connect(g);
-        g.connect(ctx.destination);
-        o.start();
-        o.stop(ctx.currentTime + 0.02);
-        o.onended = () => {
-          try {
-            ctx.close?.();
-          } catch {}
-        };
-      } catch {
-        try {
-          ctx.close?.();
-        } catch {}
-      }
-    }
-  } catch {}
-
-  try {
-    window.speechSynthesis.getVoices();
-  } catch {}
-
-  speechUnlockedRef.current = true;
-}
-
-/** Voix robuste + anti-empilement */
-function speak(text: string, opts?: { interrupt?: boolean; minGapMs?: number }) {
-  try {
-    const t = (text ?? "").trim();
-    if (!t) return;
-    if (!speechUnlockedRef.current) return;
-
-    const now = Date.now();
-    const minGap = opts?.minGapMs ?? 2500;
-
-    if (t === lastSpokenTextRef.current && now - speechCooldownRef.current < minGap) return;
-    if (now - speechCooldownRef.current < minGap) return;
-
-    if (opts?.interrupt) {
-      try {
-        window.speechSynthesis.cancel();
-      } catch {}
-    } else {
-      try {
-        if (window.speechSynthesis.speaking) return;
-      } catch {}
-    }
-
-    const u = new SpeechSynthesisUtterance(t);
-    const voices = window.speechSynthesis.getVoices?.() ?? [];
-    const pick =
-      voices.find((v) => (v.lang || "").toLowerCase() === "fr-ca") ||
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("fr")) ||
-      voices[0];
-
-    if (pick) u.voice = pick;
-    u.lang = pick?.lang || "fr-CA";
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    u.volume = 1.0;
-
-    speechCooldownRef.current = now;
-    lastSpokenTextRef.current = t;
-
-    window.speechSynthesis.speak(u);
-  } catch {}
-}
-
-/** Ding court (WebAudio) */
+/** Ding court (WebAudio) — sans fichier externe */
 function playDing() {
   try {
     const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
@@ -264,24 +183,123 @@ function playDing() {
   } catch {}
 }
 
-/* =========================
-   Simple “direction générale”
-========================= */
+/** Voix "béton" + anti-spam + fallback FR */
+function useSpeaker() {
+  const lastSpeakAtRef = useRef(0);
 
-function headingToArrow(deltaDeg: number) {
-  const d = deltaDeg;
-  if (Math.abs(d) <= 18) return { arrow: "⬆️", text: "Continue tout droit" };
-  if (d > 18 && d <= 55) return { arrow: "↗️", text: "Légèrement à droite" };
-  if (d < -18 && d >= -55) return { arrow: "↖️", text: "Légèrement à gauche" };
-  if (d > 55) return { arrow: "➡️", text: "Tourne à droite" };
-  return { arrow: "⬅️", text: "Tourne à gauche" };
+  // warmup iOS
+  useEffect(() => {
+    try {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+    } catch {}
+  }, []);
+
+  function speak(text: string, opts?: { cooldownMs?: number; interrupt?: boolean }) {
+    try {
+      const t = (text ?? "").trim();
+      if (!t) return;
+
+      const now = Date.now();
+      const cooldownMs = opts?.cooldownMs ?? 1200;
+
+      if (now - lastSpeakAtRef.current < cooldownMs) return;
+      lastSpeakAtRef.current = now;
+
+      // interrupt par défaut pour éviter l’empilement
+      const interrupt = opts?.interrupt ?? true;
+      if (interrupt) window.speechSynthesis.cancel();
+
+      const u = new SpeechSynthesisUtterance(t);
+
+      const voices = window.speechSynthesis.getVoices?.() ?? [];
+      const pick =
+        voices.find((v) => (v.lang || "").toLowerCase() === "fr-ca") ||
+        voices.find((v) => (v.lang || "").toLowerCase().startsWith("fr")) ||
+        voices[0];
+
+      if (pick) u.voice = pick;
+      u.lang = pick?.lang || "fr-CA";
+
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.volume = 1.0;
+
+      window.speechSynthesis.speak(u);
+    } catch {}
+  }
+
+  function stopAll() {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {}
+  }
+
+  return { speak, stopAll };
 }
 
-function deltaBearingDeg(fromDeg: number, toDeg: number) {
-  let d = normDeg(toDeg) - normDeg(fromDeg);
-  if (d > 180) d -= 360;
-  if (d < -180) d += 360;
-  return d;
+/** Ajoute le nom de rue si dispo (et si pas déjà dans l'instruction) */
+function enrichInstruction(step: Step | undefined) {
+  if (!step?.instruction) return "";
+  const base = (step.instruction ?? "").trim();
+  const name = (step.name ?? "").trim();
+
+  if (!name) return base;
+
+  const b = base.toLowerCase();
+  const n = name.toLowerCase();
+  const already = n.length >= 4 && b.includes(n);
+
+  return already ? base : `${base} sur ${name}`;
+}
+
+/** Filtre "légèrement" : on garde juste si bretelle/sortie, sinon c'est mêlant */
+function isRampLike(step: Step) {
+  const t = (step.type || "").toLowerCase();
+  const i = (step.instruction || "").toLowerCase();
+  const n = (step.name || "").toLowerCase();
+  const keywords = ["bretelle", "rampe", "sortie", "entrée", "autoroute", "merge", "fork", "ramp", "exit", "slip", "junction"];
+  return keywords.some((k) => t.includes(k) || i.includes(k) || n.includes(k));
+}
+
+function isMinorSlight(step: Step) {
+  const m = (step.modifier || "").toLowerCase();
+  const isSlight = m.includes("slight") || m.includes("bear") || m.includes("keep");
+  if (!isSlight) return false;
+  if (isRampLike(step)) return false; // OK on garde pour bretelles
+  if (step.distance != null && step.distance < 180) return true;
+  if (step.duration != null && step.duration < 20) return true;
+  return true;
+}
+
+function normalizeInstruction(step: Step | undefined) {
+  if (!step?.instruction) return "";
+
+  if (isMinorSlight(step)) {
+    return step.name ? `Continuez sur ${step.name}` : "Continuez tout droit";
+  }
+
+  const m = (step.modifier || "").toLowerCase();
+
+  if (m.includes("uturn")) return "Faites demi-tour";
+  if (m.includes("left")) return step.name ? `Tournez à gauche sur ${step.name}` : "Tournez à gauche";
+  if (m.includes("right")) return step.name ? `Tournez à droite sur ${step.name}` : "Tournez à droite";
+
+  if ((m.includes("slight") || m.includes("bear") || m.includes("keep")) && isRampLike(step)) {
+    const dir = m.includes("left") ? "à gauche" : m.includes("right") ? "à droite" : "";
+    if (step.name) return dir ? `Prenez la bretelle ${dir} vers ${step.name}` : `Prenez la bretelle vers ${step.name}`;
+    return dir ? `Prenez la bretelle ${dir}` : "Prenez la bretelle";
+  }
+
+  return step.name ? `Continuez sur ${step.name}` : "Continuez tout droit";
+}
+
+function maneuverArrow(mod?: string) {
+  const m = (mod || "").toLowerCase();
+  if (m.includes("uturn")) return "⤴️";
+  if (m.includes("left")) return "⬅️";
+  if (m.includes("right")) return "➡️";
+  return "⬆️";
 }
 
 /* =========================
@@ -291,6 +309,7 @@ function deltaBearingDeg(fromDeg: number, toDeg: number) {
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
+  const { speak, stopAll } = useSpeaker();
 
   const circuitId = q.get("circuit") || "";
 
@@ -314,29 +333,29 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Trace officielle (trajet habituel) — pour “hors trace”
+  // Trace officielle (trajet habituel)
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Off-route
+  // Route Mapbox (guidage texte)
+  const [routeLine, setRouteLine] = useState<[number, number][]>([]);
+  const [steps, setSteps] = useState<Step[]>([]);
+  const [stepIdx, setStepIdx] = useState(0);
+
+  // Off-route + reroute anti-stress (texte)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
+  const offRouteStrikeRef = useRef(0);
+  const lastRerouteAtRef = useRef(0);
 
   const { supported: wlSupported, active: wlActive } = useWakeLock(running);
 
-  // Stop alerts (1 seule annonce + ding 10m)
-  const stopWarnRef = useRef<number | null>(null);
-  const stopWarnMaxRef = useRef<number | null>(null); // 150/200 figé
-  const stopBannerLastMRef = useRef<number | null>(null); // distance monotone
-  const stopDing10Ref = useRef<number | null>(null);
+  // ✅ annonces : 1 seule fois
+  const spokenStepRef = useRef<number | null>(null); // step annoncé une seule fois
+  const stopWarnRef = useRef<number | null>(null); // annonce 150/200 une seule fois
+  const stopWarnMaxRef = useRef<number | null>(null); // 150 ou 200 figé pour l’arrêt courant
 
-  // Direction (cap)
-  const lastRawRef = useRef<{ lat: number; lng: number } | null>(null);
-  const bearingMoveRef = useRef<number | null>(null);
-
-  // ✅ Instruction de DÉPART (1ère manœuvre Mapbox seulement)
-  const [departStep, setDepartStep] = useState<Step | null>(null);
-  const departSpokenRef = useRef(false);
-  const departDoneRef = useRef(false);
+  // ✅ ding 10m avant arrêt (une seule fois)
+  const stopDingRef = useRef<number | null>(null);
 
   // Bandeau arrêt scolaire (UI) — max figé + distance monotone
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
@@ -345,35 +364,35 @@ export default function NavLive() {
     label: null,
     max: 150,
   });
+  const stopBannerLastMRef = useRef<number | null>(null);
+
+  // bearing fallback (optionnel)
+  const lastMeForBearingRef = useRef<{ lat: number; lng: number } | null>(null);
+  const bearingRef = useRef<number | null>(null);
+
+  // Cache route Mapbox
+  const routeCacheRef = useRef(new Map<string, { line: [number, number][]; steps: Step[]; at: number }>());
+  const routeInFlightRef = useRef<AbortController | null>(null);
 
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
 
+  // 150m si <80 km/h, 200m si >=80 km/h (figé dès entrée dans zone)
   function warnStopMeters() {
     const v = speedRef.current ?? null; // m/s
     const kmh = v != null ? v * 3.6 : 0;
     return kmh >= 80 ? 200 : 150;
   }
 
+  // ✅ une seule annonce de virage : quand on est “près” du manoeuvre
+  const TURN_SPEAK_AT_M = 55; // annonce unique ~55m
+  const STEP_ADVANCE_M = 14; // passer au step suivant
   const OFF_ROUTE_M = 35;
   const ON_ROUTE_M = 18;
 
-  // quand on commence à rouler
-  const START_SPEAK_KMH = 5;
-  // si on s’approche de la manœuvre
-  const DEPART_SAY_WITHIN_M = 220;
-  // quand on a dépassé la manœuvre
-  const DEPART_DONE_WITHIN_M = 18;
+  const DING_AT_M = 10; // ✅ ding 10m avant arrêt
 
-  // Warmup voix iOS
-  useEffect(() => {
-    try {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-    } catch {}
-  }, []);
-
-  async function loadCircuit(): Promise<{ initialTarget: { lat: number; lng: number } | null }> {
+  async function loadCircuit(): Promise<{ pts: { lat: number; lng: number; label?: string | null }[]; hasOfficial: boolean }> {
     if (!circuitId) throw new Error("Circuit manquant.");
 
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
@@ -383,28 +402,33 @@ export default function NavLive() {
     setPoints(pts);
     setTargetIdx(0);
 
+    setStepIdx(0);
+    setSteps([]);
+    setRouteLine([]);
+    spokenStepRef.current = null;
+
     setOffRouteM(null);
+    offRouteStrikeRef.current = 0;
+    lastRerouteAtRef.current = 0;
 
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+
     stopBannerLastMRef.current = null;
-    stopDing10Ref.current = null;
     setStopBanner({ show: false, meters: 0, label: null, max: 150 });
 
-    // reset départ
-    setDepartStep(null);
-    departSpokenRef.current = false;
-    departDoneRef.current = false;
-
+    meSmoothRef.current = null;
     setFinished(false);
 
-    // trace officielle optionnelle
+    let ok = false;
     try {
       const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
       const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
       if (line.length >= 2) {
         setOfficialLine(line);
         setHasOfficial(true);
+        ok = true;
       } else {
         setOfficialLine([]);
         setHasOfficial(false);
@@ -414,17 +438,58 @@ export default function NavLive() {
       setHasOfficial(false);
     }
 
-    return { initialTarget: pts[0] ? { lat: pts[0].lat, lng: pts[0].lng } : null };
+    return { pts, hasOfficial: ok };
   }
 
-  async function calcDepartureStep(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+  function cacheKey(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+    const rf = (v: number) => Math.round(v * 10000) / 10000;
+    return `${rf(from.lat)},${rf(from.lng)}->${rf(to.lat)},${rf(to.lng)}`;
+  }
+
+  async function calcRoute(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
     try {
-      const r = await callFn<{ steps: Step[] }>("nav-api", { action: "route", from, to });
-      const steps = r.steps ?? [];
-      const first = steps.find((s) => s?.instruction && s?.location) ?? null;
-      setDepartStep(first);
-    } catch {
-      setDepartStep(null);
+      routeInFlightRef.current?.abort();
+    } catch {}
+    const ctl = new AbortController();
+    routeInFlightRef.current = ctl;
+
+    const key = cacheKey(from, to);
+    const cached = routeCacheRef.current.get(key);
+    const now = Date.now();
+
+    if (cached && now - cached.at < 10 * 60 * 1000 && cached.line.length >= 2) {
+      setRouteLine(cached.line);
+      setSteps(cached.steps);
+      setStepIdx(0);
+      spokenStepRef.current = null;
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      try {
+        ctl.abort();
+      } catch {}
+    }, 8000);
+
+    try {
+      const r = await callFn<{ geometry: any; steps: Step[] }>(
+        "nav-api",
+        { action: "route", from, to },
+        // @ts-ignore
+        { signal: ctl.signal }
+      );
+
+      const coords: [number, number][] = (r.geometry?.coordinates ?? []).map((c: any) => [c[1], c[0]]);
+      const st = r.steps ?? [];
+
+      setRouteLine(coords);
+      setSteps(st);
+      setStepIdx(0);
+      spokenStepRef.current = null;
+
+      routeCacheRef.current.set(key, { line: coords, steps: st, at: now });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -436,15 +501,14 @@ export default function NavLive() {
       return;
     }
 
-    await unlockAudioAndSpeech();
-
-    const got = await new Promise<{ lat: number; lng: number; acc?: number | null }>((resolve, reject) => {
+    const got = await new Promise<{ lat: number; lng: number; acc?: number | null; heading?: number | null }>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
         (p) =>
           resolve({
             lat: p.coords.latitude,
             lng: p.coords.longitude,
             acc: p.coords.accuracy ?? null,
+            heading: (p.coords as any).heading ?? null,
           }),
         (e) => reject(new Error(e.message)),
         { enableHighAccuracy: true, maximumAge: 800, timeout: 15000 }
@@ -458,26 +522,56 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    lastRawRef.current = initial;
-    bearingMoveRef.current = null;
+    if (got.heading != null && Number.isFinite(got.heading)) bearingRef.current = normDeg(got.heading as number);
 
-    const { initialTarget } = await loadCircuit();
+    const { pts } = await loadCircuit();
 
-    // ✅ calc 1ère manœuvre (départ) seulement
-    if (initialTarget) {
-      await calcDepartureStep(initial, initialTarget);
+    const firstTarget = pts[0] ?? null;
+    if (firstTarget) {
+      try {
+        await calcRoute(initial, firstTarget);
+
+        // ✅ annonce départ: première instruction tout de suite si dispo (garage/parking)
+        const first = (steps?.[0] ?? null) as any;
+        // (steps est state, donc pas à jour immédiatement) -> on annonce après calcRoute via un micro-timeout
+        setTimeout(() => {
+          try {
+            // on lit la dernière version de steps via state (sera rendu)
+            // on force une annonce courte: "Pour débuter..."
+            // (si ça n'existe pas encore, ça ne parlera pas)
+          } catch {}
+        }, 50);
+      } catch (e: any) {
+        setErr(e?.message ?? "Erreur itinéraire");
+      }
     }
 
     setRunning(true);
-    speak("Navigation démarrée.", { interrupt: true, minGapMs: 800 });
+    speak("Navigation démarrée.", { cooldownMs: 300, interrupt: true });
   }
 
   function stop() {
     setRunning(false);
     try {
-      window.speechSynthesis.cancel();
+      routeInFlightRef.current?.abort();
     } catch {}
+    stopAll();
   }
+
+  // ✅ annonce départ (premier step) quand steps arrive (parking/garage)
+  const saidStartRef = useRef(false);
+  useEffect(() => {
+    if (!running) return;
+    if (saidStartRef.current) return;
+    if (!steps || steps.length === 0) return;
+
+    const s0 = steps[0];
+    const phrase = normalizeInstruction(s0);
+    if (phrase) {
+      saidStartRef.current = true;
+      speak(`Pour débuter, ${phrase}.`, { cooldownMs: 800, interrupt: true });
+    }
+  }, [running, steps, speak]);
 
   // GPS tracking (avec lissage position)
   useEffect(() => {
@@ -491,6 +585,7 @@ export default function NavLive() {
 
         const v = p.speed ?? null;
         const alpha = v != null ? clamp(0.18 + v * 0.02, 0.18, 0.38) : 0.22;
+
         const sm = smoothPos(meSmoothRef.current, raw, alpha);
         meSmoothRef.current = sm;
         setMe(sm);
@@ -500,16 +595,21 @@ export default function NavLive() {
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
-        // bearing “mouvement” basé sur 2 positions
-        const last = lastRawRef.current;
-        if (last) {
-          const moved = haversineMeters(last, raw);
-          if (moved >= 6) {
-            bearingMoveRef.current = bearingDeg(last, raw);
-            lastRawRef.current = raw;
-          }
+        const hd = p.heading;
+        if (hd != null && Number.isFinite(hd)) {
+          bearingRef.current = normDeg(hd);
+          lastMeForBearingRef.current = raw;
         } else {
-          lastRawRef.current = raw;
+          const last = lastMeForBearingRef.current;
+          if (last) {
+            const moved = haversineMeters(raw, last);
+            if (moved >= 10) {
+              bearingRef.current = bearingDeg(last, raw);
+              lastMeForBearingRef.current = raw;
+            }
+          } else {
+            lastMeForBearingRef.current = raw;
+          }
         }
       },
       (m) => setErr(m)
@@ -520,54 +620,44 @@ export default function NavLive() {
     };
   }, [running]);
 
-  // Off-route (sur trace officielle si dispo)
+  // ✅ REROUTE ANTI-STRESS (silencieux)
   useEffect(() => {
     if (!running) return;
-    if (!me) return;
-
-    if (hasOfficial && officialLine.length >= 2) {
-      const d = minDistanceToPolylineMeters(me, officialLine);
-      setOffRouteM(d);
-    } else {
-      setOffRouteM(null);
-    }
-  }, [running, me, hasOfficial, officialLine]);
-
-  // ✅ Instruction de départ : annonce UNE fois quand on commence à rouler + proche de la manœuvre
-  useEffect(() => {
-    if (!running) return;
+    if (!me || !target) return;
     if (finished) return;
-    if (!me) return;
-    if (!departStep) return;
-    if (departDoneRef.current) return;
+
+    const lineForOffRoute = hasOfficial && officialLine.length >= 2 ? officialLine : routeLine.length >= 2 ? routeLine : null;
+    if (!lineForOffRoute) return;
+
+    const dLine = minDistanceToPolylineMeters(me, lineForOffRoute);
+    setOffRouteM(dLine);
+
+    const a = accRef.current ?? null;
+    if (a != null && a > 35) return;
 
     const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    if (kmh < START_SPEAK_KMH) return;
+    if (v != null && v < 1.2) return;
 
-    const d = haversineMeters(me, departStep.location);
+    const now = Date.now();
 
-    // parler une seule fois quand on est raisonnablement proche
-    if (!departSpokenRef.current && d <= DEPART_SAY_WITHIN_M) {
-      departSpokenRef.current = true;
+    const isOff = dLine != null && dLine > OFF_ROUTE_M;
+    if (isOff) offRouteStrikeRef.current += 1;
+    else if (dLine != null && dLine < ON_ROUTE_M) offRouteStrikeRef.current = 0;
 
-      const street = (departStep.name ?? "").trim();
-      const base = departStep.instruction.trim();
-      const txt = street && !base.toLowerCase().includes(street.toLowerCase())
-        ? `${base} sur ${street}.`
-        : `${base}.`;
+    const COOLDOWN_MS = 12000;
+    if (now - lastRerouteAtRef.current < COOLDOWN_MS) return;
 
-      speak(`Départ. ${txt}`, { interrupt: false, minGapMs: 2200 });
-    }
+    const needHelp = offRouteStrikeRef.current >= 3;
+    if (!needHelp) return;
 
-    // considérer “fait” quand on arrive à la manœuvre
-    if (d <= DEPART_DONE_WITHIN_M) {
-      departDoneRef.current = true;
-      setDepartStep(null);
-    }
-  }, [running, finished, me, departStep]);
+    lastRerouteAtRef.current = now;
+    offRouteStrikeRef.current = 0;
 
-  // Arrêts + bandeau + annonces (1 seule annonce + ding 10m)
+    calcRoute(me, target).catch((e: any) => setErr(e?.message ?? "Erreur reroute"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, me, targetIdx, hasOfficial, officialLine, routeLine, finished]);
+
+  // Arrêts + bandeau + annonces + steps
   useEffect(() => {
     if (!running) return;
     if (!me || !target) return;
@@ -575,101 +665,127 @@ export default function NavLive() {
     const dStop = haversineMeters(me, target);
     const rawMeters = Math.round(dStop);
 
-    // max 150/200 figé pour l’arrêt courant
+    // ✅ Détermine 150/200 selon vitesse (FIGÉ dès qu'on entre dans la zone)
     const dynamicMax = warnStopMeters();
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // hors zone => reset monotone
+    // si hors zone : on cache + reset monotone
     if (rawMeters > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
-      stopDing10Ref.current = null;
     }
 
-    // bandeau monotone + arrondi 5m
+    // ✅ dans zone : distance monotone (descend seulement) + arrondit 5m
     if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawMeters : Math.min(prevShown, rawMeters);
       shown = Math.round(shown / 5) * 5;
 
       stopBannerLastMRef.current = shown;
-      setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
+
+      setStopBanner({
+        show: true,
+        meters: shown,
+        label: target.label ?? null,
+        max: WARN_STOP_M,
+      });
     } else {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    // ✅ une seule annonce d’approche (150/200)
+    // ✅ Une seule annonce arrêt à 150/200
     if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        speak(`Ralentissez. Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { interrupt: true, minGapMs: 1800 });
+        speak(`Ralentissez. Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1500, interrupt: true });
       }
     }
 
-    // ✅ ding 10m avant l’arrêt
-    if (!finished && rawMeters <= 10 && rawMeters > 0) {
-      if (stopDing10Ref.current !== targetIdx) {
-        stopDing10Ref.current = targetIdx;
+    // ✅ Ding 10m avant l’arrêt (une seule fois)
+    if (!finished && rawMeters <= DING_AT_M && rawMeters > 1) {
+      if (stopDingRef.current !== targetIdx) {
+        stopDingRef.current = targetIdx;
         playDing();
       }
     }
 
-    // arrivée arrêt => enchaîne
+    // ✅ Arrivée arrêt (SANS règle d'arrêt complet)
     if (!finished && dStop <= ARRIVE_STOP_M) {
-      const next = targetIdx + 1;
+      setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
+      const next = targetIdx + 1;
       if (next < points.length) {
         const nextTarget = points[next] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
 
-        speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`, { interrupt: true, minGapMs: 1800 });
-
+        speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`, { cooldownMs: 1500, interrupt: true });
         setTargetIdx(next);
 
+        // reset pour prochain arrêt
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
         stopBannerLastMRef.current = null;
-        stopDing10Ref.current = null;
-        setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+        stopDingRef.current = null;
 
-        // reset départ (si jamais on veut une instruction de départ pour le prochain segment -> NON)
-        // on ne recalcule PAS de steps, on reste simple.
+        // reset step
+        spokenStepRef.current = null;
+
+        saidStartRef.current = false; // ✅ re-annonce départ du segment suivant
+        if (nextTarget) {
+          calcRoute(me, nextTarget).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
+        }
       } else {
-        speak("Circuit terminé.", { interrupt: true, minGapMs: 1800 });
+        speak("Circuit terminé.", { cooldownMs: 1500, interrupt: true });
         setFinished(true);
 
         stopWarnMaxRef.current = null;
         stopBannerLastMRef.current = null;
-        stopDing10Ref.current = null;
-        setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+        stopDingRef.current = null;
+      }
+      return;
+    }
+
+    // ✅ Instructions Mapbox : UNE SEULE FOIS, au virage, avec filtre "slight"
+    if (finished) return;
+
+    const currStep = steps[stepIdx];
+    if (!currStep?.location) return;
+
+    const dManeuver = haversineMeters(me, currStep.location);
+
+    // annonce unique à ~55m (pas 3 fois)
+    if (dManeuver <= TURN_SPEAK_AT_M) {
+      if (spokenStepRef.current !== stepIdx) {
+        spokenStepRef.current = stepIdx;
+
+        // ✅ phrase normalisée (pas "légèrement" inutile)
+        const phrase = normalizeInstruction(currStep);
+        if (phrase) {
+          speak(`${phrase} dans ${Math.round(dManeuver)} mètres`, { cooldownMs: 1300, interrupt: true });
+        }
       }
     }
-  }, [running, me, target, targetIdx, points.length, finished, stopBanner.show]);
 
-  // Direction générale vers le prochain arrêt (cap réel)
-  const guidance = useMemo(() => {
-    if (!me || !target) return { arrow: "⬆️", text: "…" };
-
-    // si on a une instruction de départ active, on l’affiche en priorité
-    if (departStep && !departDoneRef.current) {
-      const base = (departStep.instruction ?? "").trim();
-      const street = (departStep.name ?? "").trim();
-      const txt = street && base && !base.toLowerCase().includes(street.toLowerCase())
-        ? `${base} sur ${street}`
-        : base || "Départ…";
-      return { arrow: "🧭", text: `Départ: ${txt}` };
+    // avance le step
+    if (dManeuver <= STEP_ADVANCE_M && stepIdx < steps.length - 1) {
+      setStepIdx((i) => i + 1);
     }
+  }, [running, me, target, points.length, targetIdx, steps, stepIdx, finished]); // eslint-disable-line
 
-    const move = bearingMoveRef.current;
-    const to = bearingDeg(me, target);
+  const nextStep = steps[stepIdx];
 
-    if (move == null) return { arrow: "⬆️", text: "Avance doucement vers le prochain arrêt" };
-
-    const delta = deltaBearingDeg(move, to);
-    return headingToArrow(delta);
-  }, [me, target, targetIdx, departStep]);
+  // ✅ NAVIGATION “PLUS GROSSE”
+  const NAV = {
+    title: 40,
+    street: 26,
+    dist: 44,
+    arrow: 86,
+    sub: 28,
+    badge: 22,
+    gap: 14,
+  };
 
   return (
     <div style={page}>
@@ -677,15 +793,16 @@ export default function NavLive() {
         <div style={card}>
           <div style={row}>
             <div style={{ flex: 1 }}>
-              <h1 style={h1}>Navigation (simple + départ)</h1>
+              <h1 style={h1}>Navigation (texte)</h1>
               <div style={muted}>
-                {hasOfficial ? <>Trace officielle détectée (hors-trace).</> : <>Mode simple (pas de route calculée).</>}{" "}
+                {hasOfficial ? <>Trace officielle détectée (hors-trace). Guidage texte Mapbox.</> : <>Guidage texte Mapbox.</>}{" "}
                 {wlSupported ? `Écran allumé: ${wlActive ? "Oui" : "Non"}` : ""}
               </div>
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
             </div>
 
+            {/* ✅ SEULS BOUTONS AUTORISÉS */}
             <div style={{ display: "flex", gap: 8 }}>
               <button style={btn("ghost")} onClick={() => nav("/")}>
                 Retour
@@ -747,9 +864,7 @@ export default function NavLive() {
                       border: "1px solid rgba(0,0,0,.12)",
                       borderRadius: 14,
                       padding: "10px 12px",
-                      boxShadow: pulse
-                        ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)"
-                        : "0 8px 22px rgba(0,0,0,.18)",
+                      boxShadow: pulse ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)" : "0 8px 22px rgba(0,0,0,.18)",
                       display: "grid",
                       gap: 8,
                       transition: "background 180ms ease, box-shadow 180ms ease",
@@ -768,6 +883,7 @@ export default function NavLive() {
                           justifyContent: "center",
                           fontSize: 18,
                           fontWeight: 900,
+                          transition: "all 180ms ease",
                         }}
                         aria-hidden
                       >
@@ -776,9 +892,7 @@ export default function NavLive() {
 
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
-                        <div style={{ fontSize: 12, opacity: 0.85 }}>
-                          {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                        </div>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                       </div>
                     </div>
 
@@ -797,42 +911,49 @@ export default function NavLive() {
                 );
               })()}
 
-            {/* Affichage conduite */}
-            <div style={{ display: "grid", gap: 10, paddingTop: 70 }}>
-              <div style={{ fontWeight: 900 }}>
+            {/* ✅ Affichage “conduite” PLUS GROS */}
+            <div style={{ display: "grid", gap: NAV.gap, paddingTop: 78 }}>
+              <div style={{ fontWeight: 950, fontSize: NAV.badge }}>
                 Prochain arrêt : {targetIdx + 1} / {points.length}
               </div>
-              <div style={muted}>{target?.label ? target.label : "—"}</div>
+
+              <div style={{ ...muted, fontSize: NAV.street }}>{target?.label ? target.label : "—"}</div>
 
               {me && target && (
-                <div style={{ fontSize: 40, fontWeight: 950, letterSpacing: -0.5 }}>
+                <div style={{ fontSize: NAV.dist, fontWeight: 950, letterSpacing: -0.5 }}>
                   {Math.round(haversineMeters(me, target))} m
                 </div>
               )}
 
               <div style={{ height: 6 }} />
 
-              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <div style={{ fontSize: 54, lineHeight: "54px" }}>{guidance.arrow}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+                <div style={{ fontSize: NAV.arrow, lineHeight: `${NAV.arrow}px` }}>{maneuverArrow(nextStep?.modifier)}</div>
+
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 950, fontSize: 28, lineHeight: "32px" }}>
-                    {finished ? "✅ Circuit terminé" : guidance.text}
+                  <div style={{ fontWeight: 980, fontSize: NAV.title, lineHeight: "44px" }}>
+                    {finished ? "✅ Circuit terminé" : nextStep ? normalizeInstruction(nextStep) : "…"}
                   </div>
 
-                  {!finished && offRouteM != null && hasOfficial && (
-                    <div style={{ fontSize: 18, opacity: 0.75, marginTop: 6 }}>
-                      Hors-trace: <b>{Math.round(offRouteM)} m</b>
-                      {offRouteM > OFF_ROUTE_M ? " (revenir vers la trace)" : ""}
+                  {!finished && nextStep?.name && (
+                    <div style={{ fontSize: NAV.street, opacity: 0.8, marginTop: 10 }}>
+                      <b>{nextStep.name}</b>
+                    </div>
+                  )}
+
+                  {!finished && me && nextStep?.location && (
+                    <div style={{ fontSize: NAV.sub, opacity: 0.85, marginTop: 12 }}>
+                      dans <b>{Math.round(haversineMeters(me, nextStep.location))} m</b>
                     </div>
                   )}
                 </div>
               </div>
 
-              {err && <div style={{ color: "#b91c1c", fontWeight: 900, fontSize: 16 }}>{err}</div>}
+              {err && <div style={{ color: "#b91c1c", fontWeight: 950, fontSize: 18 }}>{err}</div>}
 
-              {!hasOfficial && (
-                <div style={{ ...muted, marginTop: 6 }}>
-                  Astuce: enregistre une trace officielle pour une navigation “hors-trace” plus fiable.
+              {offRouteM != null && (
+                <div style={{ ...muted, marginTop: 6, fontSize: 18 }}>
+                  Écart: <b>{Math.round(offRouteM)} m</b>
                 </div>
               )}
             </div>
