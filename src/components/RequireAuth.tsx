@@ -1,39 +1,53 @@
+// src/components/RequireAuth.tsx
 import React, { useEffect, useState } from "react";
-import { useLocation, Navigate } from "react-router-dom";
-import { supabase } from "@/lib/api"; // ajuste si besoin
+import { Navigate, useLocation } from "react-router-dom";
+import { supabase } from "@/lib/supabaseClient";
 
 export default function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
   const [loading, setLoading] = useState(true);
-  const [ok, setOk] = useState(false);
+  const [hasSession, setHasSession] = useState(false);
 
   useEffect(() => {
-    let alive = true;
+    let mounted = true;
 
-    async function check() {
-      setLoading(true);
-      const { data } = await supabase.auth.getSession();
-      if (!alive) return;
-      setOk(Boolean(data.session));
-      setLoading(false);
-    }
+    // 1) Vérifie la session existante
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (!mounted) return;
+        if (error) console.warn("getSession:", error.message);
+        setHasSession(Boolean(data.session));
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!mounted) return;
+        console.warn("getSession crash:", e?.message ?? e);
+        setHasSession(false);
+        setLoading(false);
+      });
 
-    check();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      check();
+    // 2) Écoute les changements (login/logout/refresh)
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      setHasSession(Boolean(session));
     });
 
     return () => {
-      alive = false;
+      mounted = false;
       sub.subscription.unsubscribe();
     };
   }, []);
 
-  if (loading) return <div style={{ padding: 16 }}>Chargement…</div>;
+  if (loading) {
+    return (
+      <div style={{ padding: 18, fontWeight: 900 }}>
+        Vérification connexion…
+      </div>
+    );
+  }
 
-  if (!ok) {
-    return <Navigate to="/login" replace state={{ redirectTo: loc.pathname + loc.search }} />;
+  if (!hasSession) {
+    return <Navigate to="/login" replace state={{ from: loc.pathname + loc.search }} />;
   }
 
   return <>{children}</>;
