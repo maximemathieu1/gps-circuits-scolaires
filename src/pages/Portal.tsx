@@ -1,6 +1,10 @@
+// src/pages/Portal.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { callFn, supabase } from "@/lib/api";
+
+import { callFn } from "@/lib/api";
+import { useAuth } from "@/lib/useAuth";
+
 import { page, container, card, h1, muted, row, bigBtn, btn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
@@ -10,6 +14,7 @@ type Circuit = { id: string; nom: string };
 
 export default function Portal() {
   const nav = useNavigate();
+  const { ready, isAuthed, user } = useAuth();
 
   const [transporteur, setTransporteur] = useState<TCode>("B");
   const [circuits, setCircuits] = useState<Circuit[]>([]);
@@ -18,33 +23,11 @@ export default function Portal() {
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState("");
 
-  const [isAuthed, setIsAuthed] = useState(false);
-
   const selected = useMemo(() => circuits.find((c) => c.id === circuitId) ?? null, [circuits, circuitId]);
 
-  // ✅ suivi session
-  useEffect(() => {
-    let alive = true;
-
-    async function refresh() {
-      const { data } = await supabase.auth.getSession();
-      if (!alive) return;
-      setIsAuthed(Boolean(data.session));
-    }
-
-    refresh();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(() => refresh());
-
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
-  }, []);
-
   async function load() {
+    // portail public: on n'appelle pas l'API si non connecté
     if (!isAuthed) {
-      // portail public: on n'appelle pas l'API si non connecté
       setCircuits([]);
       setCircuitId("");
       return;
@@ -55,14 +38,15 @@ export default function Portal() {
       transporteur_code: transporteur,
     });
 
-    setCircuits(r.circuits);
-    setCircuitId((prev) => (prev && r.circuits.some((x) => x.id === prev) ? prev : (r.circuits?.[0]?.id ?? "")));
+    setCircuits(r.circuits || []);
+    setCircuitId((prev) => (prev && r.circuits.some((x) => x.id === prev) ? prev : r.circuits?.[0]?.id ?? ""));
   }
 
   useEffect(() => {
+    if (!ready) return;
     load().catch((e) => alert(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transporteur, isAuthed]);
+  }, [transporteur, isAuthed, ready]);
 
   function goNav() {
     if (!isAuthed) return nav("/login", { state: { redirectTo: "/" } });
@@ -71,7 +55,10 @@ export default function Portal() {
   }
 
   function goRecord() {
-    if (!isAuthed) return nav("/login", { state: { redirectTo: "/record?t=" + transporteur + "&circuit=" + encodeURIComponent(circuitId || "") } });
+    if (!isAuthed)
+      return nav("/login", {
+        state: { redirectTo: "/record?t=" + transporteur + "&circuit=" + encodeURIComponent(circuitId || "") },
+      });
     nav(`/record?t=${transporteur}&circuit=${encodeURIComponent(circuitId || "")}`);
   }
 
@@ -96,16 +83,19 @@ export default function Portal() {
           <div style={muted}>Choisis le transporteur et le circuit, puis démarre.</div>
 
           <div style={{ marginTop: 10, ...muted }}>
-            Connexion : <b>{isAuthed ? "connecté" : "non connecté"}</b>
+            Connexion :{" "}
+            <b>
+              {!ready ? "chargement…" : isAuthed ? `connecté (${user?.email ?? "ok"})` : "non connecté"}
+            </b>
           </div>
 
-          {!isAuthed && (
+          {!ready ? null : !isAuthed ? (
             <div style={{ marginTop: 10 }}>
               <button style={btn("primary")} onClick={() => nav("/login", { state: { redirectTo: "/" } })}>
                 Se connecter
               </button>
             </div>
-          )}
+          ) : null}
         </div>
 
         <div style={card}>
@@ -138,11 +128,7 @@ export default function Portal() {
               <button style={{ ...btn("ghost"), flex: 1 }} onClick={() => setRenaming(true)} disabled={!isAuthed || !circuitId}>
                 Renommer
               </button>
-              <button
-                style={{ ...btn("ghost"), flex: 1 }}
-                onClick={() => load().catch((e) => alert(e.message))}
-                disabled={!isAuthed}
-              >
+              <button style={{ ...btn("ghost"), flex: 1 }} onClick={() => load().catch((e) => alert(e.message))} disabled={!isAuthed}>
                 Rafraîchir
               </button>
             </div>
@@ -151,10 +137,7 @@ export default function Portal() {
               Navigation continue (virages + voix)
             </button>
 
-            <button
-              style={{ ...bigBtn, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }}
-              onClick={goRecord}
-            >
+            <button style={{ ...bigBtn, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }} onClick={goRecord}>
               Enregistrer / Mettre à jour un trajet
             </button>
           </div>
@@ -163,9 +146,15 @@ export default function Portal() {
         {renaming && (
           <div style={card}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>Renommer le circuit</div>
-            <input style={input} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={selected?.nom ?? "Nom"} />
+            <input
+              style={input}
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder={selected?.nom ?? "Nom"}
+              disabled={!isAuthed}
+            />
             <div style={{ ...row, marginTop: 10 }}>
-              <button style={{ ...btn("primary"), flex: 1 }} onClick={() => doRename().catch((e) => alert(e.message))}>
+              <button style={{ ...btn("primary"), flex: 1 }} onClick={() => doRename().catch((e) => alert(e.message))} disabled={!isAuthed}>
                 Enregistrer
               </button>
               <button
