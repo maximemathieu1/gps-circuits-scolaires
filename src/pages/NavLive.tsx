@@ -149,32 +149,6 @@ function minDistanceToPolylineMeters(me: { lat: number; lng: number }, line: [nu
   return Number.isFinite(best) ? best : null;
 }
 
-/** Voix "béton" + fallback FR */
-function speak(text: string) {
-  try {
-    const t = (text ?? "").trim();
-    if (!t) return;
-
-    window.speechSynthesis.cancel();
-
-    const u = new SpeechSynthesisUtterance(t);
-    const voices = window.speechSynthesis.getVoices?.() ?? [];
-    const pick =
-      voices.find((v) => (v.lang || "").toLowerCase() === "fr-ca") ||
-      voices.find((v) => (v.lang || "").toLowerCase().startsWith("fr")) ||
-      voices[0];
-
-    if (pick) u.voice = pick;
-    u.lang = pick?.lang || "fr-CA";
-
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    u.volume = 1.0;
-
-    window.speechSynthesis.speak(u);
-  } catch {}
-}
-
 function maneuverArrow(mod?: string) {
   const m = (mod || "").toLowerCase();
   if (m.includes("uturn")) return "⤴️";
@@ -197,6 +171,58 @@ function enrichInstruction(step: Step | undefined, meters: number) {
   const already = n.length >= 4 && b.includes(n);
 
   return already ? `${base} dans ${Math.round(meters)} mètres` : `${base} sur ${name} dans ${Math.round(meters)} mètres`;
+}
+
+/** Direction cardinale (8) */
+function compass8(deg: number) {
+  const dirs = ["Nord", "Nord-Est", "Est", "Sud-Est", "Sud", "Sud-Ouest", "Ouest", "Nord-Ouest"];
+  const i = Math.round(normDeg(deg) / 45) % 8;
+  return dirs[i];
+}
+
+/* =========================
+   Voix (anti-empilement)
+========================= */
+
+let __lastSpeakAt = 0;
+let __lastSpeakText = "";
+let __lockedUntil = 0;
+
+function speakSafe(text: string, opts?: { minIntervalMs?: number; lockMs?: number; force?: boolean }) {
+  try {
+    const t = (text ?? "").trim();
+    if (!t) return;
+
+    const now = Date.now();
+    const minIntervalMs = opts?.minIntervalMs ?? 1200;
+
+    if (!opts?.force) {
+      if (now < __lockedUntil) return;
+      if (now - __lastSpeakAt < minIntervalMs) return;
+      if (t === __lastSpeakText && now - __lastSpeakAt < 6000) return;
+    }
+
+    __lastSpeakAt = now;
+    __lastSpeakText = t;
+    if (opts?.lockMs) __lockedUntil = now + opts.lockMs;
+
+    window.speechSynthesis.cancel();
+
+    const u = new SpeechSynthesisUtterance(t);
+    const voices = window.speechSynthesis.getVoices?.() ?? [];
+    const pick =
+      voices.find((v) => (v.lang || "").toLowerCase() === "fr-ca") ||
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith("fr")) ||
+      voices[0];
+
+    if (pick) u.voice = pick;
+    u.lang = pick?.lang || "fr-CA";
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+
+    window.speechSynthesis.speak(u);
+  } catch {}
 }
 
 /** Ding court (WebAudio) — sans fichier externe */
@@ -277,10 +303,11 @@ export default function NavLive() {
 
   // Annonces
   const spokenNearStepRef = useRef<number | null>(null);
-
   const stopWarnRef = useRef<number | null>(null);
-  const stopWarn50Ref = useRef<number | null>(null);
   const lastArrivedIdxRef = useRef<number | null>(null);
+
+  // ✅ Départ: indice direction (1 seule fois)
+  const startHintSpokenRef = useRef(false);
 
   // Bandeau arrêt scolaire (UI) — max figé + distance monotone
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
@@ -311,7 +338,7 @@ export default function NavLive() {
     return kmh >= 80 ? 200 : 150;
   }
 
-  const WARN_STOP_50_M = 60; // annonce "bientôt" ~50m
+  const FAST_KMH = 80;
   const SAY_NEAR_M = 80;
   const STEP_ADVANCE_M = 14;
 
@@ -346,7 +373,6 @@ export default function NavLive() {
     lastRerouteAtRef.current = 0;
 
     stopWarnRef.current = null;
-    stopWarn50Ref.current = null;
     lastArrivedIdxRef.current = null;
 
     stopWarnMaxRef.current = null;
@@ -355,6 +381,8 @@ export default function NavLive() {
 
     meSmoothRef.current = null;
     setFinished(false);
+
+    startHintSpokenRef.current = false;
 
     let ok = false;
     try {
@@ -471,7 +499,7 @@ export default function NavLive() {
     }
 
     setRunning(true);
-    speak("Navigation démarrée.");
+    speakSafe("Navigation démarrée.", { minIntervalMs: 0, force: true });
   }
 
   function stop() {
@@ -563,7 +591,6 @@ export default function NavLive() {
     lastRerouteAtRef.current = now;
     offRouteStrikeRef.current = 0;
 
-    // silencieux (pas de stress)
     calcRoute(me, target).catch((e: any) => setErr(e?.message ?? "Erreur reroute"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, me, targetIdx, hasOfficial, officialLine, routeLine, finished]);
@@ -574,26 +601,25 @@ export default function NavLive() {
     if (!me || !target) return;
 
     const dStop = haversineMeters(me, target);
-
-    // ✅ Détermine 150/200 selon vitesse (mais on FIGE le max dès qu'on entre dans la zone)
-    const dynamicMax = warnStopMeters();
-    if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
-    const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
-
     const rawMeters = Math.round(dStop);
 
-    // ✅ Si on est hors zone, on cache le bandeau et on reset monotone (mais on garde WARN_STOP_M figé)
+    // ✅ Max 150/200 figé dès qu'on ENTRE dans la zone (basé sur vitesse)
+    const dynamicMax = warnStopMeters();
+    if (stopWarnMaxRef.current == null && rawMeters <= dynamicMax && rawMeters > ARRIVE_STOP_M) {
+      stopWarnMaxRef.current = dynamicMax;
+    }
+    const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
+
+    // ✅ Hors zone -> on cache bandeau + reset monotone (mais on garde WARN_STOP_M figé si déjà entré)
     if (rawMeters > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    // ✅ Dans la zone : distance monotone (ne remonte JAMAIS)
+    // ✅ Dans zone : distance monotone (ne remonte JAMAIS) + arrondi 5m
     if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawMeters : Math.min(prevShown, rawMeters);
-
-      // arrondit aux 5m pour éviter le jitter visuel
       shown = Math.round(shown / 5) * 5;
 
       stopBannerLastMRef.current = shown;
@@ -609,39 +635,30 @@ export default function NavLive() {
       stopBannerLastMRef.current = null;
     }
 
-    // ✅ Annonce arrêt à 150/200 (figé) — une seule fois
+    // ✅ Une SEULE annonce d’arrêt (150/200 figé), sans ding ici
     if (!finished && rawMeters <= WARN_STOP_M && rawMeters > ARRIVE_STOP_M) {
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        playDing();
-        speak(`Ralentissez. Arrêt scolaire dans ${WARN_STOP_M} mètres.`);
+        // Verrou 6s: empêche les annonces de manœuvre de s’empiler par-dessus
+        speakSafe(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { minIntervalMs: 0, lockMs: 6000, force: true });
       }
     }
 
-    // ✅ Annonce arrêt "bientôt" ~50m — une seule fois
-    if (!finished && rawMeters <= WARN_STOP_50_M && rawMeters > ARRIVE_STOP_M) {
-      if (stopWarn50Ref.current !== targetIdx) {
-        stopWarn50Ref.current = targetIdx;
-        speak("Arrêt scolaire bientôt. Préparez-vous à vous arrêter.");
-      }
-    }
-
-    // ✅ Arrivée arrêt (SANS règle d'arrêt complet) — pour enchaîner correctement
+    // ✅ Arrivée arrêt : DING uniquement + enchaînement (plus de voix)
     if (!finished && dStop <= ARRIVE_STOP_M) {
       if (lastArrivedIdxRef.current !== targetIdx) {
         lastArrivedIdxRef.current = targetIdx;
 
+        playDing();
+
         const next = targetIdx + 1;
         if (next < points.length) {
           const nextTarget = points[next] ?? null;
-          const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
 
-          speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`);
           setTargetIdx(next);
 
           // reset annonces + UI + max figé pour le prochain arrêt
           stopWarnRef.current = null;
-          stopWarn50Ref.current = null;
           stopWarnMaxRef.current = null;
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
@@ -650,9 +667,7 @@ export default function NavLive() {
             calcRoute(me, nextTarget).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
           }
         } else {
-          speak("Circuit terminé.");
           setFinished(true);
-
           stopWarnMaxRef.current = null;
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
@@ -661,8 +676,25 @@ export default function NavLive() {
       return;
     }
 
+    // ✅ Départ garage/parking : indice direction (1 seule fois)
+    // - seulement si on est proche du départ et vitesse basse (sinon inutile)
+    if (!finished && !startHintSpokenRef.current && steps[0]?.location) {
+      const v = speedRef.current ?? 0; // m/s
+      const kmh = v * 3.6;
+      const d0 = haversineMeters(me, steps[0].location);
+
+      if (d0 < 250 && kmh < 25) {
+        const deg = bearingDeg(me, steps[0].location);
+        speakSafe(`Au départ, prends la direction ${compass8(deg)}.`, { minIntervalMs: 0, lockMs: 5000, force: true });
+        startHintSpokenRef.current = true;
+      }
+    }
+
     // ✅ Instructions Mapbox (1 seule annonce proche, + nom de rue)
     if (finished) return;
+
+    // Si bandeau arrêt actif, on coupe les annonces de virage pour éviter le spam
+    if (stopBanner.show) return;
 
     const currStep = steps[stepIdx];
     if (!currStep?.location) return;
@@ -672,7 +704,7 @@ export default function NavLive() {
     if (dManeuver <= SAY_NEAR_M) {
       if (spokenNearStepRef.current !== stepIdx) {
         spokenNearStepRef.current = stepIdx;
-        speak(enrichInstruction(currStep, dManeuver));
+        speakSafe(enrichInstruction(currStep, dManeuver), { minIntervalMs: 1400 });
       }
     }
 
@@ -680,7 +712,7 @@ export default function NavLive() {
       setStepIdx((i) => i + 1);
       spokenNearStepRef.current = null;
     }
-  }, [running, me, target, points.length, targetIdx, steps, stepIdx, finished]);
+  }, [running, me, target, points.length, targetIdx, steps, stepIdx, finished, stopBanner.show]);
 
   const nextStep = steps[stepIdx];
 
@@ -791,7 +823,9 @@ export default function NavLive() {
 
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
-                        <div style={{ fontSize: 12, opacity: 0.85 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>
+                          {stopBanner.label ?? "Zone d’embarquement / débarquement"}
+                        </div>
                       </div>
                     </div>
 
@@ -818,9 +852,7 @@ export default function NavLive() {
               <div style={muted}>{target?.label ? target.label : "—"}</div>
 
               {me && target && (
-                <div style={{ fontSize: 40, fontWeight: 950, letterSpacing: -0.5 }}>
-                  {Math.round(haversineMeters(me, target))} m
-                </div>
+                <div style={{ fontSize: 40, fontWeight: 950, letterSpacing: -0.5 }}>{Math.round(haversineMeters(me, target))} m</div>
               )}
 
               <div style={{ height: 6 }} />
@@ -851,6 +883,16 @@ export default function NavLive() {
               {offRouteM != null && (
                 <div style={{ ...muted, marginTop: 6 }}>
                   Écart: <b>{Math.round(offRouteM)} m</b>
+                </div>
+              )}
+
+              {/* Petit hint discret sur le seuil stop 150/200 */}
+              {!finished && (
+                <div style={{ ...muted, marginTop: 6 }}>
+                  Alerte arrêt:{" "}
+                  <b>
+                    {stopWarnMaxRef.current ?? (speed != null && speed * 3.6 >= FAST_KMH ? 200 : 150)}m
+                  </b>
                 </div>
               )}
             </div>
