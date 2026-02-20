@@ -5,7 +5,7 @@ function cors(req: Request) {
   const origin = req.headers.get("origin") ?? "*";
   return {
     "Access-Control-Allow-Origin": origin,
-    Vary: "Origin",
+    "Vary": "Origin",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Headers": "authorization, apikey, x-app-key, x-client-info, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -29,6 +29,14 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
+function isFiniteNumber(n: any) {
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+function validLatLng(lat: any, lng: any) {
+  return isFiniteNumber(lat) && isFiniteNumber(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+
 const APP_KEY = getEnv("APP_KEY");
 const SERVICE_ROLE = getEnv("SERVICE_ROLE_KEY");
 
@@ -42,7 +50,6 @@ type TCode = "B" | "C" | "S";
 
 type Req =
   | { action: "list_circuits"; transporteur_code: TCode }
-  // ✅ on accepte created_by / user_id venant du front
   | { action: "create_circuit"; transporteur_code: TCode; nom: string; created_by?: string; user_id?: string }
   | { action: "rename_circuit"; circuit_id: string; nom: string }
   | { action: "start_update"; circuit_id: string; note?: string }
@@ -50,7 +57,10 @@ type Req =
   | { action: "get_active_points"; circuit_id: string }
   | { action: "get_points_by_version"; version_id: string }
   | { action: "add_point"; version_id: string; lat: number; lng: number; label?: string | null }
-  | { action: "delete_last_point"; version_id: string };
+  | { action: "delete_last_point"; version_id: string }
+  // ✅ NOUVEAU : trace officielle (polyline)
+  | { action: "save_trace"; version_id: string; trail: { idx: number; lat: number; lng: number }[] }
+  | { action: "get_latest_trace"; circuit_id: string };
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { status: 200, headers: cors(req) });
@@ -77,8 +87,6 @@ serve(async (req) => {
       const nom = (body.nom ?? "").trim();
       if (!nom) return json(req, 400, { error: "Nom requis" });
 
-      // ✅ IMPORTANT: created_by est NOT NULL dans tes tables (circuits ET circuit_versions)
-      // On le prend depuis created_by (ou user_id si tu l’envoies sous ce nom)
       const createdBy = (body.created_by ?? body.user_id ?? "").trim();
       if (!createdBy || !isUuid(createdBy)) {
         return json(req, 400, {
@@ -91,14 +99,13 @@ serve(async (req) => {
         .insert({
           transporteur_code: body.transporteur_code,
           nom,
-          created_by: createdBy, // ✅ OK
+          created_by: createdBy,
         })
         .select("id")
         .single();
 
       if (e1 || !c) return json(req, 400, { error: e1?.message ?? "Erreur create_circuit" });
 
-      // ✅ FIX: created_by aussi dans circuit_versions
       const { data: v, error: e2 } = await supabase
         .from("circuit_versions")
         .insert({
@@ -106,7 +113,7 @@ serve(async (req) => {
           version_no: 1,
           is_active: true,
           note: "Version 1",
-          created_by: createdBy, // ✅ FIX
+          created_by: createdBy,
         })
         .select("id, version_no")
         .single();
@@ -133,7 +140,6 @@ serve(async (req) => {
       const circuit_id = String(body.circuit_id ?? "").trim();
       if (!isUuid(circuit_id)) return json(req, 400, { error: "circuit_id invalide" });
 
-      // ✅ Récupérer created_by depuis la table circuits (source de vérité)
       const { data: cir, error: eCir } = await supabase.from("circuits").select("created_by").eq("id", circuit_id).single();
       if (eCir) return json(req, 400, { error: eCir.message });
 
@@ -155,7 +161,6 @@ serve(async (req) => {
       const { error: eOff } = await supabase.from("circuit_versions").update({ is_active: false }).eq("circuit_id", circuit_id);
       if (eOff) return json(req, 400, { error: eOff.message });
 
-      // ✅ FIX: created_by aussi dans les nouvelles versions
       const { data: v, error: eNew } = await supabase
         .from("circuit_versions")
         .insert({
@@ -163,7 +168,7 @@ serve(async (req) => {
           version_no: nextNo,
           is_active: true,
           note: body.note ?? null,
-          created_by: createdBy, // ✅ FIX
+          created_by: createdBy,
         })
         .select("id, version_no")
         .single();
@@ -194,13 +199,10 @@ serve(async (req) => {
 
     if (body.action === "get_active_points") {
       const circuit_id = String(body.circuit_id ?? "").trim();
-
-      // ✅ Debug utile pour confirmer le circuit reçu
       console.log("get_active_points", { circuit_id });
 
       if (!isUuid(circuit_id)) return json(req, 400, { error: "circuit_id invalide", circuit_id });
 
-      // 1) Essayer la version active
       const { data: activeV, error: eV } = await supabase
         .from("circuit_versions")
         .select("id, created_at")
@@ -212,7 +214,6 @@ serve(async (req) => {
 
       if (eV) return json(req, 400, { error: eV.message });
 
-      // 2) Fallback: dernière version si aucune active
       const { data: v, error: eLast } = activeV?.id
         ? { data: activeV, error: null }
         : await supabase
@@ -257,6 +258,8 @@ serve(async (req) => {
       const version_id = String(body.version_id ?? "").trim();
       if (!isUuid(version_id)) return json(req, 400, { error: "version_id invalide" });
 
+      if (!validLatLng(body.lat, body.lng)) return json(req, 400, { error: "lat/lng invalides" });
+
       const { data: last, error: eLast } = await supabase
         .from("circuit_points")
         .select("idx")
@@ -300,6 +303,109 @@ serve(async (req) => {
       if (eDel) return json(req, 400, { error: eDel.message });
 
       return json(req, 200, { ok: true, deleted: true, idx: last.idx });
+    }
+
+    /* ==========================
+       ✅ NOUVEAU : SAVE TRACE
+    =========================== */
+    if (body.action === "save_trace") {
+      const version_id = String(body.version_id ?? "").trim();
+      if (!isUuid(version_id)) return json(req, 400, { error: "version_id invalide" });
+
+      const trail = Array.isArray((body as any).trail) ? (body as any).trail : [];
+      if (!Array.isArray(trail) || trail.length < 10) return json(req, 400, { error: "trail manquant ou trop court" });
+
+      // Validation + normalisation
+      const normalized: { idx: number; lat: number; lng: number }[] = [];
+      for (let i = 0; i < trail.length; i++) {
+        const p = trail[i];
+        const lat = p?.lat;
+        const lng = p?.lng;
+        if (!validLatLng(lat, lng)) continue;
+        normalized.push({ idx: Number.isFinite(p?.idx) ? Number(p.idx) : i, lat, lng });
+      }
+
+      if (normalized.length < 10) return json(req, 400, { error: "trail invalide (pas assez de points valides)" });
+
+      // Retrouver created_by depuis la version (NOT NULL dans circuit_traces)
+      const { data: v, error: eV } = await supabase
+        .from("circuit_versions")
+        .select("created_by")
+        .eq("id", version_id)
+        .single();
+
+      if (eV) return json(req, 400, { error: eV.message });
+
+      const createdBy = String((v as any)?.created_by ?? "").trim();
+      if (!createdBy || !isUuid(createdBy)) return json(req, 400, { error: "created_by introuvable pour cette version" });
+
+      // Upsert (version_id unique)
+      const { error: eUp } = await supabase
+        .from("circuit_traces")
+        .upsert(
+          {
+            version_id,
+            trail: normalized,
+            points_count: normalized.length,
+            created_by: createdBy,
+          },
+          { onConflict: "version_id" }
+        );
+
+      if (eUp) return json(req, 400, { error: eUp.message });
+
+      return json(req, 200, { ok: true, version_id, points_saved: normalized.length });
+    }
+
+    /* ==========================
+       ✅ NOUVEAU : GET LATEST TRACE
+    =========================== */
+    if (body.action === "get_latest_trace") {
+      const circuit_id = String(body.circuit_id ?? "").trim();
+      if (!isUuid(circuit_id)) return json(req, 400, { error: "circuit_id invalide" });
+
+      // 1) version active
+      const { data: activeV, error: eV } = await supabase
+        .from("circuit_versions")
+        .select("id, created_at")
+        .eq("circuit_id", circuit_id)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (eV) return json(req, 400, { error: eV.message });
+
+      // 2) fallback dernière version
+      const { data: v, error: eLast } = activeV?.id
+        ? { data: activeV, error: null }
+        : await supabase
+            .from("circuit_versions")
+            .select("id, created_at")
+            .eq("circuit_id", circuit_id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+      if (eLast) return json(req, 400, { error: eLast.message });
+      if (!v?.id) return json(req, 404, { error: "Aucune version pour ce circuit" });
+
+      // 3) trace pour cette version
+      const { data: tr, error: eTr } = await supabase
+        .from("circuit_traces")
+        .select("version_id, trail, points_count, updated_at")
+        .eq("version_id", v.id)
+        .maybeSingle();
+
+      if (eTr) return json(req, 400, { error: eTr.message });
+      if (!tr?.trail) return json(req, 404, { error: "Aucune trace enregistrée pour la version active" });
+
+      return json(req, 200, {
+        version_id: tr.version_id,
+        points_count: tr.points_count ?? (Array.isArray(tr.trail) ? tr.trail.length : 0),
+        trail: tr.trail,
+        updated_at: tr.updated_at,
+      });
     }
 
     return json(req, 400, { error: "Action inconnue" });
