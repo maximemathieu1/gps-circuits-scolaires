@@ -1,8 +1,6 @@
 // src/pages/NavLive.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { MapContainer, Polyline, TileLayer, Marker, useMap } from "react-leaflet";
-import L from "leaflet";
 
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
@@ -62,6 +60,10 @@ function watchPos(
   );
 }
 
+function clamp(v: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, v));
+}
+
 function normDeg(d: number) {
   let x = d % 360;
   if (x < 0) x += 360;
@@ -81,10 +83,6 @@ function bearingDeg(from: { lat: number; lng: number }, to: { lat: number; lng: 
   return normDeg(toDeg(Math.atan2(y, x)));
 }
 
-function clamp(v: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, v));
-}
-
 /** Lissage position (anti-jitter) */
 function smoothPos(prev: { lat: number; lng: number } | null, next: { lat: number; lng: number }, alpha: number) {
   if (!prev) return next;
@@ -92,13 +90,6 @@ function smoothPos(prev: { lat: number; lng: number } | null, next: { lat: numbe
     lat: prev.lat + (next.lat - prev.lat) * alpha,
     lng: prev.lng + (next.lng - prev.lng) * alpha,
   };
-}
-
-function angDiffDeg(a: number, b: number) {
-  let d = normDeg(b) - normDeg(a);
-  if (d > 180) d -= 360;
-  if (d < -180) d += 360;
-  return d;
 }
 
 // Approx meters using equirectangular projection around current latitude
@@ -181,9 +172,7 @@ function speak(text: string) {
     u.volume = 1.0;
 
     window.speechSynthesis.speak(u);
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function maneuverArrow(mod?: string) {
@@ -206,7 +195,7 @@ function playDing() {
     const g = ctx.createGain();
 
     o.type = "sine";
-    o.frequency.setValueAtTime(880, ctx.currentTime); // La
+    o.frequency.setValueAtTime(880, ctx.currentTime);
     g.gain.setValueAtTime(0.0001, ctx.currentTime);
     g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.01);
     g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
@@ -217,124 +206,12 @@ function playDing() {
     o.start();
     o.stop(ctx.currentTime + 0.2);
 
-    // ferme proprement
     o.onended = () => {
       try {
         ctx.close?.();
-      } catch {
-        // ignore
-      }
+      } catch {}
     };
-  } catch {
-    // ignore
-  }
-}
-
-/* =========================
-   Leaflet icons
-========================= */
-
-const meIcon = new L.DivIcon({
-  className: "",
-  html: `<div style="width:14px;height:14px;border-radius:999px;background:#2F6FDB;border:3px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.25)"></div>`,
-  iconSize: [14, 14],
-  iconAnchor: [7, 7],
-});
-
-function headingIcon(deg: number) {
-  const d = normDeg(deg);
-  return new L.DivIcon({
-    className: "",
-    html: `
-      <div style="
-        width:0;height:0;
-        border-left:9px solid transparent;
-        border-right:9px solid transparent;
-        border-bottom:18px solid #1A73E8;
-        filter: drop-shadow(0 2px 6px rgba(0,0,0,.25));
-        transform: rotate(${d}deg) translateZ(0);
-        transform-origin: 50% 60%;
-      "></div>
-    `,
-    iconSize: [20, 20],
-    iconAnchor: [10, 10],
-  });
-}
-
-// Icône "enfant / zone scolaire" (plus parlant que STOP)
-const schoolStopIcon = new L.DivIcon({
-  className: "",
-  html: `
-    <div style="display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:999px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);border:2px solid #f59e0b;">
-      <div style="width:26px;height:26px;border-radius:8px;background:#f59e0b;display:flex;align-items:center;justify-content:center;color:#111827;font-weight:900;font-size:16px;">
-        🧒
-      </div>
-    </div>
-  `,
-  iconSize: [38, 38],
-  iconAnchor: [19, 19],
-});
-
-/* =========================
-   Map helpers components
-========================= */
-
-function FollowMe({ me, follow }: { me: { lat: number; lng: number } | null; follow: boolean }) {
-  const map = useMap();
-  const lastRef = useRef<{ lat: number; lng: number } | null>(null);
-  const lastPanAtRef = useRef(0);
-
-  useEffect(() => {
-    if (!follow || !me) return;
-
-    // throttle: max 4x/sec
-    const now = Date.now();
-    if (now - lastPanAtRef.current < 250) return;
-    lastPanAtRef.current = now;
-
-    const last = lastRef.current;
-    if (last) {
-      const moved = haversineMeters(me, last);
-      if (moved < 6) return; // anti-jitter
-    }
-    lastRef.current = me;
-
-    // Zoom "GPS" stable
-    const z = clamp(map.getZoom(), 16, 18);
-    map.setView([me.lat, me.lng], z, { animate: false });
-
-    // Décale le point vers le bas (feeling "au volant")
-    const size = map.getSize();
-    map.panBy([0, Math.round(size.y * 0.18)], { animate: false });
-  }, [me, follow, map]);
-
-  return null;
-}
-
-function RotateMap({ enabled, bearingDeg }: { enabled: boolean; bearingDeg: number | null }) {
-  const map = useMap();
-
-  useEffect(() => {
-    const container = map.getContainer();
-    const pane = container.querySelector(".leaflet-map-pane") as HTMLElement | null;
-    if (!pane) return;
-
-    pane.style.willChange = "transform";
-    pane.style.transformOrigin = "50% 50%";
-    (pane.style as any).backfaceVisibility = "hidden";
-    pane.style.webkitTransformStyle = "preserve-3d";
-    pane.style.transformStyle = "preserve-3d";
-
-    if (!enabled || bearingDeg == null) {
-      pane.style.transform = "translateZ(0)";
-      return;
-    }
-
-    const rot = -normDeg(bearingDeg);
-    pane.style.transform = `rotate(${rot}deg) translateZ(0)`;
-  }, [map, enabled, bearingDeg]);
-
-  return null;
+  } catch {}
 }
 
 /* =========================
@@ -348,22 +225,7 @@ export default function NavLive() {
   const circuitId = q.get("circuit") || "";
 
   const [running, setRunning] = useState(false);
-  const [follow, setFollow] = useState(true);
-
-  // Rotation carte
-  const [rotateMap, setRotateMap] = useState(true);
-  const [bearing, setBearing] = useState<number | null>(null);
-  const bearingSmoothRef = useRef<number | null>(null);
-  const [bearingSmooth, setBearingSmooth] = useState<number | null>(null);
-
-  // Data circuit (arrêts)
-  const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
-  const [targetIdx, setTargetIdx] = useState(0);
-  const target = points[targetIdx] ?? null;
-
-  // Trace officielle (trajet habituel)
-  const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
-  const [hasOfficial, setHasOfficial] = useState(false);
+  const [finished, setFinished] = useState(false);
 
   // GPS
   const [me, setMe] = useState<{ lat: number; lng: number } | null>(null);
@@ -377,15 +239,21 @@ export default function NavLive() {
 
   const [err, setErr] = useState<string | null>(null);
 
-  // Route Mapbox (aide / retour sur la route)
+  // Data circuit (arrêts)
+  const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
+  const [targetIdx, setTargetIdx] = useState(0);
+  const target = points[targetIdx] ?? null;
+
+  // Trace officielle (trajet habituel)
+  const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
+  const [hasOfficial, setHasOfficial] = useState(false);
+
+  // Route Mapbox (guidage texte)
   const [routeLine, setRouteLine] = useState<[number, number][]>([]);
   const [steps, setSteps] = useState<Step[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
 
-  // Breadcrumb (trajet réel)
-  const [trail, setTrail] = useState<[number, number][]>([]);
-
-  // Off-route + reroute anti-stress
+  // Off-route + reroute anti-stress (texte)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
   const offRouteStrikeRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
@@ -394,8 +262,13 @@ export default function NavLive() {
 
   // Annonces
   const spokenNearStepRef = useRef<number | null>(null);
+
   const stopWarn200Ref = useRef<number | null>(null);
+  const stopWarn50Ref = useRef<number | null>(null);
   const lastArrivedIdxRef = useRef<number | null>(null);
+
+  // ✅ Arrêt confirmé après immobilisation
+  const stopHoldRef = useRef<{ idx: number; since: number } | null>(null);
 
   // Bandeau arrêt scolaire (UI)
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null }>({
@@ -404,39 +277,39 @@ export default function NavLive() {
     label: null,
   });
 
-  // Pour bearing fallback
+  // bearing fallback (optionnel)
   const lastMeForBearingRef = useRef<{ lat: number; lng: number } | null>(null);
+  const bearingRef = useRef<number | null>(null);
 
   // Cache route Mapbox
   const routeCacheRef = useRef(new Map<string, { line: [number, number][]; steps: Step[]; at: number }>());
   const routeInFlightRef = useRef<AbortController | null>(null);
 
+  // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
   const WARN_STOP_M = 200;
+  const WARN_STOP_50_M = 60; // annonce "maintenant" ~50m
   const SAY_NEAR_M = 80;
   const STEP_ADVANCE_M = 14;
 
   const OFF_ROUTE_M = 35;
   const ON_ROUTE_M = 18;
 
-  // Rotation: plus stable si on évite quand très lent
-  const ROTATE_MIN_SPEED = 2.5; // m/s ~9 km/h
-  const ROTATE_MIN_CHANGE = 6; // degrés
+  const STOP_SPEED_MPS = 0.4; // ~1.4 km/h (arrêt complet)
+  const STOP_HOLD_MS = 2000; // ✅ 2 secondes immobile
+  const STOP_HYST_M = 12; // si on s'éloigne, on reset le hold
 
   // Warmup voix iOS
   useEffect(() => {
     try {
       window.speechSynthesis.getVoices();
       window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
 
   async function loadCircuit(): Promise<{ pts: { lat: number; lng: number; label?: string | null }[]; hasOfficial: boolean }> {
     if (!circuitId) throw new Error("Circuit manquant.");
 
-    // 1) Arrêts
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
     const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
@@ -444,35 +317,24 @@ export default function NavLive() {
     setPoints(pts);
     setTargetIdx(0);
 
-    // reset nav hints
     setStepIdx(0);
     setSteps([]);
     setRouteLine([]);
     spokenNearStepRef.current = null;
 
-    // reset breadcrumb
-    setTrail([]);
-
-    // reset offroute
     setOffRouteM(null);
     offRouteStrikeRef.current = 0;
     lastRerouteAtRef.current = 0;
 
-    // reset stop warning
     stopWarn200Ref.current = null;
+    stopWarn50Ref.current = null;
     lastArrivedIdxRef.current = null;
+    stopHoldRef.current = null;
     setStopBanner({ show: false, meters: 0, label: null });
 
-    // reset bearing smooth
-    bearingSmoothRef.current = null;
-    setBearing(null);
-    setBearingSmooth(null);
-    lastMeForBearingRef.current = null;
-
-    // reset smoothing me
     meSmoothRef.current = null;
+    setFinished(false);
 
-    // 2) Trace officielle (optionnel)
     let ok = false;
     try {
       const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
@@ -576,18 +438,16 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    if (got.heading != null && Number.isFinite(got.heading)) setBearing(normDeg(got.heading as number));
+    if (got.heading != null && Number.isFinite(got.heading)) bearingRef.current = normDeg(got.heading as number);
 
-    const { pts, hasOfficial: officialOk } = await loadCircuit();
+    const { pts } = await loadCircuit();
 
-    if (!officialOk) {
-      const firstTarget = pts[0] ?? null;
-      if (firstTarget) {
-        try {
-          await calcRoute(initial, firstTarget);
-        } catch (e: any) {
-          setErr(e?.message ?? "Erreur itinéraire");
-        }
+    const firstTarget = pts[0] ?? null;
+    if (firstTarget) {
+      try {
+        await calcRoute(initial, firstTarget);
+      } catch (e: any) {
+        setErr(e?.message ?? "Erreur itinéraire");
       }
     }
 
@@ -613,7 +473,6 @@ export default function NavLive() {
       (p) => {
         const raw = { lat: p.lat, lng: p.lng };
 
-        // alpha selon vitesse: plus lent => plus lissé
         const v = p.speed ?? null;
         const alpha = v != null ? clamp(0.18 + v * 0.02, 0.18, 0.38) : 0.22;
 
@@ -626,23 +485,16 @@ export default function NavLive() {
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
-        setTrail((prev) => {
-          const next: [number, number][] = [...prev, [sm.lat, sm.lng]];
-          if (next.length > 1400) next.splice(0, next.length - 1400);
-          return next;
-        });
-
-        // Bearing: utiliser raw pour direction + stabilité
         const hd = p.heading;
         if (hd != null && Number.isFinite(hd)) {
-          setBearing(normDeg(hd));
+          bearingRef.current = normDeg(hd);
           lastMeForBearingRef.current = raw;
         } else {
           const last = lastMeForBearingRef.current;
           if (last) {
             const moved = haversineMeters(raw, last);
             if (moved >= 10) {
-              setBearing(bearingDeg(last, raw));
+              bearingRef.current = bearingDeg(last, raw);
               lastMeForBearingRef.current = raw;
             }
           } else {
@@ -658,44 +510,14 @@ export default function NavLive() {
     };
   }, [running]);
 
-  // Bearing smoothing (+ stabilité rotation à basse vitesse)
-  useEffect(() => {
-    if (bearing == null) return;
-
-    const v = speedRef.current ?? null;
-    if (v != null && v < ROTATE_MIN_SPEED) {
-      // trop lent: on fige la rotation (évite shakiness au feu rouge)
-      return;
-    }
-
-    const prev = bearingSmoothRef.current;
-    if (prev == null) {
-      bearingSmoothRef.current = bearing;
-      setBearingSmooth(bearing);
-      return;
-    }
-
-    const diff = angDiffDeg(prev, bearing);
-    if (Math.abs(diff) < ROTATE_MIN_CHANGE) {
-      // petits changements => ignore
-      return;
-    }
-
-    const alpha = 0.14; // un peu plus stable
-    const next = normDeg(prev + diff * alpha);
-
-    bearingSmoothRef.current = next;
-    setBearingSmooth(next);
-  }, [bearing]);
-
-  // ✅ REROUTE ANTI-STRESS
+  // ✅ REROUTE ANTI-STRESS (silencieux)
   useEffect(() => {
     if (!running) return;
     if (!me || !target) return;
+    if (finished) return;
 
     const lineForOffRoute =
       hasOfficial && officialLine.length >= 2 ? officialLine : routeLine.length >= 2 ? routeLine : null;
-
     if (!lineForOffRoute) return;
 
     const dLine = minDistanceToPolylineMeters(me, lineForOffRoute);
@@ -704,8 +526,8 @@ export default function NavLive() {
     const a = accRef.current ?? null;
     if (a != null && a > 35) return;
 
-    const v = speedRef.current ?? null; // m/s
-    if (v != null && v < 1.2) return; // ~4.3 km/h
+    const v = speedRef.current ?? null;
+    if (v != null && v < 1.2) return;
 
     const now = Date.now();
 
@@ -722,10 +544,10 @@ export default function NavLive() {
     lastRerouteAtRef.current = now;
     offRouteStrikeRef.current = 0;
 
-    speak("Recalcul de l’itinéraire.");
+    // silencieux (pas de stress)
     calcRoute(me, target).catch((e: any) => setErr(e?.message ?? "Erreur reroute"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, me, targetIdx, hasOfficial, officialLine, routeLine]);
+  }, [running, me, targetIdx, hasOfficial, officialLine, routeLine, finished]);
 
   // Arrêts + annonces + bandeau + steps
   useEffect(() => {
@@ -735,7 +557,7 @@ export default function NavLive() {
     const dStop = haversineMeters(me, target);
 
     // Bandeau visuel (200m -> arrivée)
-    if (dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
+    if (!finished && dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
       setStopBanner({
         show: true,
         meters: Math.max(0, Math.round(dStop)),
@@ -746,7 +568,7 @@ export default function NavLive() {
     }
 
     // ✅ Annonce arrêt à 200m (ding + voix) — une seule fois
-    if (dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
+    if (!finished && dStop <= WARN_STOP_M && dStop > ARRIVE_STOP_M) {
       if (stopWarn200Ref.current !== targetIdx) {
         stopWarn200Ref.current = targetIdx;
         playDing();
@@ -754,8 +576,37 @@ export default function NavLive() {
       }
     }
 
-    // ✅ Arrivée arrêt
-    if (dStop <= ARRIVE_STOP_M) {
+    // ✅ Annonce arrêt "maintenant" ~50m — une seule fois
+    if (!finished && dStop <= WARN_STOP_50_M && dStop > ARRIVE_STOP_M) {
+      if (stopWarn50Ref.current !== targetIdx) {
+        stopWarn50Ref.current = targetIdx;
+        speak("Arrêt scolaire bientôt. Préparez-vous à vous arrêter.");
+      }
+    }
+
+    // ✅ Arrivée: seulement après 2 secondes IMMOBILE proche de l'arrêt
+    const v = speedRef.current; // m/s (peut être null)
+    const isStopped = v == null ? true : v <= STOP_SPEED_MPS;
+
+    if (!finished && dStop <= ARRIVE_STOP_M) {
+      const now = Date.now();
+
+      // si pas arrêté -> on reset le hold
+      if (!isStopped) {
+        stopHoldRef.current = null;
+        return;
+      }
+
+      // démarrage / maintien du "hold"
+      if (!stopHoldRef.current || stopHoldRef.current.idx !== targetIdx) {
+        stopHoldRef.current = { idx: targetIdx, since: now };
+        return;
+      }
+
+      // hold atteint?
+      if (now - stopHoldRef.current.since < STOP_HOLD_MS) return;
+
+      // confirmé
       if (lastArrivedIdxRef.current !== targetIdx) {
         lastArrivedIdxRef.current = targetIdx;
 
@@ -768,20 +619,29 @@ export default function NavLive() {
           setTargetIdx(next);
 
           stopWarn200Ref.current = null;
+          stopWarn50Ref.current = null;
+          stopHoldRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null });
 
-          if (!hasOfficial) {
-            if (nextTarget) calcRoute(me, nextTarget).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
+          if (nextTarget) {
+            calcRoute(me, nextTarget).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
           }
         } else {
           speak("Circuit terminé.");
-          stop();
+          setFinished(true);
+          stopHoldRef.current = null;
+          setStopBanner({ show: false, meters: 0, label: null });
         }
       }
       return;
+    } else {
+      // si on s'éloigne un peu, on reset le hold
+      if (dStop > ARRIVE_STOP_M + STOP_HYST_M) stopHoldRef.current = null;
     }
 
     // ✅ Instructions Mapbox (1 seule annonce proche, pas de “NOW”)
+    if (finished) return;
+
     const currStep = steps[stepIdx];
     if (!currStep?.location) return;
 
@@ -798,13 +658,7 @@ export default function NavLive() {
       setStepIdx((i) => i + 1);
       spokenNearStepRef.current = null;
     }
-  }, [running, me, target, points.length, targetIdx, steps, stepIdx, hasOfficial]);
-
-  const center: [number, number] = me
-    ? [me.lat, me.lng]
-    : points[0]
-    ? [points[0].lat, points[0].lng]
-    : [46.8, -71.2];
+  }, [running, me, target, points.length, targetIdx, steps, stepIdx, finished]);
 
   const nextStep = steps[stepIdx];
 
@@ -814,23 +668,21 @@ export default function NavLive() {
         <div style={card}>
           <div style={row}>
             <div style={{ flex: 1 }}>
-              <h1 style={h1}>Navigation continue</h1>
+              <h1 style={h1}>Navigation (texte)</h1>
               <div style={muted}>
-                {hasOfficial ? (
-                  <>
-                    Trajet officiel : <b>ligne bleue</b>. Mapbox sert juste si tu t’éloignes.
-                  </>
-                ) : (
-                  <>Mode fallback : itinéraire calculé par Mapbox.</>
-                )}{" "}
+                {hasOfficial ? <>Trace officielle détectée (hors-trace). Guidage texte Mapbox.</> : <>Guidage texte Mapbox.</>}{" "}
                 {wlSupported ? `Écran allumé: ${wlActive ? "Oui" : "Non"}` : ""}
               </div>
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
             </div>
-            <button style={btn("ghost")} onClick={() => nav("/")}>
-              Retour
-            </button>
+
+            {/* ✅ SEULS BOUTONS AUTORISÉS */}
+           <div>
+  <button style={btn("ghost")} onClick={() => nav("/")}>
+    Retour
+  </button>
+</div>
           </div>
         </div>
 
@@ -840,242 +692,138 @@ export default function NavLive() {
               Démarrer
             </button>
 
-            <button
-              style={{ ...bigBtn, marginTop: 10, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }}
-              onClick={() => {
-                playDing();
-                speak("Test de navigation. La voix fonctionne.");
-              }}
-            >
-              Tester la voix
-            </button>
-
             {!circuitId && <div style={{ ...muted, marginTop: 10 }}>Circuit manquant. Reviens au portail.</div>}
           </div>
         ) : (
-          <>
-            <div style={card}>
-              <div style={{ display: "grid", gap: 10 }}>
-                <div style={{ fontWeight: 900 }}>
-                  Prochain arrêt : {targetIdx + 1} / {points.length}
-                </div>
-                <div style={muted}>{target?.label ? target.label : "—"}</div>
+          <div style={{ ...card, position: "relative" }}>
+            {/* Bandeau Waze-like + barre progression intelligente */}
+            {stopBanner.show && (() => {
+              const MAX = 200;
+              const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
+              const m = Math.max(0, Math.min(MAX, Math.round(meters)));
+              const pct = Math.round((1 - m / MAX) * 100);
 
-                {me && target && (
-                  <div style={muted}>
-                    Distance arrêt : <b>{Math.round(haversineMeters(me, target))} m</b>
-                  </div>
-                )}
+              let bg = "#FBBF24";
+              let accent = "#111827";
+              let iconBg = "#111827";
+              let iconColor = "#FBBF24";
 
-                {offRouteM != null && (
-                  <div style={muted}>
-                    Écart à {hasOfficial ? "la trace" : "la route"} : <b>{Math.round(offRouteM)} m</b>
-                    {offRouteM > OFF_ROUTE_M ? " (aide auto…)" : ""}
-                  </div>
-                )}
+              if (m <= 40) {
+                bg = "#EF4444";
+                accent = "#ffffff";
+                iconBg = "#ffffff";
+                iconColor = "#EF4444";
+              } else if (m <= 80) {
+                bg = "#F97316";
+                accent = "#111827";
+                iconBg = "#111827";
+                iconColor = "#F97316";
+              }
 
-                <div style={{ height: 4 }} />
+              const pulse = m <= 40;
 
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <div style={{ fontSize: 34, lineHeight: "34px" }}>{maneuverArrow(nextStep?.modifier)}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 900, fontSize: 16 }}>
-                      {nextStep?.instruction ? nextStep.instruction : hasOfficial ? "Suis la ligne bleue…" : "Calcul en cours…"}
+              return (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 10,
+                    left: 10,
+                    right: 10,
+                    zIndex: 9999,
+                    background: bg,
+                    color: accent,
+                    border: "1px solid rgba(0,0,0,.12)",
+                    borderRadius: 14,
+                    padding: "10px 12px",
+                    boxShadow: pulse
+                      ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)"
+                      : "0 8px 22px rgba(0,0,0,.18)",
+                    display: "grid",
+                    gap: 8,
+                    transition: "background 180ms ease, box-shadow 180ms ease",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div
+                      style={{
+                        width: 34,
+                        height: 34,
+                        borderRadius: 12,
+                        background: iconBg,
+                        color: iconColor,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 18,
+                        fontWeight: 900,
+                        transition: "all 180ms ease",
+                      }}
+                      aria-hidden
+                    >
+                      🧒
                     </div>
-                    {me && nextStep?.location && (
-                      <div style={muted}>
-                        Dans <b>{Math.round(haversineMeters(me, nextStep.location))} m</b>
+
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
+                      <div style={{ fontSize: 12, opacity: 0.85 }}>
+                        {stopBanner.label ?? "Zone d’embarquement / débarquement"}
                       </div>
-                    )}
+                    </div>
+                  </div>
+
+                  <div style={{ height: 10, borderRadius: 999, background: "rgba(0,0,0,.2)", overflow: "hidden" }}>
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${pct}%`,
+                        background: accent,
+                        borderRadius: 999,
+                        transition: "width 140ms linear, background 180ms ease",
+                      }}
+                    />
                   </div>
                 </div>
+              );
+            })()}
 
-                {err && <div style={{ color: "#b91c1c", fontWeight: 800 }}>{err}</div>}
+            {/* Affichage “conduite” gros, simple */}
+            <div style={{ display: "grid", gap: 10, paddingTop: 70 }}>
+              <div style={{ fontWeight: 900 }}>
+                Prochain arrêt : {targetIdx + 1} / {points.length}
+              </div>
+              <div style={muted}>{target?.label ? target.label : "—"}</div>
 
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button style={{ ...btn("ghost"), flex: 1, minWidth: 150 }} onClick={() => setFollow((v) => !v)}>
-                    Suivi carte: {follow ? "ON" : "OFF"}
-                  </button>
-
-                  <button style={{ ...btn("ghost"), flex: 1, minWidth: 150 }} onClick={() => setRotateMap((v) => !v)}>
-                    Rotation: {rotateMap ? "ON" : "OFF"}
-                  </button>
-
-                  <button
-                    style={{ ...btn("ghost"), flex: 1, minWidth: 150 }}
-                    onClick={() => {
-                      playDing();
-                      speak("Test de navigation. La voix fonctionne.");
-                    }}
-                  >
-                    Test voix
-                  </button>
+              {me && target && (
+                <div style={{ fontSize: 40, fontWeight: 950, letterSpacing: -0.5 }}>
+                  {Math.round(haversineMeters(me, target))} m
                 </div>
+              )}
 
-                <button style={{ ...bigBtn, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }} onClick={stop}>
-                  Arrêter
-                </button>
+              <div style={{ height: 6 }} />
+
+              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                <div style={{ fontSize: 54, lineHeight: "54px" }}>{maneuverArrow(nextStep?.modifier)}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 950, fontSize: 28, lineHeight: "32px" }}>
+                    {finished ? "✅ Circuit terminé" : nextStep?.instruction ? nextStep.instruction : "…"}
+                  </div>
+                  {!finished && me && nextStep?.location && (
+                    <div style={{ fontSize: 22, opacity: 0.8, marginTop: 6 }}>
+                      dans <b>{Math.round(haversineMeters(me, nextStep.location))} m</b>
+                    </div>
+                  )}
+                </div>
               </div>
+
+              {err && <div style={{ color: "#b91c1c", fontWeight: 900, fontSize: 16 }}>{err}</div>}
+
+              {offRouteM != null && (
+                <div style={{ ...muted, marginTop: 6 }}>
+                  Écart: <b>{Math.round(offRouteM)} m</b>
+                </div>
+              )}
             </div>
-
-            <div style={{ ...card, padding: 10 }}>
-              <div style={{ height: 460, borderRadius: 14, overflow: "hidden", position: "relative" }}>
-                {/* Bandeau Waze-like + barre progression intelligente */}
-                {stopBanner.show ? (
-                  (() => {
-                    const MAX = 200;
-                    const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
-                    const m = Math.max(0, Math.min(MAX, Math.round(meters)));
-                    const pct = Math.round((1 - m / MAX) * 100);
-
-                    let bg = "#FBBF24";
-                    let accent = "#111827";
-                    let iconBg = "#111827";
-                    let iconColor = "#FBBF24";
-
-                    if (m <= 40) {
-                      bg = "#EF4444";
-                      accent = "#ffffff";
-                      iconBg = "#ffffff";
-                      iconColor = "#EF4444";
-                    } else if (m <= 80) {
-                      bg = "#F97316";
-                      accent = "#111827";
-                      iconBg = "#111827";
-                      iconColor = "#F97316";
-                    }
-
-                    const pulse = m <= 40;
-
-                    return (
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: 10,
-                          left: 10,
-                          right: 10,
-                          zIndex: 9999,
-                          background: bg,
-                          color: accent,
-                          border: "1px solid rgba(0,0,0,.12)",
-                          borderRadius: 14,
-                          padding: "10px 12px",
-                          boxShadow: pulse
-                            ? "0 0 0 4px rgba(239,68,68,.35), 0 8px 22px rgba(0,0,0,.18)"
-                            : "0 8px 22px rgba(0,0,0,.18)",
-                          display: "grid",
-                          gap: 8,
-                          transition: "background 180ms ease, box-shadow 180ms ease",
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          <div
-                            style={{
-                              width: 34,
-                              height: 34,
-                              borderRadius: 12,
-                              background: iconBg,
-                              color: iconColor,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontSize: 18,
-                              fontWeight: 900,
-                              transition: "all 180ms ease",
-                            }}
-                            aria-hidden
-                          >
-                            🧒
-                          </div>
-
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 900 }}>Arrêt scolaire dans {m} m</div>
-                            <div style={{ fontSize: 12, opacity: 0.85 }}>
-                              {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            height: 10,
-                            borderRadius: 999,
-                            background: "rgba(0,0,0,.2)",
-                            overflow: "hidden",
-                          }}
-                        >
-                          <div
-                            style={{
-                              height: "100%",
-                              width: `${pct}%`,
-                              background: accent,
-                              borderRadius: 999,
-                              transition: "width 140ms linear, background 180ms ease",
-                            }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })()
-                ) : null}
-
-               <MapContainer
-  center={center}
-  zoom={17}
-  style={{ height: "100%", width: "100%" }}
-  preferCanvas={true}
->
-                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-
-                  <FollowMe me={me} follow={follow} />
-                  <RotateMap enabled={rotateMap} bearingDeg={bearingSmooth} />
-
-                  {/* Breadcrumb (trajet réel) */}
-                  {trail.length >= 2 && (
-                    <Polyline
-                      positions={trail}
-                      pathOptions={{ color: "#8ab4f8", weight: 4, opacity: 0.55, lineCap: "round", lineJoin: "round" }}
-                    />
-                  )}
-
-                  {/* Trace officielle */}
-                  {hasOfficial && officialLine.length > 0 && (
-                    <>
-                      <Polyline
-                        positions={officialLine}
-                        pathOptions={{ color: "#ffffff", weight: 12, opacity: 0.92, lineCap: "round", lineJoin: "round" }}
-                      />
-                      <Polyline
-                        positions={officialLine}
-                        pathOptions={{ color: "#1A73E8", weight: 7, opacity: 0.95, lineCap: "round", lineJoin: "round" }}
-                      />
-                    </>
-                  )}
-
-                  {/* Route Mapbox (aide / retour) */}
-                  {routeLine.length > 0 && (
-                    <>
-                      <Polyline
-                        positions={routeLine}
-                        pathOptions={{ color: "#ffffff", weight: 10, opacity: 0.75, lineCap: "round", lineJoin: "round" }}
-                      />
-                      <Polyline
-                        positions={routeLine}
-                        pathOptions={{ color: "#1A73E8", weight: 6, opacity: 0.75, lineCap: "round", lineJoin: "round" }}
-                      />
-                    </>
-                  )}
-
-                  {/* Moi */}
-                  {me && <Marker position={[me.lat, me.lng]} icon={meIcon} />}
-                  {me && bearingSmooth != null && <Marker position={[me.lat, me.lng]} icon={headingIcon(bearingSmooth)} />}
-
-                  {/* Prochain arrêt (icône enfant) */}
-                  {target && <Marker position={[target.lat, target.lng]} icon={schoolStopIcon} />}
-                </MapContainer>
-              </div>
-            </div>
-          </>
+          </div>
         )}
       </div>
     </div>
