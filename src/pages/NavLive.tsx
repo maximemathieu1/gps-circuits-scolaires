@@ -126,36 +126,151 @@ function minDistanceToPolylineMeters(me: { lat: number; lng: number }, line: [nu
 }
 
 /* =========================
-   Voix + Ding (GPS standard)
+   Keep screen awake + Fullscreen
 ========================= */
 
-function playDing() {
-  try {
-    const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
-    if (!AC) return;
+function useAutoFullscreen(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
 
-    const ctx = new AC();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
+    const el: any = document.documentElement;
 
-    o.type = "sine";
-    o.frequency.setValueAtTime(880, ctx.currentTime);
-    g.gain.setValueAtTime(0.0001, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
-
-    o.connect(g);
-    g.connect(ctx.destination);
-
-    o.start();
-    o.stop(ctx.currentTime + 0.2);
-
-    o.onended = () => {
+    const enter = async () => {
       try {
-        ctx.close?.();
+        if (document.fullscreenElement) return;
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+      } catch {
+        // iOS peut refuser: on garde au moins le plein écran "visuel" via CSS
+      }
+    };
+
+    enter();
+
+    return () => {
+      const d: any = document;
+      try {
+        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen();
+        else if (d.webkitFullscreenElement && d.webkitExitFullscreen) d.webkitExitFullscreen();
       } catch {}
     };
-  } catch {}
+  }, [active]);
+}
+
+function useBodyNoScroll(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+    const prevOverflow = document.body.style.overflow;
+    const prevBg = document.body.style.background;
+    document.body.style.overflow = "hidden";
+    document.body.style.background = "#0b1220";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.body.style.background = prevBg;
+    };
+  }, [active]);
+}
+
+// Fallback iOS (souvent) : une mini vidéo muette invisible peut aider contre la veille
+function useNoSleepVideo(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+
+    const v = document.createElement("video");
+    v.setAttribute("playsinline", "true");
+    v.setAttribute("webkit-playsinline", "true");
+    v.muted = true;
+    v.loop = true;
+    v.autoplay = true;
+
+    // vidéo 1x1 noire (data URL)
+    v.src =
+      "data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAGMbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAABR0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABR0a2hkAAAABAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABEdWR0YQAAACptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjU4LjI5LjEwMA==";
+
+    v.style.position = "fixed";
+    v.style.left = "-9999px";
+    v.style.top = "0";
+    v.style.width = "1px";
+    v.style.height = "1px";
+    v.style.opacity = "0";
+    v.style.pointerEvents = "none";
+
+    document.body.appendChild(v);
+
+    const play = async () => {
+      try {
+        await v.play();
+      } catch {}
+    };
+
+    play();
+
+    return () => {
+      try {
+        v.pause();
+      } catch {}
+      try {
+        v.remove();
+      } catch {}
+    };
+  }, [active]);
+}
+
+/* =========================
+   Ding + Voice
+========================= */
+
+// ✅ Ding "béton": AudioContext conservé, resume() avant de jouer, volume plus fort
+function useDing() {
+  const ctxRef = useRef<AudioContext | null>(null);
+
+  function getCtx() {
+    const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
+    if (!AC) return null;
+    if (!ctxRef.current) ctxRef.current = new AC();
+    return ctxRef.current;
+  }
+
+  async function unlock() {
+    const ctx = getCtx();
+    if (!ctx) return;
+    try {
+      if (ctx.state === "suspended") await ctx.resume();
+    } catch {}
+  }
+
+  async function ding() {
+    const ctx = getCtx();
+    if (!ctx) return;
+
+    try {
+      if (ctx.state === "suspended") await ctx.resume();
+    } catch {}
+
+    try {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+
+      // petit "double-beep" style GPS
+      const t0 = ctx.currentTime;
+
+      o.type = "sine";
+      o.frequency.setValueAtTime(980, t0);
+      o.frequency.setValueAtTime(880, t0 + 0.09);
+
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.01); // plus fort
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+
+      o.connect(g);
+      g.connect(ctx.destination);
+
+      o.start(t0);
+      o.stop(t0 + 0.2);
+    } catch {}
+  }
+
+  return { unlock, ding };
 }
 
 function useSpeaker() {
@@ -180,7 +295,6 @@ function useSpeaker() {
       if (opts?.dedupe !== false) {
         if (t === lastTextRef.current) return;
       }
-
       if (now - lastSpeakAtRef.current < cooldownMs) return;
 
       lastSpeakAtRef.current = now;
@@ -234,13 +348,9 @@ function isActionableStep(s: Step | undefined) {
   const ins = (s.instruction || "").toLowerCase();
   const name = (s.name || "").toLowerCase();
 
-  // Jamais
   if (t.includes("arrive") || t.includes("depart")) return false;
-
-  // Pas d'annonces d'arrêts / waypoint
   if (ins.includes("arrêt") || ins.includes("stop") || ins.includes("destination")) return false;
 
-  // mots clés "utile GPS"
   const isRamp =
     ins.includes("bretelle") ||
     ins.includes("rampe") ||
@@ -254,19 +364,12 @@ function isActionableStep(s: Step | undefined) {
     t.includes("roundabout") ||
     t.includes("exit");
 
-  // "slight left/right" seulement si bretelle/merge/sortie etc.
   if (mod.includes("slight")) return isRamp;
-
-  // "continue / straight" seulement si bretelle/sortie/autoroute (sinon inutile)
   if (t.includes("continue") || mod.includes("straight")) return isRamp;
 
-  // virages classiques
   if (mod.includes("left") || mod.includes("right") || mod.includes("uturn")) return true;
-
-  // fallback: si instruction parle clairement de sortie / bretelle
   if (isRamp) return true;
 
-  // évite d’annoncer du bruit
   if (name && name.length >= 3 && (ins.includes("tournez") || ins.includes("prenez"))) return true;
 
   return false;
@@ -279,7 +382,6 @@ function stepPhrase(s: Step) {
   const b = base.toLowerCase();
   const n = name.toLowerCase();
   if (n.length >= 4 && b.includes(n)) return base;
-  // standard gps: instruction + rue
   return `${base} sur ${name}`;
 }
 
@@ -291,6 +393,7 @@ export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
   const { speak, stopAll } = useSpeaker();
+  const { unlock: unlockDing, ding } = useDing();
 
   const circuitId = q.get("circuit") || "";
 
@@ -314,11 +417,11 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Trace officielle (trajet habituel) — utilisé seulement pour "écart"
+  // Trace officielle — utilisé seulement pour "écart"
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Route Mapbox (guidage)
+  // Route Mapbox
   const [routeLine, setRouteLine] = useState<[number, number][]>([]);
   const [steps, setSteps] = useState<Step[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
@@ -328,13 +431,23 @@ export default function NavLive() {
   const offRouteStrikeRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
 
+  // ✅ renforçeur reroute: si on s’éloigne du target trop longtemps
+  const lastStopDistRef = useRef<number | null>(null);
+  const awaySinceRef = useRef<number | null>(null);
+
+  // Wake lock déjà présent
   const { supported: wlSupported, active: wlActive } = useWakeLock(running);
 
-  // Annonces virage: 2 niveaux max (loin/près) et seulement pour étapes "action"
+  // ✅ “béton” anti-veille + fullscreen
+  useNoSleepVideo(running);
+  useAutoFullscreen(running);
+  useBodyNoScroll(running);
+
+  // Annonces virage
   const spokenFarRef = useRef<number | null>(null);
   const spokenNearRef = useRef<number | null>(null);
 
-  // Arrêts: avertissement (150/200) + ding 10m
+  // Arrêts: avertissement + ding 10m
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
@@ -363,8 +476,8 @@ export default function NavLive() {
   }
 
   // Virages GPS standard: 2 annonces max
-  const TURN_FAR_M = 220; // annonce "prépare-toi" (si loin)
-  const TURN_NEAR_M = 65; // annonce "maintenant" (unique)
+  const TURN_FAR_M = 220;
+  const TURN_NEAR_M = 65;
   const STEP_ADVANCE_M = 16;
 
   // Reroute
@@ -401,6 +514,10 @@ export default function NavLive() {
 
     stopBannerLastMRef.current = null;
     setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+
+    // reroute helper reset
+    lastStopDistRef.current = null;
+    awaySinceRef.current = null;
 
     meSmoothRef.current = null;
     setFinished(false);
@@ -498,7 +615,6 @@ export default function NavLive() {
 
       routeCacheRef.current.set(key, { line: coords, steps: st, at: now });
 
-      // ✅ annonce de départ (garage / stationnement) : 1 fois, tout de suite
       if (opts?.announceStart) {
         const s0 = st[idx0];
         if (isActionableStep(s0)) speak(`Pour démarrer, ${stepPhrase(s0)}.`, { cooldownMs: 400, interrupt: true });
@@ -515,6 +631,11 @@ export default function NavLive() {
       alert("Circuit manquant. Reviens au portail.");
       return;
     }
+
+    // ✅ unlock audio (ding + voice) MUST be in a user gesture
+    await unlockDing();
+    // petit “ping” de test très court (optionnel, mais aide à “débloquer” certains appareils)
+    // await ding();
 
     const got = await new Promise<{ lat: number; lng: number; acc?: number | null }>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
@@ -589,7 +710,7 @@ export default function NavLive() {
     };
   }, [running]);
 
-  // ✅ REROUTE "GPS standard" (vraiment)
+  // ✅ REROUTE "GPS standard" (renforcé)
   useEffect(() => {
     if (!running) return;
     if (!me || !target) return;
@@ -613,14 +734,31 @@ export default function NavLive() {
     if (isOff) offRouteStrikeRef.current += 1;
     else if (dLine != null && dLine < ON_ROUTE_M) offRouteStrikeRef.current = 0;
 
+    // ✅ guardrail : si la distance au prochain arrêt AUGMENTE pendant trop longtemps => reroute
+    const dStop = haversineMeters(me, target);
+    const prev = lastStopDistRef.current;
+    lastStopDistRef.current = dStop;
+
+    if (prev != null) {
+      const gettingAway = dStop > prev + 18;
+      if (gettingAway) {
+        if (awaySinceRef.current == null) awaySinceRef.current = now;
+      } else {
+        awaySinceRef.current = null;
+      }
+    }
+
     const COOLDOWN_MS = 7000;
     if (now - lastRerouteAtRef.current < COOLDOWN_MS) return;
 
-    // 2 strikes = reroute
-    if (offRouteStrikeRef.current < 2) return;
+    const tooLongAway = awaySinceRef.current != null && now - awaySinceRef.current > 9000;
+    const needReroute = offRouteStrikeRef.current >= 2 || tooLongAway;
+
+    if (!needReroute) return;
 
     lastRerouteAtRef.current = now;
     offRouteStrikeRef.current = 0;
+    awaySinceRef.current = null;
 
     calcRoute(me, target, { announceStart: false }).catch((e: any) => setErr(e?.message ?? "Erreur reroute"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -649,23 +787,23 @@ export default function NavLive() {
     if (!finished && rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
-      shown = Math.round(shown / 5) * 5; // anti-jitter
+      shown = Math.round(shown / 5) * 5;
       stopBannerLastMRef.current = shown;
 
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
 
-      // annonce unique 150/200
+      // ✅ annonce unique 150/200 SANS “Ralentissez”
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        speak(`Ralentissez. Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
+        speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
       }
     }
 
-    // ding 10m avant
+    // ✅ Ding 10m avant (béton: on force resume + double-beep)
     if (!finished && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        playDing();
+        ding();
       }
     }
 
@@ -691,7 +829,10 @@ export default function NavLive() {
         spokenFarRef.current = null;
         spokenNearRef.current = null;
 
-        // calc vers prochain arrêt + annonce de départ du prochain segment
+        // reset reroute helper
+        lastStopDistRef.current = null;
+        awaySinceRef.current = null;
+
         if (nextTarget) calcRoute(me, nextTarget, { announceStart: true }).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
       } else {
         speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
@@ -710,7 +851,6 @@ export default function NavLive() {
 
     const curr = steps[stepIdx];
     if (!isActionableStep(curr)) {
-      // saute automatiquement jusqu'à prochaine étape utile
       const ni = nextActionIndex(steps, stepIdx);
       if (ni !== stepIdx) {
         setStepIdx(ni);
@@ -722,32 +862,30 @@ export default function NavLive() {
 
     const dTurn = haversineMeters(me, curr.location);
 
-    // annonce "loin" (max 1 fois)
+    // annonce "loin" (1 fois)
     if (dTurn <= TURN_FAR_M && dTurn > TURN_NEAR_M) {
       if (spokenFarRef.current !== stepIdx) {
         spokenFarRef.current = stepIdx;
-        const msg = `${stepPhrase(curr)} dans ${Math.round(dTurn)} mètres.`;
-        speak(msg, { cooldownMs: 1200, interrupt: true });
+        speak(`${stepPhrase(curr)} dans ${Math.round(dTurn)} mètres.`, { cooldownMs: 1200, interrupt: true });
       }
     }
 
-    // annonce "près" (max 1 fois)
+    // annonce "près" (1 fois)
     if (dTurn <= TURN_NEAR_M) {
       if (spokenNearRef.current !== stepIdx) {
         spokenNearRef.current = stepIdx;
-        const msg = `${stepPhrase(curr)} maintenant.`;
-        speak(msg, { cooldownMs: 900, interrupt: true });
+        speak(`${stepPhrase(curr)} maintenant.`, { cooldownMs: 900, interrupt: true });
       }
     }
 
-    // advance step (et saute aux étapes utiles)
+    // advance step
     if (dTurn <= STEP_ADVANCE_M && stepIdx < steps.length - 1) {
       const ni = nextActionIndex(steps, stepIdx);
       setStepIdx(ni);
       spokenFarRef.current = null;
       spokenNearRef.current = null;
     }
-  }, [running, me, target, targetIdx, points.length, steps, stepIdx, finished, stopBanner.show, routeLine, hasOfficial, officialLine]);
+  }, [running, me, target, targetIdx, points.length, steps, stepIdx, finished, stopBanner.show]); // eslint-disable-line
 
   const nextStep = steps[stepIdx];
   const showTurn = isActionableStep(nextStep) ? nextStep : undefined;
@@ -767,7 +905,6 @@ export default function NavLive() {
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
             </div>
 
-            {/* ✅ SEULS BOUTONS AUTORISÉS */}
             <div style={{ display: "flex", gap: 8 }}>
               <button style={btn("ghost")} onClick={() => nav("/")}>
                 Retour
@@ -787,7 +924,7 @@ export default function NavLive() {
             {!circuitId && <div style={{ ...muted, marginTop: 10 }}>Circuit manquant. Reviens au portail.</div>}
           </div>
         ) : (
-          <div style={{ ...card, position: "relative" }}>
+          <div style={{ ...card, position: "relative", minHeight: "100vh" }}>
             {/* Bandeau jaune 150/200 (monotone) */}
             {stopBanner.show &&
               (() => {
