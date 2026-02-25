@@ -3,12 +3,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
-import { page, container, card, h1, muted, row, btn, bigBtn, select, input } from "@/ui";
+import { page, container, card, h1, muted, row, btn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
 type Circuit = { id: string; nom: string };
 type Point = { idx: number; lat: number; lng: number; label: string | null; created_at?: string };
-
 type SaveTraceResp = { ok: true; version_id: string; points_saved: number };
 
 function useQuery() {
@@ -51,6 +50,8 @@ export default function Record() {
   const q = useQuery();
   const nav = useNavigate();
 
+  const canGeo = typeof navigator !== "undefined" && "geolocation" in navigator;
+
   const [transporteur, setTransporteur] = useState<TCode>(
     (q.get("t") as TCode) || (localStorage.getItem(LS_T) as TCode) || "B"
   );
@@ -58,17 +59,20 @@ export default function Record() {
   const [circuits, setCircuits] = useState<Circuit[]>([]);
   const [selectedCircuit, setSelectedCircuit] = useState<string>(q.get("circuit") || localStorage.getItem(LS_C) || "");
 
-  const [mode, setMode] = useState<"new" | "update">("new");
+  // Écran départ : 2 choix
+  const [step, setStep] = useState<"pick" | "new" | "update">("pick");
+
+  // Nouveau
   const [newNom, setNewNom] = useState("");
 
   // session
   const [recording, setRecording] = useState(false);
   const [versionId, setVersionId] = useState<string | null>(null);
 
-  // ARRÊTS (points d’arrêt)
+  // ARRÊTS
   const [points, setPoints] = useState<Point[]>([]);
 
-  // TRACE (trajet réel / polyline officielle)
+  // TRACE (moteur conservé)
   const [trace, setTrace] = useState<[number, number][]>([]);
   const [tracePaused, setTracePaused] = useState(false);
   const [savingTrace, setSavingTrace] = useState(false);
@@ -78,20 +82,17 @@ export default function Record() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // auth (pour éviter created_by = null)
+  // auth
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
-  const canGeo = typeof navigator !== "undefined" && "geolocation" in navigator;
-
-  // Throttle trace (pour éviter trop de points)
+  // Throttle trace
   const lastTracePointRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastTraceAtRef = useRef<number>(0);
 
-  // Paramètres trace : tu peux ajuster
-  const TRACE_MIN_METERS = 8; // n'ajoute pas un point si tu n'as pas bougé d'au moins 8m
-  const TRACE_MIN_MS = 1200; // n'ajoute pas plus souvent que 1.2s
-  const TRACE_MAX_POINTS = 12000; // sécurité
+  const TRACE_MIN_METERS = 8;
+  const TRACE_MIN_MS = 1200;
+  const TRACE_MAX_POINTS = 12000;
 
   async function refreshAuth() {
     try {
@@ -134,7 +135,7 @@ export default function Record() {
     setCircuits(r.circuits ?? []);
     setSelectedCircuit((prev) => {
       const keep = prev && r.circuits?.some((x) => x.id === prev);
-      return keep ? prev : (r.circuits?.[0]?.id ?? "");
+      return keep ? prev : r.circuits?.[0]?.id ?? "";
     });
   }
 
@@ -153,13 +154,11 @@ export default function Record() {
     if (selectedCircuit) localStorage.setItem(LS_C, selectedCircuit);
   }, [selectedCircuit]);
 
-  // auth au chargement
   useEffect(() => {
     refreshAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // petit “check GPS” au chargement
   useEffect(() => {
     let cancelled = false;
 
@@ -185,7 +184,7 @@ export default function Record() {
     };
   }, [canGeo]);
 
-  // ✅ WATCH GPS pendant enregistrement : construit la TRACE (polyline)
+  // WATCH GPS pendant enregistrement : construit TRACE
   useEffect(() => {
     if (!recording) return;
     if (!canGeo) return;
@@ -208,14 +207,11 @@ export default function Record() {
           if (tracePaused) return;
 
           const now = Date.now();
-
-          // throttle temporel
           if (now - lastTraceAtRef.current < TRACE_MIN_MS) return;
 
           const curr = { lat, lng };
           const last = lastTracePointRef.current;
 
-          // throttle distance
           if (last) {
             const moved = haversineMeters(curr, last);
             if (moved < TRACE_MIN_METERS) return;
@@ -233,7 +229,6 @@ export default function Record() {
         (err) => {
           if (cancelled) return;
           setGpsOk(false);
-          // on évite d'alerter en boucle
           console.warn("GPS watch error:", err?.message);
         },
         { enableHighAccuracy: true, maximumAge: 500, timeout: 15000 }
@@ -248,15 +243,23 @@ export default function Record() {
     };
   }, [recording, tracePaused, canGeo]);
 
+  function resetSessionForStart() {
+    setRecording(true);
+    setPoints([]);
+    setTrace([]);
+    setTracePaused(false);
+    lastTracePointRef.current = null;
+    lastTraceAtRef.current = 0;
+  }
+
   async function startNew() {
     const nom = newNom.trim();
-    if (!nom) return alert("Nom du circuit requis.");
+    if (!nom) return;
 
     setBusy(true);
     try {
       const uid = await requireAuth();
 
-      // test GPS (force permission)
       if (canGeo) {
         const p = await getPos();
         setGpsOk(true);
@@ -273,17 +276,9 @@ export default function Record() {
 
       setSelectedCircuit(r.circuit_id);
       setVersionId(r.version_id);
-
-      // reset session
-      setRecording(true);
-      setPoints([]);
-      setTrace([]);
-      setTracePaused(false);
-      lastTracePointRef.current = null;
-      lastTraceAtRef.current = 0;
+      resetSessionForStart();
 
       setNewNom("");
-
       await loadCircuits();
     } catch (e: any) {
       if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
@@ -293,7 +288,7 @@ export default function Record() {
   }
 
   async function startUpdate() {
-    if (!selectedCircuit) return alert("Choisis un circuit.");
+    if (!selectedCircuit) return;
 
     setBusy(true);
     try {
@@ -312,14 +307,7 @@ export default function Record() {
       });
 
       setVersionId(r.version_id);
-
-      // reset session
-      setRecording(true);
-      setPoints([]);
-      setTrace([]);
-      setTracePaused(false);
-      lastTracePointRef.current = null;
-      lastTraceAtRef.current = 0;
+      resetSessionForStart();
     } catch (e: any) {
       if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
@@ -327,28 +315,7 @@ export default function Record() {
     }
   }
 
-  async function renameSelected() {
-    if (!selectedCircuit) return;
-
-    setBusy(true);
-    try {
-      await requireAuth();
-
-      const current = circuits.find((c) => c.id === selectedCircuit)?.nom ?? "";
-      const nom = (window.prompt("Nouveau nom du circuit :", current) ?? "").trim();
-      if (!nom) return;
-
-      await callFn("circuits-api", { action: "rename_circuit", circuit_id: selectedCircuit, nom });
-      await loadCircuits();
-      alert("Nom mis à jour ✅");
-    } catch (e: any) {
-      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // ⭐️ BOUTON #1 : Ajouter arrêt (super important)
+  // ✅ Ajout arrêt: plus de prompt de commentaire (label = null)
   async function addStop() {
     if (!versionId) return;
 
@@ -360,27 +327,22 @@ export default function Record() {
       setGpsOk(true);
       setGpsAccuracy(typeof pos.accuracy === "number" ? Math.round(pos.accuracy) : null);
 
-      // petite garde-fou : GPS trop imprécis
       if (typeof pos.accuracy === "number" && pos.accuracy > 45) {
         const ok = confirm(`GPS imprécis (± ${Math.round(pos.accuracy)} m). Ajouter l’arrêt quand même ?`);
         if (!ok) return;
       }
-
-      const labelRaw = window.prompt("Nom / note de l’arrêt (optionnel)", "") ?? "";
-      const label = labelRaw.trim() ? labelRaw.trim() : null;
 
       await callFn("circuits-api", {
         action: "add_point",
         version_id: versionId,
         lat: pos.lat,
         lng: pos.lng,
-        label,
+        label: null,
       });
 
       await sleep(80);
       await loadPointsByVersion(versionId);
 
-      // ✅ Optionnel : quand on ajoute un arrêt, on force un point dans la trace (utile pour “snap” mental)
       const curr = { lat: pos.lat, lng: pos.lng };
       lastTracePointRef.current = curr;
       lastTraceAtRef.current = Date.now();
@@ -396,64 +358,7 @@ export default function Record() {
     }
   }
 
-  async function undoLast() {
-    if (!versionId) return;
-    if (!confirm("Annuler le dernier arrêt ?")) return;
-
-    setBusy(true);
-    try {
-      await requireAuth();
-
-      const r = await callFn<{ ok: boolean; deleted: boolean; idx?: number }>("circuits-api", {
-        action: "delete_last_point",
-        version_id: versionId,
-      });
-
-      if (!r.deleted) alert("Aucun arrêt à annuler.");
-      await loadPointsByVersion(versionId);
-    } catch (e: any) {
-      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveTraceNow() {
-    if (!versionId) return alert("Version manquante.");
-    if (trace.length < 20) return alert("Trace trop courte (pas assez de points).");
-
-    setSavingTrace(true);
-    try {
-      await requireAuth();
-
-      const payload = {
-        action: "save_trace",
-        version_id: versionId,
-        trail: trace.map(([lat, lng], idx) => ({ idx, lat, lng })),
-      };
-
-      const r = await callFn<SaveTraceResp>("circuits-api", payload);
-      alert(`Trajet sauvegardé ✅\nPoints: ${r.points_saved}\nVersion: ${r.version_id}`);
-    } catch (e: any) {
-      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
-    } finally {
-      setSavingTrace(false);
-    }
-  }
-
   async function stop() {
-    // on propose de sauver la trace à la fin (sans casser ton workflow)
-    try {
-      if (versionId && trace.length >= 20) {
-        const ok = confirm("Sauvegarder aussi le trajet (trace) avant de terminer ?");
-        if (ok) {
-          await saveTraceNow();
-        }
-      }
-    } catch {
-      // ignore (saveTraceNow gère déjà les alertes)
-    }
-
     setRecording(false);
     setVersionId(null);
     setPoints([]);
@@ -462,201 +367,111 @@ export default function Record() {
     lastTracePointRef.current = null;
     lastTraceAtRef.current = 0;
 
-    alert("Enregistrement terminé ✅");
     nav("/");
   }
+
+  // --- Styles (même vibe que remplacant)
+  const softShadow = "0 10px 30px rgba(17,24,39,.08)";
+  const ring = "0 0 0 6px rgba(59,130,246,.10)";
+
+  const circleBase: React.CSSProperties = {
+    borderRadius: 999,
+    display: "grid",
+    placeItems: "center",
+    border: "1px solid #e5e7eb",
+    background: "#fff",
+    cursor: "pointer",
+    boxShadow: softShadow,
+    userSelect: "none",
+  };
+
+  const circlePrimary: React.CSSProperties = {
+    ...circleBase,
+    width: 136,
+    height: 136,
+    border: "1px solid rgba(37,99,235,.25)",
+    background: "linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)",
+    color: "#fff",
+    boxShadow: `${softShadow}, ${ring}`,
+  };
+
+  const circleWarn: React.CSSProperties = {
+    ...circleBase,
+    width: 136,
+    height: 136,
+    border: "1px solid rgba(245,158,11,.25)",
+    background: "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)",
+    color: "#7c2d12",
+  };
+
+  const circleGood: React.CSSProperties = {
+    ...circleBase,
+    width: 136,
+    height: 136,
+    border: "1px solid rgba(16,185,129,.25)",
+    background: "linear-gradient(180deg, #10b981 0%, #059669 100%)",
+    color: "#fff",
+    boxShadow: softShadow,
+  };
+
+  const disabledStyle: React.CSSProperties = {
+    opacity: 0.45,
+    cursor: "not-allowed",
+    boxShadow: "none",
+  };
+
+  const canStartNew = !busy && Boolean(newNom.trim());
+  const canStartUpdate = !busy && Boolean(selectedCircuit);
+
+  const headerCardStyle: React.CSSProperties = { ...card, padding: "12px 14px" };
 
   return (
     <div style={page}>
       <div style={container}>
-        <div style={card}>
-          <div style={row}>
-            <div style={{ flex: 1 }}>
-              <h1 style={h1}>Mode Enregistrement</h1>
-              <div style={muted}>
-                À chaque arrêt : clique <b>Ajouter arrêt</b>. (C’est ce qui sert aux annonces en navigation.)
-              </div>
-              <div style={{ ...muted, marginTop: 6 }}>
-                Connexion :{" "}
-                {authed === null ? "vérification…" : authed ? `OK (${userId?.slice(0, 8)}…)` : "non connecté"}
-              </div>
-            </div>
-            <button style={btn("ghost")} onClick={() => nav("/")}>
-              Retour
-            </button>
-          </div>
-        </div>
+        {/* Header minimal: Retour à gauche seulement */}
+        {!recording && step === "pick" && (
+  <div style={headerCardStyle}>
+    <div style={{ display: "flex", justifyContent: "flex-start" }}>
+      <button style={btn("ghost")} onClick={() => nav("/")}>
+        Retour
+      </button>
+    </div>
+  </div>
+)}
 
-        {!recording ? (
+        {/* ENREGISTREMENT */}
+        {recording ? (
           <>
             <div style={card}>
-              <div style={{ display: "grid", gap: 10 }}>
-                <div>
-                  <div style={{ ...muted, marginBottom: 6 }}>Transporteur</div>
-                  <select
-                    style={select}
-                    value={transporteur}
-                    onChange={(e) => setTransporteur(e.target.value as TCode)}
-                    disabled={busy}
-                  >
-                    <option value="B">Breton</option>
-                    <option value="C">Champagne</option>
-                    <option value="S">Sécuritaire</option>
-                  </select>
+              <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
+                <div style={{ ...muted, textAlign: "center" }}>
+                  Arrêts : <b>{points.length}</b> · GPS :{" "}
+                  <b>{gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}</b>
                 </div>
 
-                <div style={row}>
-                  <button
-                    style={{ ...btn(mode === "new" ? "primary" : "ghost"), flex: 1 }}
-                    onClick={() => setMode("new")}
-                    disabled={busy}
-                  >
-                    Nouveau circuit
-                  </button>
-                  <button
-                    style={{ ...btn(mode === "update" ? "primary" : "ghost"), flex: 1 }}
-                    onClick={() => setMode("update")}
-                    disabled={busy}
-                  >
-                    Mettre à jour
-                  </button>
-                </div>
-
-                {mode === "new" ? (
-                  <>
-                    <div>
-                      <div style={{ ...muted, marginBottom: 6 }}>Nom du nouveau circuit</div>
-                      <input
-                        style={input}
-                        value={newNom}
-                        onChange={(e) => setNewNom(e.target.value)}
-                        placeholder="Ex: Circuit matin – St-Joseph"
-                        disabled={busy}
-                      />
+                <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
+                  <button style={{ ...circleGood, ...(busy ? disabledStyle : {}) }} onClick={addStop} disabled={busy}>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>ARRÊT</div>
+                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>ENREGISTRER</div>
                     </div>
-                    <button style={bigBtn} onClick={startNew} disabled={busy || !newNom.trim()}>
-                      Démarrer
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <div>
-                      <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
-                      <select
-                        style={select}
-                        value={selectedCircuit}
-                        onChange={(e) => setSelectedCircuit(e.target.value)}
-                        disabled={busy}
-                      >
-                        <option value="">— Choisir —</option>
-                        {circuits.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.nom}
-                          </option>
-                        ))}
-                      </select>
-                      <div style={{ height: 8 }} />
-                      <div style={row}>
-                        <button style={btn("ghost")} onClick={renameSelected} disabled={busy || !selectedCircuit}>
-                          Renommer
-                        </button>
-                        <button
-                          style={{ ...btn("primary"), flex: 1 }}
-                          onClick={startUpdate}
-                          disabled={busy || !selectedCircuit}
-                        >
-                          Démarrer mise à jour
-                        </button>
-                      </div>
+                  </button>
+
+                  <button style={{ ...circleWarn, ...(busy ? disabledStyle : {}) }} onClick={stop} disabled={busy}>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>STOP</div>
+                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>TERMINER</div>
                     </div>
-                  </>
-                )}
-
-                <div style={{ ...muted, marginTop: 6 }}>
-                  GPS : {gpsOk === null ? "vérification…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué / refusé"}
-                </div>
-
-                {authed === false && (
-                  <div
-                    style={{
-                      ...muted,
-                      border: "1px solid #fee2e2",
-                      background: "#fff1f2",
-                      padding: 10,
-                      borderRadius: 12,
-                    }}
-                  >
-                    ⚠️ Tu n’es pas connecté. La création / mise à jour échouera (created_by requis).
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={card}>
-              <div style={{ display: "grid", gap: 8 }}>
-                <div style={{ fontWeight: 900 }}>Enregistrement en cours</div>
-
-                <div style={muted}>
-                  Arrêts enregistrés : <b>{points.length}</b>
-                </div>
-
-                <div style={muted}>
-                  Trajet (trace) : <b>{trace.length}</b> point{trace.length > 1 ? "s" : ""}{" "}
-                  {tracePaused ? <b>(PAUSE)</b> : <b>(ON)</b>}
-                </div>
-
-                <div style={muted}>
-                  Précision GPS : <b>{gpsAccuracy !== null ? `± ${gpsAccuracy} m` : "—"}</b>
-                </div>
-
-                <div style={{ height: 6 }} />
-
-                {/* ⭐️ Bouton #1 */}
-                <button style={bigBtn} onClick={addStop} disabled={busy}>
-                  Ajouter arrêt
-                </button>
-
-                <div style={row}>
-                  <button
-                    style={btn("ghost")}
-                    onClick={() => setTracePaused((v) => !v)}
-                    disabled={busy}
-                    title="Met en pause la capture du trajet (la liste d’arrêts reste active)."
-                  >
-                    {tracePaused ? "Reprendre trajet" : "Pause trajet"}
-                  </button>
-
-                  <button
-                    style={btn("ghost")}
-                    onClick={saveTraceNow}
-                    disabled={busy || savingTrace || trace.length < 20}
-                    title="Sauvegarde la trace maintenant (utile si tu veux sécuriser avant de terminer)."
-                  >
-                    {savingTrace ? "Sauvegarde…" : "Sauver trajet"}
-                  </button>
-
-                  <button style={btn("ghost")} onClick={undoLast} disabled={busy || points.length === 0}>
-                    Annuler dernier arrêt
                   </button>
                 </div>
-
-                <button
-                  style={{ ...btn("ghost"), borderColor: "#ef4444", color: "#b91c1c" }}
-                  onClick={() => stop()}
-                  disabled={busy}
-                >
-                  Terminer
-                </button>
               </div>
             </div>
 
+            {/* Liste des arrêts (discrète) */}
             <div style={card}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Liste des arrêts</div>
-
+              <div style={{ fontWeight: 900, marginBottom: 8 }}>Arrêts</div>
               {points.length === 0 ? (
-                <div style={muted}>Aucun arrêt encore. Clique “Ajouter arrêt”.</div>
+                <div style={muted}>—</div>
               ) : (
                 <div style={{ display: "grid", gap: 8 }}>
                   {points.map((p) => (
@@ -673,7 +488,7 @@ export default function Record() {
                     >
                       <div style={{ width: 42, fontWeight: 900 }}>{p.idx}</div>
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 800 }}>{p.label ? p.label : "Arrêt"}</div>
+                        <div style={{ fontWeight: 800 }}>Arrêt</div>
                         <div style={muted}>
                           {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
                         </div>
@@ -683,6 +498,131 @@ export default function Record() {
                 </div>
               )}
             </div>
+          </>
+        ) : (
+          <>
+            {/* DÉPART */}
+            {step === "pick" ? (
+              <div style={card}>
+                <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
+                    <button style={circlePrimary} onClick={() => setStep("new")} title="Nouveau circuit">
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NOUVEAU</div>
+                        <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>CIRCUIT</div>
+                      </div>
+                    </button>
+
+                    <button style={circleWarn} onClick={() => setStep("update")} title="Mettre à jour">
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>METTRE</div>
+                        <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>À JOUR</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={card}>
+                <div style={{ display: "grid", gap: 12 }}>
+                  <div>
+                    <div style={{ ...muted, marginBottom: 6 }}>Transporteur</div>
+                    <select
+                      style={select}
+                      value={transporteur}
+                      onChange={(e) => setTransporteur(e.target.value as TCode)}
+                      disabled={busy}
+                    >
+                      <option value="B">Breton</option>
+                      <option value="C">Champagne</option>
+                      <option value="S">Sécuritaire</option>
+                    </select>
+                  </div>
+
+                  {step === "new" ? (
+                    <>
+                      <div>
+                        <div style={{ ...muted, marginBottom: 6 }}>Nom du circuit</div>
+                        <input
+                          style={input}
+                          value={newNom}
+                          onChange={(e) => setNewNom(e.target.value)}
+                          placeholder="Ex: Circuit matin – St-Joseph"
+                          disabled={busy}
+                        />
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
+                        <button
+                          style={{ ...circlePrimary, ...(canStartNew ? {} : disabledStyle) }}
+                          onClick={startNew}
+                          disabled={!canStartNew}
+                          title="Démarrer"
+                        >
+                          <div style={{ textAlign: "center" }}>
+                            <div style={{ fontWeight: 1000, fontSize: 20, lineHeight: 1 }}>DÉMARRER</div>
+                            <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>NOUVEAU</div>
+                          </div>
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
+                        <select
+                          style={select}
+                          value={selectedCircuit}
+                          onChange={(e) => setSelectedCircuit(e.target.value)}
+                          disabled={busy}
+                        >
+                          <option value="">— Choisir —</option>
+                          {circuits.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.nom}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
+                        <button
+                          style={{ ...circlePrimary, ...(canStartUpdate ? {} : disabledStyle) }}
+                          onClick={startUpdate}
+                          disabled={!canStartUpdate}
+                          title="Démarrer"
+                        >
+                          <div style={{ textAlign: "center" }}>
+                            <div style={{ fontWeight: 1000, fontSize: 20, lineHeight: 1 }}>DÉMARRER</div>
+                            <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>
+                              MISE À JOUR
+                            </div>
+                          </div>
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  <div style={{ ...muted, textAlign: "center" }}>
+                    GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
+                  </div>
+
+                  {/* Retour à gauche seulement (pas de rafraîchir) */}
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      style={btn("ghost")}
+                      onClick={() => {
+                        setStep("pick");
+                        setNewNom("");
+                      }}
+                      disabled={busy}
+                    >
+                      Retour
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

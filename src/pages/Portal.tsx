@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
 import { useAuth } from "@/lib/useAuth";
 
-import { page, container, card, h1, muted, row, bigBtn, btn, select, input } from "@/ui";
+import { page, container, card, h1, muted, btn, select } from "@/ui";
 
 type TCode = "B" | "C" | "S";
 const LABEL: Record<TCode, string> = { B: "Breton", C: "Champagne", S: "Sécuritaire" };
@@ -20,13 +20,12 @@ export default function Portal() {
   const [circuits, setCircuits] = useState<Circuit[]>([]);
   const [circuitId, setCircuitId] = useState<string>("");
 
-  const [renaming, setRenaming] = useState(false);
-  const [newName, setNewName] = useState("");
+  // Toggle conducteur (OFF par défaut => mode remplaçant)
+  const [showConducteur, setShowConducteur] = useState(false);
 
   const selected = useMemo(() => circuits.find((c) => c.id === circuitId) ?? null, [circuits, circuitId]);
 
   async function load() {
-    // portail public: on n'appelle pas l'API si non connecté
     if (!isAuthed) {
       setCircuits([]);
       setCircuitId("");
@@ -38,8 +37,9 @@ export default function Portal() {
       transporteur_code: transporteur,
     });
 
-    setCircuits(r.circuits || []);
-    setCircuitId((prev) => (prev && r.circuits.some((x) => x.id === prev) ? prev : r.circuits?.[0]?.id ?? ""));
+    const list = r.circuits || [];
+    setCircuits(list);
+    setCircuitId((prev) => (prev && list.some((x) => x.id === prev) ? prev : list?.[0]?.id ?? ""));
   }
 
   useEffect(() => {
@@ -48,58 +48,148 @@ export default function Portal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transporteur, isAuthed, ready]);
 
+  function goLogin(redirectTo: string = "/") {
+    nav("/login", { state: { redirectTo } });
+  }
+
   function goNav() {
-    if (!isAuthed) return nav("/login", { state: { redirectTo: "/" } });
-    if (!circuitId) return alert("Choisis un circuit.");
+    if (!isAuthed) return goLogin("/");
+    if (!circuitId) return;
     nav(`/nav?circuit=${encodeURIComponent(circuitId)}&t=${transporteur}`);
   }
 
-  function goRecord() {
-    if (!isAuthed)
-      return nav("/login", {
-        state: { redirectTo: "/record?t=" + transporteur + "&circuit=" + encodeURIComponent(circuitId || "") },
-      });
-    nav(`/record?t=${transporteur}&circuit=${encodeURIComponent(circuitId || "")}`);
+  function goRecordAuto() {
+    const url = `/record?t=${transporteur}&circuit=${encodeURIComponent(circuitId || "")}&auto=1`;
+    if (!isAuthed) return goLogin(url);
+    nav(url);
   }
 
-  async function doRename() {
-    if (!isAuthed) return nav("/login", { state: { redirectTo: "/" } });
+  // --- UI styles
+  const softShadow = "0 10px 30px rgba(17,24,39,.08)";
+  const ring = "0 0 0 6px rgba(59,130,246,.10)";
 
-    const name = newName.trim();
-    if (!selected) return;
-    if (!name) return alert("Nom requis.");
+  const toggleWrap: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "10px 12px",
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    background: "#fff",
+  };
 
-    await callFn("circuits-api", { action: "rename_circuit", circuit_id: selected.id, nom: name });
-    setRenaming(false);
-    setNewName("");
-    await load();
-  }
+  const switchOuter: React.CSSProperties = {
+    width: 54,
+    height: 32,
+    borderRadius: 999,
+    border: "1px solid #e5e7eb",
+    background: showConducteur ? "#2563eb" : "#cbd5e1",
+    position: "relative",
+    cursor: "pointer",
+    transition: "all .15s ease",
+    flex: "0 0 auto",
+  };
+
+  const switchKnob: React.CSSProperties = {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    background: "#fff",
+    position: "absolute",
+    top: 2,
+    left: showConducteur ? 26 : 2,
+    transition: "all .15s ease",
+    boxShadow: "0 8px 22px rgba(17,24,39,.18)",
+  };
+
+  const circleBase: React.CSSProperties = {
+    borderRadius: 999,
+    display: "grid",
+    placeItems: "center",
+    border: "1px solid #e5e7eb",
+    background: "#fff",
+    cursor: "pointer",
+    boxShadow: softShadow,
+    userSelect: "none",
+  };
+
+  const circlePrimary: React.CSSProperties = {
+    ...circleBase,
+    width: 136,
+    height: 136,
+    border: "1px solid rgba(37,99,235,.25)",
+    background: "linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)",
+    color: "#fff",
+    boxShadow: `${softShadow}, ${ring}`,
+  };
+
+  const disabledStyle: React.CSSProperties = {
+    opacity: 0.45,
+    cursor: "not-allowed",
+    boxShadow: "none",
+  };
+
+  const canUse = ready && isAuthed;
+  const hasCircuit = Boolean(circuitId);
 
   return (
     <div style={page}>
       <div style={container}>
         <div style={card}>
           <h1 style={h1}>GPS – Circuits scolaires</h1>
-          <div style={muted}>Choisis le transporteur et le circuit, puis démarre.</div>
 
           <div style={{ marginTop: 10, ...muted }}>
             Connexion :{" "}
-            <b>
-              {!ready ? "chargement…" : isAuthed ? `connecté (${user?.email ?? "ok"})` : "non connecté"}
-            </b>
+            <b>{!ready ? "chargement…" : isAuthed ? `connecté (${user?.email ?? "ok"})` : "non connecté"}</b>
           </div>
 
           {!ready ? null : !isAuthed ? (
             <div style={{ marginTop: 10 }}>
-              <button style={btn("primary")} onClick={() => nav("/login", { state: { redirectTo: "/" } })}>
+              <button style={btn("primary")} onClick={() => goLogin("/")}>
                 Se connecter
               </button>
             </div>
           ) : null}
+
+          {/* Toggle conducteur => ouvre automatiquement Record */}
+          <div style={{ marginTop: 12, ...toggleWrap }}>
+            <div style={{ fontWeight: 950 }}>Mode conducteur régulier</div>
+            <div
+              role="switch"
+              aria-checked={showConducteur}
+              tabIndex={0}
+              style={switchOuter}
+              onClick={() => {
+                const next = !showConducteur;
+                setShowConducteur(next);
+                if (next) {
+                  // on ouvre record et on laisse le Portal revenir en mode remplaçant au retour
+                  goRecordAuto();
+                  setTimeout(() => setShowConducteur(false), 0);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  const next = !showConducteur;
+                  setShowConducteur(next);
+                  if (next) {
+                    goRecordAuto();
+                    setTimeout(() => setShowConducteur(false), 0);
+                  }
+                }
+              }}
+              title="Ouvrir Record"
+            >
+              <div style={switchKnob} />
+            </div>
+          </div>
         </div>
 
+        {/* Remplaçant (par défaut) */}
         <div style={card}>
-          <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gap: 12 }}>
             <div>
               <div style={{ ...muted, marginBottom: 6 }}>Transporteur</div>
               <select style={select} value={transporteur} onChange={(e) => setTransporteur(e.target.value as TCode)}>
@@ -111,64 +201,41 @@ export default function Portal() {
 
             <div>
               <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
-              <select style={select} value={circuitId} onChange={(e) => setCircuitId(e.target.value)} disabled={!isAuthed}>
-                {!isAuthed ? (
-                  <option value="">(connecte-toi pour charger les circuits)</option>
-                ) : (
+              <select
+                style={select}
+                value={circuitId}
+                onChange={(e) => setCircuitId(e.target.value)}
+                disabled={!canUse}
+              >
+                {!canUse ? (
+                  <option value="">(connexion requise)</option>
+                ) : circuits.length ? (
                   circuits.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.nom}
                     </option>
                   ))
+                ) : (
+                  <option value="">(aucun circuit)</option>
                 )}
               </select>
             </div>
 
-            <div style={row}>
-              <button style={{ ...btn("ghost"), flex: 1 }} onClick={() => setRenaming(true)} disabled={!isAuthed || !circuitId}>
-                Renommer
+            <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
+              <button
+                style={{ ...circlePrimary, ...(canUse && hasCircuit ? {} : disabledStyle) }}
+                onClick={goNav}
+                disabled={!canUse || !hasCircuit}
+                title="Naviguer"
+              >
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontWeight: 1000, fontSize: 22, lineHeight: 1 }}>GPS</div>
+                  <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>NAVIGUER</div>
+                </div>
               </button>
-              <button style={{ ...btn("ghost"), flex: 1 }} onClick={() => load().catch((e) => alert(e.message))} disabled={!isAuthed}>
-                Rafraîchir
-              </button>
-            </div>
-
-            <button style={bigBtn} onClick={goNav} disabled={!isAuthed || !circuitId}>
-              Navigation continue (virages + voix)
-            </button>
-
-            <button style={{ ...bigBtn, background: "#fff", color: "#111827", border: "1px solid #e5e7eb" }} onClick={goRecord}>
-              Enregistrer / Mettre à jour un trajet
-            </button>
+            </div>           
           </div>
         </div>
-
-        {renaming && (
-          <div style={card}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Renommer le circuit</div>
-            <input
-              style={input}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder={selected?.nom ?? "Nom"}
-              disabled={!isAuthed}
-            />
-            <div style={{ ...row, marginTop: 10 }}>
-              <button style={{ ...btn("primary"), flex: 1 }} onClick={() => doRename().catch((e) => alert(e.message))} disabled={!isAuthed}>
-                Enregistrer
-              </button>
-              <button
-                style={{ ...btn("ghost"), flex: 1 }}
-                onClick={() => {
-                  setRenaming(false);
-                  setNewName("");
-                }}
-              >
-                Annuler
-              </button>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
