@@ -14,7 +14,7 @@ import { page, container, card, h1, muted, row, btn, bigBtn } from "@/ui";
 type Step = {
   distance: number;
   duration: number;
-  name: string; // nom de rue si dispo
+  name: string;
   instruction: string;
   type: string;
   modifier: string;
@@ -32,6 +32,8 @@ type TraceResp = {
   trail: { idx: number; lat: number; lng: number }[];
   updated_at?: string;
 };
+
+type LatLng = { lat: number; lng: number };
 
 /* =========================
    Helpers
@@ -64,7 +66,7 @@ function clamp(v: number, a: number, b: number) {
   return Math.max(a, Math.min(b, v));
 }
 
-function smoothPos(prev: { lat: number; lng: number } | null, next: { lat: number; lng: number }, alpha: number) {
+function smoothPos(prev: LatLng | null, next: LatLng, alpha: number) {
   if (!prev) return next;
   return {
     lat: prev.lat + (next.lat - prev.lat) * alpha,
@@ -72,24 +74,16 @@ function smoothPos(prev: { lat: number; lng: number } | null, next: { lat: numbe
   };
 }
 
-/** Approx meters using equirectangular projection around current latitude */
-function projectMeters(originLat: number, p: { lat: number; lng: number }) {
+// Approx meters using equirectangular projection around current latitude
+function projectMeters(originLat: number, p: LatLng) {
   const R = 6371000;
   const lat = (p.lat * Math.PI) / 180;
   const lng = (p.lng * Math.PI) / 180;
   const lat0 = (originLat * Math.PI) / 180;
-  return {
-    x: R * lng * Math.cos(lat0),
-    y: R * lat,
-  };
+  return { x: R * lng * Math.cos(lat0), y: R * lat };
 }
 
-function distPointToSegmentMeters(
-  originLat: number,
-  p: { lat: number; lng: number },
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number }
-) {
+function distPointToSegmentMeters(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
   const P = projectMeters(originLat, p);
   const A = projectMeters(originLat, a);
   const B = projectMeters(originLat, b);
@@ -109,7 +103,7 @@ function distPointToSegmentMeters(
   return Math.hypot(P.x - cx, P.y - cy);
 }
 
-function minDistanceToPolylineMeters(me: { lat: number; lng: number }, line: [number, number][]) {
+function minDistanceToPolylineMeters(me: LatLng, line: [number, number][]) {
   if (!line || line.length < 2) return null;
 
   const originLat = me.lat;
@@ -125,106 +119,77 @@ function minDistanceToPolylineMeters(me: { lat: number; lng: number }, line: [nu
   return Number.isFinite(best) ? best : null;
 }
 
-/* =========================
-   Keep screen awake + Fullscreen
-========================= */
-
-function useAutoFullscreen(active: boolean) {
-  useEffect(() => {
-    if (!active) return;
-
-    const el: any = document.documentElement;
-
-    const enter = async () => {
-      try {
-        if (document.fullscreenElement) return;
-        if (el.requestFullscreen) await el.requestFullscreen();
-        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-      } catch {
-        // iOS peut refuser: on garde au moins le plein écran "visuel" via CSS
-      }
-    };
-
-    enter();
-
-    return () => {
-      const d: any = document;
-      try {
-        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen();
-        else if (d.webkitFullscreenElement && d.webkitExitFullscreen) d.webkitExitFullscreen();
-      } catch {}
-    };
-  }, [active]);
+/** Trouve l’index de point de la polyline le plus proche (simple, rapide, assez bon ici) */
+function nearestLineIndex(me: LatLng, line: [number, number][]) {
+  if (!line || line.length === 0) return null;
+  let best = Infinity;
+  let bestIdx = 0;
+  for (let i = 0; i < line.length; i++) {
+    const d = haversineMeters(me, { lat: line[i][0], lng: line[i][1] });
+    if (d < best) {
+      best = d;
+      bestIdx = i;
+    }
+  }
+  return { idx: bestIdx, dist: best };
 }
 
-function useBodyNoScroll(active: boolean) {
-  useEffect(() => {
-    if (!active) return;
-    const prevOverflow = document.body.style.overflow;
-    const prevBg = document.body.style.background;
-    document.body.style.overflow = "hidden";
-    document.body.style.background = "#0b1220";
-    return () => {
-      document.body.style.overflow = prevOverflow;
-      document.body.style.background = prevBg;
-    };
-  }, [active]);
+function linePoint(line: [number, number][], idx: number): LatLng {
+  const i = clamp(idx, 0, Math.max(0, line.length - 1));
+  return { lat: line[i][0], lng: line[i][1] };
 }
 
-// Fallback iOS (souvent) : une mini vidéo muette invisible peut aider contre la veille
-function useNoSleepVideo(active: boolean) {
-  useEffect(() => {
-    if (!active) return;
+function walkForward(line: [number, number][], fromIdx: number, metersAhead: number) {
+  let i = clamp(fromIdx, 0, Math.max(0, line.length - 2));
+  let left = metersAhead;
 
-    const v = document.createElement("video");
-    v.setAttribute("playsinline", "true");
-    v.setAttribute("webkit-playsinline", "true");
-    v.muted = true;
-    v.loop = true;
-    v.autoplay = true;
+  while (i < line.length - 1 && left > 0) {
+    const a = linePoint(line, i);
+    const b = linePoint(line, i + 1);
+    const d = haversineMeters(a, b);
+    if (d <= 0.01) {
+      i++;
+      continue;
+    }
+    if (d >= left) return { idx: i + 1, at: b };
+    left -= d;
+    i++;
+  }
+  return { idx: line.length - 1, at: linePoint(line, line.length - 1) };
+}
 
-    // vidéo 1x1 noire (data URL)
-    v.src =
-      "data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAGMbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAABR0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABR0a2hkAAAABAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABEdWR0YQAAACptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjU4LjI5LjEwMA==";
+function angleDeg(a: LatLng, b: LatLng, c: LatLng) {
+  // angle between vectors BA and BC (signed via cross)
+  const ax = a.lng - b.lng;
+  const ay = a.lat - b.lat;
+  const cx = c.lng - b.lng;
+  const cy = c.lat - b.lat;
 
-    v.style.position = "fixed";
-    v.style.left = "-9999px";
-    v.style.top = "0";
-    v.style.width = "1px";
-    v.style.height = "1px";
-    v.style.opacity = "0";
-    v.style.pointerEvents = "none";
+  const dot = ax * cx + ay * cy;
+  const det = ax * cy - ay * cx; // cross (2D)
+  const ang = Math.atan2(det, dot) * (180 / Math.PI);
+  return ang; // signed: + = left, - = right (approx)
+}
 
-    document.body.appendChild(v);
+function turnTextFromAngle(signedAngle: number) {
+  const a = Math.abs(signedAngle);
+  if (a < 25) return null;
 
-    const play = async () => {
-      try {
-        await v.play();
-      } catch {}
-    };
-
-    play();
-
-    return () => {
-      try {
-        v.pause();
-      } catch {}
-      try {
-        v.remove();
-      } catch {}
-    };
-  }, [active]);
+  // “bretelle/embranchement” si angle modéré (fork), sinon virage
+  if (a >= 25 && a < 55) return signedAngle > 0 ? "Prenez la bretelle à gauche" : "Prenez la bretelle à droite";
+  if (a >= 55 && a < 140) return signedAngle > 0 ? "Tournez à gauche" : "Tournez à droite";
+  return signedAngle > 0 ? "Faites demi-tour à gauche" : "Faites demi-tour à droite";
 }
 
 /* =========================
-   Ding + Voice
+   Voix + Ding (béton)
 ========================= */
 
-// ✅ Ding "béton": AudioContext conservé, resume() avant de jouer, volume plus fort
 function useDing() {
   const ctxRef = useRef<AudioContext | null>(null);
+  const unlockedRef = useRef(false);
 
-  function getCtx() {
+  function ensureCtx() {
     const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
     if (!AC) return null;
     if (!ctxRef.current) ctxRef.current = new AC();
@@ -232,45 +197,43 @@ function useDing() {
   }
 
   async function unlock() {
-    const ctx = getCtx();
-    if (!ctx) return;
     try {
+      const ctx = ensureCtx();
+      if (!ctx) return;
       if (ctx.state === "suspended") await ctx.resume();
+      unlockedRef.current = true;
     } catch {}
   }
 
-  async function ding() {
-    const ctx = getCtx();
-    if (!ctx) return;
-
+  function play() {
     try {
-      if (ctx.state === "suspended") await ctx.resume();
-    } catch {}
+      const ctx = ensureCtx();
+      if (!ctx) return;
 
-    try {
+      // iOS/Android: si pas “unlocked”, on tente quand même
+      try {
+        if (ctx.state === "suspended") ctx.resume();
+      } catch {}
+
       const o = ctx.createOscillator();
       const g = ctx.createGain();
 
-      // petit "double-beep" style GPS
-      const t0 = ctx.currentTime;
-
+      // ding plus “présent”
       o.type = "sine";
-      o.frequency.setValueAtTime(980, t0);
-      o.frequency.setValueAtTime(880, t0 + 0.09);
-
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.01); // plus fort
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+      o.frequency.setValueAtTime(1046.5, ctx.currentTime); // C6
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.45, ctx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
 
       o.connect(g);
       g.connect(ctx.destination);
 
-      o.start(t0);
-      o.stop(t0 + 0.2);
+      o.start();
+      o.stop(ctx.currentTime + 0.24);
     } catch {}
   }
 
-  return { unlock, ding };
+  return { unlock, play, isUnlocked: () => unlockedRef.current };
 }
 
 function useSpeaker() {
@@ -330,59 +293,25 @@ function useSpeaker() {
   return { speak, stopAll };
 }
 
-function maneuverArrow(mod?: string) {
-  const m = (mod || "").toLowerCase();
-  if (m.includes("uturn")) return "⤴️";
-  if (m.includes("left")) return "⬅️";
-  if (m.includes("right")) return "➡️";
-  if (m.includes("straight")) return "⬆️";
-  return "⬆️";
+/* =========================
+   Fullscreen helpers
+========================= */
+
+async function tryEnterFullscreen() {
+  try {
+    const el = document.documentElement as any;
+    if (document.fullscreenElement) return;
+    if (el.requestFullscreen) await el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+  } catch {}
 }
 
-/** Filtre "GPS standard" : virages utiles + bretelles, pas les micro "slight" inutiles */
-function isActionableStep(s: Step | undefined) {
-  if (!s?.instruction || !s.location) return false;
-
-  const t = (s.type || "").toLowerCase();
-  const mod = (s.modifier || "").toLowerCase();
-  const ins = (s.instruction || "").toLowerCase();
-  const name = (s.name || "").toLowerCase();
-
-  if (t.includes("arrive") || t.includes("depart")) return false;
-  if (ins.includes("arrêt") || ins.includes("stop") || ins.includes("destination")) return false;
-
-  const isRamp =
-    ins.includes("bretelle") ||
-    ins.includes("rampe") ||
-    ins.includes("merge") ||
-    ins.includes("autoroute") ||
-    ins.includes("sortie") ||
-    ins.includes("exit") ||
-    t.includes("merge") ||
-    t.includes("fork") ||
-    t.includes("ramp") ||
-    t.includes("roundabout") ||
-    t.includes("exit");
-
-  if (mod.includes("slight")) return isRamp;
-  if (t.includes("continue") || mod.includes("straight")) return isRamp;
-
-  if (mod.includes("left") || mod.includes("right") || mod.includes("uturn")) return true;
-  if (isRamp) return true;
-
-  if (name && name.length >= 3 && (ins.includes("tournez") || ins.includes("prenez"))) return true;
-
-  return false;
-}
-
-function stepPhrase(s: Step) {
-  const base = (s.instruction || "").trim();
-  const name = (s.name || "").trim();
-  if (!name) return base;
-  const b = base.toLowerCase();
-  const n = name.toLowerCase();
-  if (n.length >= 4 && b.includes(n)) return base;
-  return `${base} sur ${name}`;
+async function tryExitFullscreen() {
+  try {
+    const d: any = document;
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else if (d.webkitFullscreenElement) await d.webkitExitFullscreen();
+  } catch {}
 }
 
 /* =========================
@@ -393,7 +322,7 @@ export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
   const { speak, stopAll } = useSpeaker();
-  const { unlock: unlockDing, ding } = useDing();
+  const ding = useDing();
 
   const circuitId = q.get("circuit") || "";
 
@@ -401,8 +330,8 @@ export default function NavLive() {
   const [finished, setFinished] = useState(false);
 
   // GPS
-  const [me, setMe] = useState<{ lat: number; lng: number } | null>(null);
-  const meSmoothRef = useRef<{ lat: number; lng: number } | null>(null);
+  const [me, setMe] = useState<LatLng | null>(null);
+  const meSmoothRef = useRef<LatLng | null>(null);
 
   const [acc, setAcc] = useState<number | null>(null);
   const accRef = useRef<number | null>(null);
@@ -412,47 +341,41 @@ export default function NavLive() {
 
   const [err, setErr] = useState<string | null>(null);
 
-  // Data circuit (arrêts)
+  // Stops
   const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Trace officielle — utilisé seulement pour "écart"
+  // Trace officielle (OBLIGATOIRE pour la fidélité)
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Route Mapbox
+  // Mode nav:
+  // - "to_start": on rejoint le point d’entrée (avant arrêt 1) via nav-api
+  // - "on_trace": on suit strictement la trace officielle
+  const [mode, setMode] = useState<"to_start" | "on_trace">("to_start");
+  const entryPointRef = useRef<LatLng | null>(null);
+
+  // nav-api (seulement pour rejoindre entry point / rejoin trace)
   const [routeLine, setRouteLine] = useState<[number, number][]>([]);
   const [steps, setSteps] = useState<Step[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
 
-  // Off-route + reroute
+  // Progression sur la trace (index croissant = “bon sens”)
+  const traceIdxRef = useRef<number>(0);
+
+  // Off-route + reroute (vers la trace, pas vers des routes inventées)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
   const offRouteStrikeRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
 
-  // ✅ renforçeur reroute: si on s’éloigne du target trop longtemps
-  const lastStopDistRef = useRef<number | null>(null);
-  const awaySinceRef = useRef<number | null>(null);
-
-  // Wake lock déjà présent
   const { supported: wlSupported, active: wlActive } = useWakeLock(running);
 
-  // ✅ “béton” anti-veille + fullscreen
-  useNoSleepVideo(running);
-  useAutoFullscreen(running);
-  useBodyNoScroll(running);
-
-  // Annonces virage
-  const spokenFarRef = useRef<number | null>(null);
-  const spokenNearRef = useRef<number | null>(null);
-
-  // Arrêts: avertissement + ding 10m
+  // Stops warnings + ding
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  // Bandeau jaune monotone
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
     show: false,
     meters: 0,
@@ -461,12 +384,16 @@ export default function NavLive() {
   });
   const stopBannerLastMRef = useRef<number | null>(null);
 
-  // Cache route
+  // Voice anti-spam for turns on trace
+  const lastTurnAnnouncedAtIdxRef = useRef<number | null>(null);
+
+  // Cache nav-api routes (entry/rejoin only)
   const routeCacheRef = useRef(new Map<string, { line: [number, number][]; steps: Step[]; at: number }>());
   const routeInFlightRef = useRef<AbortController | null>(null);
 
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
+  const DING_AT_M = 10;
 
   // Zone jaune: 150 si <80 km/h, sinon 200 (figé par arrêt)
   function warnStopMeters() {
@@ -475,93 +402,22 @@ export default function NavLive() {
     return kmh >= 80 ? 200 : 150;
   }
 
-  // Virages GPS standard: 2 annonces max
-  const TURN_FAR_M = 220;
-  const TURN_NEAR_M = 65;
-  const STEP_ADVANCE_M = 16;
-
-  // Reroute
+  // Rejoin / off-route
   const OFF_ROUTE_M = 28;
   const ON_ROUTE_M = 14;
+  const REROUTE_COOLDOWN_MS = 7000;
 
-  // Ding arrêt
-  const DING_AT_M = 10;
+  // Turn detection on trace
+  const TURN_LOOKAHEAD_M = 55; // à quelle distance on regarde “devant”
+  const TURN_ANNOUNCE_AT_M = 65;
+  const TURN_MIN_ANGLE = 25;
 
-  async function loadCircuit(): Promise<{ pts: { lat: number; lng: number; label?: string | null }[]; hasOfficial: boolean }> {
-    if (!circuitId) throw new Error("Circuit manquant.");
-
-    const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
-    const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
-    if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
-
-    setPoints(pts);
-    setTargetIdx(0);
-
-    setStepIdx(0);
-    setSteps([]);
-    setRouteLine([]);
-
-    setOffRouteM(null);
-    offRouteStrikeRef.current = 0;
-    lastRerouteAtRef.current = 0;
-
-    spokenFarRef.current = null;
-    spokenNearRef.current = null;
-
-    stopWarnRef.current = null;
-    stopWarnMaxRef.current = null;
-    stopDingRef.current = null;
-
-    stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
-
-    // reroute helper reset
-    lastStopDistRef.current = null;
-    awaySinceRef.current = null;
-
-    meSmoothRef.current = null;
-    setFinished(false);
-
-    let ok = false;
-    try {
-      const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
-      const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
-      if (line.length >= 2) {
-        setOfficialLine(line);
-        setHasOfficial(true);
-        ok = true;
-      } else {
-        setOfficialLine([]);
-        setHasOfficial(false);
-      }
-    } catch {
-      setOfficialLine([]);
-      setHasOfficial(false);
-    }
-
-    return { pts, hasOfficial: ok };
-  }
-
-  function cacheKey(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
+  function cacheKey(from: LatLng, to: LatLng) {
     const rf = (v: number) => Math.round(v * 10000) / 10000;
     return `${rf(from.lat)},${rf(from.lng)}->${rf(to.lat)},${rf(to.lng)}`;
   }
 
-  function firstActionIndex(all: Step[]) {
-    for (let i = 0; i < all.length; i++) {
-      if (isActionableStep(all[i])) return i;
-    }
-    return 0;
-  }
-
-  function nextActionIndex(all: Step[], from: number) {
-    for (let i = from + 1; i < all.length; i++) {
-      if (isActionableStep(all[i])) return i;
-    }
-    return Math.min(from + 1, Math.max(0, all.length - 1));
-  }
-
-  async function calcRoute(from: { lat: number; lng: number }, to: { lat: number; lng: number }, opts?: { announceStart?: boolean }) {
+  async function calcRoute(from: LatLng, to: LatLng) {
     try {
       routeInFlightRef.current?.abort();
     } catch {}
@@ -575,16 +431,7 @@ export default function NavLive() {
     if (cached && now - cached.at < 10 * 60 * 1000 && cached.line.length >= 2) {
       setRouteLine(cached.line);
       setSteps(cached.steps);
-
-      const idx0 = firstActionIndex(cached.steps);
-      setStepIdx(idx0);
-      spokenFarRef.current = null;
-      spokenNearRef.current = null;
-
-      if (opts?.announceStart) {
-        const s0 = cached.steps[idx0];
-        if (isActionableStep(s0)) speak(`Pour démarrer, ${stepPhrase(s0)}.`, { cooldownMs: 400, interrupt: true });
-      }
+      setStepIdx(0);
       return;
     }
 
@@ -607,21 +454,88 @@ export default function NavLive() {
 
       setRouteLine(coords);
       setSteps(st);
-
-      const idx0 = firstActionIndex(st);
-      setStepIdx(idx0);
-      spokenFarRef.current = null;
-      spokenNearRef.current = null;
+      setStepIdx(0);
 
       routeCacheRef.current.set(key, { line: coords, steps: st, at: now });
-
-      if (opts?.announceStart) {
-        const s0 = st[idx0];
-        if (isActionableStep(s0)) speak(`Pour démarrer, ${stepPhrase(s0)}.`, { cooldownMs: 400, interrupt: true });
-      }
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  async function loadCircuit() {
+    if (!circuitId) throw new Error("Circuit manquant.");
+
+    const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
+    const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
+    if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
+
+    setPoints(pts);
+    setTargetIdx(0);
+
+    setRouteLine([]);
+    setSteps([]);
+    setStepIdx(0);
+
+    setOffRouteM(null);
+    offRouteStrikeRef.current = 0;
+    lastRerouteAtRef.current = 0;
+
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+
+    lastTurnAnnouncedAtIdxRef.current = null;
+
+    setFinished(false);
+    traceIdxRef.current = 0;
+
+    // Trace officielle: indispensable
+    try {
+      const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
+      const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
+
+      if (line.length >= 2) {
+        setOfficialLine(line);
+        setHasOfficial(true);
+      } else {
+        setOfficialLine([]);
+        setHasOfficial(false);
+        throw new Error("Trace officielle introuvable (aucun trail).");
+      }
+    } catch (e: any) {
+      setOfficialLine([]);
+      setHasOfficial(false);
+      throw new Error(e?.message ?? "Impossible de charger la trace officielle.");
+    }
+
+    return pts;
+  }
+
+  function computeEntryPointForStop1(line: [number, number][], stop1: LatLng) {
+    // On prend le point de la trace le plus proche de l’arrêt 1,
+    // puis on recule de ~80m sur la trace pour “arriver du bon sens”.
+    const near = nearestLineIndex(stop1, line);
+    const stopIdxOnTrace = near ? near.idx : 0;
+
+    // recule 80m: on marche “en arrière” en soustrayant
+    let idx = stopIdxOnTrace;
+    let left = 80;
+
+    while (idx > 0 && left > 0) {
+      const a = linePoint(line, idx);
+      const b = linePoint(line, idx - 1);
+      const d = haversineMeters(a, b);
+      if (d <= 0.01) {
+        idx--;
+        continue;
+      }
+      left -= d;
+      idx--;
+    }
+
+    return { entryIdx: Math.max(0, idx), entry: linePoint(line, Math.max(0, idx)), stopIdxOnTrace };
   }
 
   async function start() {
@@ -632,10 +546,9 @@ export default function NavLive() {
       return;
     }
 
-    // ✅ unlock audio (ding + voice) MUST be in a user gesture
-    await unlockDing();
-    // petit “ping” de test très court (optionnel, mais aide à “débloquer” certains appareils)
-    // await ding();
+    // unlock audio + fullscreen (doit être dans un geste utilisateur)
+    await ding.unlock();
+    await tryEnterFullscreen();
 
     const got = await new Promise<{ lat: number; lng: number; acc?: number | null }>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
@@ -657,28 +570,64 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    const { pts } = await loadCircuit();
+    const pts = await loadCircuit();
 
-    const firstTarget = pts[0] ?? null;
-    if (firstTarget) {
-      try {
-        await calcRoute(initial, firstTarget, { announceStart: true });
-      } catch (e: any) {
-        setErr(e?.message ?? "Erreur itinéraire");
-      }
-    }
+    // On doit obligatoirement avoir la trace
+    const line = officialLine.length >= 2 ? officialLine : null;
+    // NB: officialLine state set async; on se base sur future state via ref:
+    // donc on va recalculer entry après un tick si needed.
+    // Ici on lit directement pts + on s’appuie sur setHasOfficial déjà fait,
+    // mais pour être robuste, on fera l’entrée dans un effect qui attend officialLine.
 
+    // On passe running tout de suite
     setRunning(true);
+    setMode("to_start");
+
     speak("Navigation démarrée.", { cooldownMs: 300, interrupt: true });
+
+    // On prépare entry point dès que officialLine est dispo via effect
   }
 
   function stop() {
     setRunning(false);
+    setFinished(false);
+    setMode("to_start");
+    entryPointRef.current = null;
+
     try {
       routeInFlightRef.current?.abort();
     } catch {}
     stopAll();
+    tryExitFullscreen();
   }
+
+  // Quand officialLine est chargé et qu’on est running: calcule entry point + route vers entry
+  useEffect(() => {
+    if (!running) return;
+    if (!hasOfficial || officialLine.length < 2) return;
+    if (!points[0]) return;
+    if (!me) return;
+
+    // Si déjà entrée calculée, skip
+    if (entryPointRef.current) return;
+
+    const stop1 = points[0];
+    const { entryIdx, entry, stopIdxOnTrace } = computeEntryPointForStop1(officialLine, stop1);
+
+    entryPointRef.current = entry;
+
+    // On démarre la progression sur trace au point d’entrée
+    traceIdxRef.current = entryIdx;
+
+    // Route nav-api uniquement pour rejoindre l’entrée (garage -> trace)
+    calcRoute(me, entry)
+      .then(() => {
+        speak("Rejoignez le trajet enregistré.", { cooldownMs: 900, interrupt: true });
+      })
+      .catch((e: any) => setErr(e?.message ?? "Erreur itinéraire vers départ"));
+
+    // Une fois à proximité de l’entrée, on basculera en on_trace (voir effect stops/trace)
+  }, [running, hasOfficial, officialLine, points, me]);
 
   // GPS tracking (lissage)
   useEffect(() => {
@@ -710,17 +659,24 @@ export default function NavLive() {
     };
   }, [running]);
 
-  // ✅ REROUTE "GPS standard" (renforcé)
+  // Off-route distance (par rapport à la trace si possible)
   useEffect(() => {
     if (!running) return;
-    if (!me || !target) return;
-    if (finished) return;
+    if (!me) return;
 
-    const lineForOffRoute = routeLine.length >= 2 ? routeLine : hasOfficial && officialLine.length >= 2 ? officialLine : null;
-    if (!lineForOffRoute) return;
+    const line = hasOfficial && officialLine.length >= 2 ? officialLine : routeLine.length >= 2 ? routeLine : null;
+    if (!line) return;
 
-    const dLine = minDistanceToPolylineMeters(me, lineForOffRoute);
+    const dLine = minDistanceToPolylineMeters(me, line);
     setOffRouteM(dLine);
+  }, [running, me, hasOfficial, officialLine, routeLine]);
+
+  // REROUTE: toujours “retour à la trace” (et jamais inventer un nouveau segment stop->stop)
+  useEffect(() => {
+    if (!running) return;
+    if (!me) return;
+    if (!hasOfficial || officialLine.length < 2) return;
+    if (finished) return;
 
     const a = accRef.current ?? null;
     if (a != null && a > 35) return;
@@ -729,45 +685,55 @@ export default function NavLive() {
     if (v != null && v < 1.0) return;
 
     const now = Date.now();
+    if (now - lastRerouteAtRef.current < REROUTE_COOLDOWN_MS) return;
 
-    const isOff = dLine != null && dLine > OFF_ROUTE_M;
+    const near = nearestLineIndex(me, officialLine);
+    if (!near) return;
+
+    // On force le “bon sens” : ne jamais reculer en arrière sur la trace.
+    // Si on est déjà avancé, on cherche un point proche MAIS >= traceIdxRef.
+    let idx = near.idx;
+    if (idx < traceIdxRef.current) idx = traceIdxRef.current;
+
+    // mesure off-route (distance au point le plus proche suffit ici)
+    const off = near.dist;
+    const isOff = off > OFF_ROUTE_M;
     if (isOff) offRouteStrikeRef.current += 1;
-    else if (dLine != null && dLine < ON_ROUTE_M) offRouteStrikeRef.current = 0;
+    else if (off < ON_ROUTE_M) offRouteStrikeRef.current = 0;
 
-    // ✅ guardrail : si la distance au prochain arrêt AUGMENTE pendant trop longtemps => reroute
-    const dStop = haversineMeters(me, target);
-    const prev = lastStopDistRef.current;
-    lastStopDistRef.current = dStop;
+    if (offRouteStrikeRef.current < 2) return;
 
-    if (prev != null) {
-      const gettingAway = dStop > prev + 18;
-      if (gettingAway) {
-        if (awaySinceRef.current == null) awaySinceRef.current = now;
-      } else {
-        awaySinceRef.current = null;
-      }
-    }
-
-    const COOLDOWN_MS = 7000;
-    if (now - lastRerouteAtRef.current < COOLDOWN_MS) return;
-
-    const tooLongAway = awaySinceRef.current != null && now - awaySinceRef.current > 9000;
-    const needReroute = offRouteStrikeRef.current >= 2 || tooLongAway;
-
-    if (!needReroute) return;
-
-    lastRerouteAtRef.current = now;
     offRouteStrikeRef.current = 0;
-    awaySinceRef.current = null;
+    lastRerouteAtRef.current = now;
 
-    calcRoute(me, target, { announceStart: false }).catch((e: any) => setErr(e?.message ?? "Erreur reroute"));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, me, targetIdx, routeLine, hasOfficial, officialLine, finished]);
+    // point de rejoin: un peu “devant” pour éviter de te faire ramener en arrière
+    const ahead = walkForward(officialLine, idx, 25);
+    const rejoin = ahead.at;
 
-  // Arrêts + bandeau jaune + ding + virages GPS standard
+    setMode("to_start"); // temporaire: guidage vers rejoin
+    entryPointRef.current = rejoin;
+
+    calcRoute(me, rejoin)
+      .then(() => speak("Recalcul en cours. Revenez sur le trajet.", { cooldownMs: 900, interrupt: true }))
+      .catch((e: any) => setErr(e?.message ?? "Erreur recalculation"));
+  }, [running, me, hasOfficial, officialLine, finished]);
+
+  // Stops + banner + ding + bascule mode on_trace
   useEffect(() => {
     if (!running) return;
     if (!me || !target) return;
+
+    // ----- Bascule vers on_trace quand on est proche du point d’entrée/rejoin -----
+    if (hasOfficial && officialLine.length >= 2 && entryPointRef.current) {
+      const dEntry = haversineMeters(me, entryPointRef.current);
+      if (mode !== "on_trace" && dEntry <= 35) {
+        setMode("on_trace");
+        // Met la progression au plus proche “en avant”
+        const nearMe = nearestLineIndex(me, officialLine);
+        if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
+        speak("Trajet enregistré repris.", { cooldownMs: 900, interrupt: true });
+      }
+    }
 
     /* ---------- STOP ZONE (150/200 + jaune monotone + ding 10m) ---------- */
     const dStop = haversineMeters(me, target);
@@ -777,13 +743,11 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // hors zone -> cache + reset monotone
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    // dans zone -> monotone
     if (!finished && rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
@@ -792,22 +756,22 @@ export default function NavLive() {
 
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
 
-      // ✅ annonce unique 150/200 SANS “Ralentissez”
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
+        // ✅ sans “Ralentissez”
         speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
       }
     }
 
-    // ✅ Ding 10m avant (béton: on force resume + double-beep)
+    // ✅ ding béton à 10m
     if (!finished && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        ding();
+        ding.play();
       }
     }
 
-    // arrivée arrêt => enchaîne
+    // Arrivée arrêt => enchaîne
     if (!finished && dStop <= ARRIVE_STOP_M) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
@@ -819,21 +783,24 @@ export default function NavLive() {
         speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
 
-        // reset stop refs
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
-        // reset virages refs
-        spokenFarRef.current = null;
-        spokenNearRef.current = null;
+        // Progression trace: avance au plus près de la position actuelle
+        if (hasOfficial && officialLine.length >= 2) {
+          const nearMe = nearestLineIndex(me, officialLine);
+          if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
+        }
 
-        // reset reroute helper
-        lastStopDistRef.current = null;
-        awaySinceRef.current = null;
-
-        if (nextTarget) calcRoute(me, nextTarget, { announceStart: true }).catch((e: any) => setErr(e?.message ?? "Erreur itinéraire"));
+        // Recalage mode (on reste sur trace)
+        setMode("on_trace");
+        entryPointRef.current = null;
+        setRouteLine([]);
+        setSteps([]);
+        setStepIdx(0);
+        lastTurnAnnouncedAtIdxRef.current = null;
       } else {
         speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
         setFinished(true);
@@ -843,66 +810,115 @@ export default function NavLive() {
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
       }
-      return;
     }
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, mode]);
 
-    /* ---------- TURN (GPS standard: virages/bretelles seulement) ---------- */
+  // Guidage “standard GPS”:
+  // - si mode=to_start : on affiche steps nav-api (entry/rejoin)
+  // - si mode=on_trace : on calcule prochain virage/bretelle par géométrie de trace
+  const [traceTurn, setTraceTurn] = useState<{ text: string; inM: number; arrow: string } | null>(null);
+
+  useEffect(() => {
+    if (!running) return;
+    if (!me) return;
+    if (!hasOfficial || officialLine.length < 2) return;
     if (finished) return;
 
-    const curr = steps[stepIdx];
-    if (!isActionableStep(curr)) {
-      const ni = nextActionIndex(steps, stepIdx);
-      if (ni !== stepIdx) {
-        setStepIdx(ni);
-        spokenFarRef.current = null;
-        spokenNearRef.current = null;
-      }
+    if (mode !== "on_trace") {
+      setTraceTurn(null);
       return;
     }
 
-    const dTurn = haversineMeters(me, curr.location);
+    // Position la plus proche sur trace
+    const near = nearestLineIndex(me, officialLine);
+    if (!near) return;
 
-    // annonce "loin" (1 fois)
-    if (dTurn <= TURN_FAR_M && dTurn > TURN_NEAR_M) {
-      if (spokenFarRef.current !== stepIdx) {
-        spokenFarRef.current = stepIdx;
-        speak(`${stepPhrase(curr)} dans ${Math.round(dTurn)} mètres.`, { cooldownMs: 1200, interrupt: true });
+    // Assure progression monotone
+    traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
+
+    // Cherche un “virage” en avant: on regarde un triplet (idx, idx+k, idx+2k)
+    const baseIdx = traceIdxRef.current;
+    const ahead1 = walkForward(officialLine, baseIdx, TURN_LOOKAHEAD_M);
+    const ahead2 = walkForward(officialLine, ahead1.idx, TURN_LOOKAHEAD_M);
+
+    const A = linePoint(officialLine, baseIdx);
+    const B = ahead1.at;
+    const C = ahead2.at;
+
+    const ang = angleDeg(A, B, C);
+    const txt = turnTextFromAngle(ang);
+
+    if (!txt || Math.abs(ang) < TURN_MIN_ANGLE) {
+      setTraceTurn(null);
+      return;
+    }
+
+    const distToTurn = Math.round(haversineMeters(me, B));
+
+    // annonce vocale 1 seule fois par zone (index)
+    if (distToTurn <= TURN_ANNOUNCE_AT_M) {
+      if (lastTurnAnnouncedAtIdxRef.current !== baseIdx) {
+        lastTurnAnnouncedAtIdxRef.current = baseIdx;
+        speak(`${txt} maintenant.`, { cooldownMs: 900, interrupt: true });
+      }
+    } else if (distToTurn <= 220) {
+      if (lastTurnAnnouncedAtIdxRef.current !== baseIdx) {
+        // annonce “dans X mètres” une seule fois
+        lastTurnAnnouncedAtIdxRef.current = baseIdx;
+        speak(`${txt} dans ${distToTurn} mètres.`, { cooldownMs: 1200, interrupt: true });
       }
     }
 
-    // annonce "près" (1 fois)
-    if (dTurn <= TURN_NEAR_M) {
-      if (spokenNearRef.current !== stepIdx) {
-        spokenNearRef.current = stepIdx;
-        speak(`${stepPhrase(curr)} maintenant.`, { cooldownMs: 900, interrupt: true });
-      }
-    }
+    const arrow = txt.includes("droite") ? "➡️" : txt.includes("gauche") ? "⬅️" : "⬆️";
+    setTraceTurn({ text: txt, inM: distToTurn, arrow });
+  }, [running, me, hasOfficial, officialLine, finished, mode]);
 
-    // advance step
-    if (dTurn <= STEP_ADVANCE_M && stepIdx < steps.length - 1) {
-      const ni = nextActionIndex(steps, stepIdx);
-      setStepIdx(ni);
-      spokenFarRef.current = null;
-      spokenNearRef.current = null;
-    }
-  }, [running, me, target, targetIdx, points.length, steps, stepIdx, finished, stopBanner.show]); // eslint-disable-line
+  // UI instruction affichée
+  const showNavStep = mode !== "on_trace" ? steps[stepIdx] : null;
 
-  const nextStep = steps[stepIdx];
-  const showTurn = isActionableStep(nextStep) ? nextStep : undefined;
+  // avance nav-api step (mode to_start seulement)
+  useEffect(() => {
+    if (!running) return;
+    if (!me) return;
+    if (mode === "on_trace") return;
+    if (!showNavStep?.location) return;
+
+    const d = haversineMeters(me, showNavStep.location);
+    if (d <= 16 && stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
+  }, [running, me, mode, showNavStep, stepIdx, steps.length]);
 
   return (
-    <div style={page}>
-      <div style={container}>
+    <div
+      style={{
+        ...page,
+        // “plein écran” visuel même si fullscreen API est bloquée
+        minHeight: "100vh",
+      }}
+    >
+      <div
+        style={{
+          ...container,
+          // plein écran: on enlève les marges “confort” si tu veux
+          maxWidth: 900,
+        }}
+      >
         <div style={card}>
           <div style={row}>
             <div style={{ flex: 1 }}>
-              <h1 style={h1}>Navigation (GPS)</h1>
+              <h1 style={h1}>Navigation (GPS fidèle)</h1>
               <div style={muted}>
-                {hasOfficial ? <>Trace officielle détectée. Recalcul GPS actif.</> : <>Recalcul GPS actif.</>}{" "}
+                {hasOfficial ? (
+                  <>Trace officielle active. Trajet identique à l’enregistrement.</>
+                ) : (
+                  <>Trace officielle requise.</>
+                )}{" "}
                 {wlSupported ? `Écran allumé: ${wlActive ? "Oui" : "Non"}` : ""}
               </div>
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
+              <div style={muted}>
+                Mode: <b>{mode === "on_trace" ? "Trajet enregistré" : "Rejoindre le trajet"}</b>
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: 8 }}>
@@ -924,7 +940,7 @@ export default function NavLive() {
             {!circuitId && <div style={{ ...muted, marginTop: 10 }}>Circuit manquant. Reviens au portail.</div>}
           </div>
         ) : (
-          <div style={{ ...card, position: "relative", minHeight: "100vh" }}>
+          <div style={{ ...card, position: "relative" }}>
             {/* Bandeau jaune 150/200 (monotone) */}
             {stopBanner.show &&
               (() => {
@@ -988,7 +1004,7 @@ export default function NavLive() {
                 );
               })()}
 
-            {/* UI conduite (plus gros) */}
+            {/* UI conduite (gros) */}
             <div style={{ display: "grid", gap: 14, paddingTop: 86 }}>
               <div style={{ fontWeight: 900, fontSize: 18 }}>
                 Prochain arrêt : {targetIdx + 1} / {points.length}
@@ -1005,21 +1021,32 @@ export default function NavLive() {
               <div style={{ height: 8 }} />
 
               <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{ fontSize: 72, lineHeight: "72px" }}>{maneuverArrow(showTurn?.modifier)}</div>
+                <div style={{ fontSize: 72, lineHeight: "72px" }}>
+                  {finished ? "✅" : mode === "on_trace" ? traceTurn?.arrow ?? "⬆️" : "⬆️"}
+                </div>
+
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 950, fontSize: 40, lineHeight: "44px" }}>
-                    {finished ? "✅ Circuit terminé" : showTurn?.instruction ? showTurn.instruction : "…"}
+                    {finished
+                      ? "✅ Circuit terminé"
+                      : mode === "on_trace"
+                      ? traceTurn
+                        ? traceTurn.text
+                        : "Suivez le trajet enregistré"
+                      : showNavStep?.instruction
+                      ? showNavStep.instruction
+                      : "Rejoindre le trajet…"}
                   </div>
 
-                  {!finished && showTurn?.name && (
-                    <div style={{ fontSize: 24, opacity: 0.8, marginTop: 8 }}>
-                      <b>{showTurn.name}</b>
+                  {!finished && mode === "on_trace" && traceTurn && (
+                    <div style={{ fontSize: 28, opacity: 0.85, marginTop: 10 }}>
+                      dans <b>{traceTurn.inM} m</b>
                     </div>
                   )}
 
-                  {!finished && me && showTurn?.location && (
+                  {!finished && mode !== "on_trace" && me && showNavStep?.location && (
                     <div style={{ fontSize: 28, opacity: 0.85, marginTop: 10 }}>
-                      dans <b>{Math.round(haversineMeters(me, showTurn.location))} m</b>
+                      dans <b>{Math.round(haversineMeters(me, showNavStep.location))} m</b>
                     </div>
                   )}
                 </div>
