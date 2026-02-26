@@ -1,7 +1,6 @@
 // src/pages/NavLive.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import mapboxgl from "mapbox-gl";
 
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
@@ -25,6 +24,14 @@ type TraceResp = {
 };
 
 type LatLng = { lat: number; lng: number };
+
+/* =========================
+   Minimal GeoJSON types (évite dépendance @types/geojson)
+========================= */
+type GeoFeature<G> = { type: "Feature"; properties: Record<string, any>; geometry: G };
+type GeoFeatureCollection<G> = { type: "FeatureCollection"; features: Array<GeoFeature<G>> };
+type GeoLineString = { type: "LineString"; coordinates: [number, number][] };
+type GeoPoint = { type: "Point"; coordinates: [number, number] };
 
 /* =========================
    Helpers
@@ -195,6 +202,31 @@ function fmtDist(m: number) {
 }
 
 /* =========================
+   Bearing "au volant" (heading réel sinon par mouvement)
+========================= */
+
+function bearingDeg(from: LatLng, to: LatLng) {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+
+  const lat1 = toRad(from.lat);
+  const lat2 = toRad(to.lat);
+  const dLng = toRad(to.lng - from.lng);
+
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+  let brng = toDeg(Math.atan2(y, x));
+  brng = (brng + 360) % 360;
+  return brng;
+}
+
+function lerpAngle(a: number, b: number, t: number) {
+  let delta = ((b - a + 540) % 360) - 180;
+  return (a + delta * t + 360) % 360;
+}
+
+/* =========================
    Voix + Ding
 ========================= */
 
@@ -359,9 +391,11 @@ export default function NavLive() {
   const [speed, setSpeed] = useState<number | null>(null);
   const speedRef = useRef<number | null>(null);
 
-  const [heading, setHeading] = useState<number | null>(null);
-  const headingRef = useRef<number | null>(null);
-  const lastBearingRef = useRef<number>(0);
+  // cap "au volant"
+  const lastRawPosRef = useRef<LatLng | null>(null);
+  const [heading, setHeading] = useState<number | null>(null); // UI/debug
+  const headingRef = useRef<number | null>(null); // heading natif si dispo
+  const lastBearingRef = useRef<number>(0); // bearing final (heading ou calcul + lissé)
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -415,7 +449,7 @@ export default function NavLive() {
   }
 
   // “Embarqué sur la polyline”
-  const ON_TRACE_M = 18; // tolérance: si on est à <= 18m de la trace, on considère “embarqué”
+  const ON_TRACE_M = 18; // <= 18m de la trace => “sur le trajet”
   const MIN_SPEED_FOR_TURNS = 1.0; // m/s
   const MAX_ACC_FOR_TURNS = 40; // m
 
@@ -442,25 +476,42 @@ export default function NavLive() {
 
   /* =========================
      Mapbox (Option B)
+     IMPORTANT: pour éviter l’erreur TS "Cannot find module 'mapbox-gl'",
+     on charge mapbox-gl en import dynamique.
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
-  const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  const mapRef = useRef<any | null>(null);
+  const mapboxRef = useRef<any | null>(null);
+  const busMarkerRef = useRef<any | null>(null);
 
   const MAP_TRACE_SRC = "trace-src";
+  const MAP_TRACE_LAYER_HALO = "trace-layer-halo";
   const MAP_TRACE_LAYER = "trace-layer";
   const MAP_STOPS_SRC = "stops-src";
   const MAP_STOPS_LAYER = "stops-layer";
 
-  // Token Mapbox
-  // Ajuste si tu stockes ailleurs
-  // @ts-ignore
-  mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
+  async function loadMapbox() {
+    if (mapboxRef.current) return mapboxRef.current;
+    // @ts-ignore
+    const mod = await import("mapbox-gl");
+    const mapboxgl = mod?.default ?? mod;
+    mapboxRef.current = mapboxgl;
+    return mapboxgl;
+  }
 
-  function ensureMap() {
+  async function ensureMap() {
     if (mapRef.current) return mapRef.current;
     if (!mapElRef.current) return null;
+
+    const mapboxgl = await loadMapbox();
+
+    // token Mapbox AVANT new Map()
+    mapboxgl.accessToken = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
+    if (!mapboxgl.accessToken) {
+      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant (page blanche probable).");
+      return null;
+    }
 
     const m = new mapboxgl.Map({
       container: mapElRef.current,
@@ -472,33 +523,43 @@ export default function NavLive() {
       attributionControl: false,
     });
 
-    // petits contrôles utiles (facultatif)
+    // contrôles utiles
     m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
 
     mapRef.current = m;
-
-    m.on("load", () => {
-      // Sources/layers seront ajoutés quand on a la trace/points
-    });
-
     return m;
   }
 
   function upsertTraceOnMap(line: [number, number][]) {
     const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded?.()) return;
     if (!line || line.length < 2) return;
 
-    const coords = line.map(([lat, lng]) => [lng, lat]); // GeoJSON = [lng,lat]
-    const geojson: GeoJSON.Feature<GeoJSON.LineString> = {
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON = [lng,lat]
+    const geojson: GeoFeature<GeoLineString> = {
       type: "Feature",
       properties: {},
       geometry: { type: "LineString", coordinates: coords },
     };
 
-    const hasSrc = Boolean(m.getSource(MAP_TRACE_SRC));
+    const hasSrc = Boolean(m.getSource?.(MAP_TRACE_SRC));
     if (!hasSrc) {
       m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson });
+
+      // Halo en dessous
+      m.addLayer({
+        id: MAP_TRACE_LAYER_HALO,
+        type: "line",
+        source: MAP_TRACE_SRC,
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-color": "#93c5fd",
+          "line-width": 12,
+          "line-opacity": 0.25,
+        },
+      });
+
+      // Ligne principale au-dessus
       m.addLayer({
         id: MAP_TRACE_LAYER,
         type: "line",
@@ -510,30 +571,18 @@ export default function NavLive() {
           "line-opacity": 0.9,
         },
       });
-      // halo
-      m.addLayer({
-        id: `${MAP_TRACE_LAYER}-halo`,
-        type: "line",
-        source: MAP_TRACE_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#93c5fd",
-          "line-width": 12,
-          "line-opacity": 0.25,
-        },
-      });
     } else {
-      const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource;
-      src.setData(geojson);
+      const src = m.getSource(MAP_TRACE_SRC);
+      if (src && src.setData) src.setData(geojson);
     }
   }
 
   function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
     const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded?.()) return;
     if (!pts || pts.length === 0) return;
 
-    const fc: GeoJSON.FeatureCollection<GeoJSON.Point> = {
+    const fc: GeoFeatureCollection<GeoPoint> = {
       type: "FeatureCollection",
       features: pts.map((p, i) => ({
         type: "Feature",
@@ -542,7 +591,7 @@ export default function NavLive() {
       })),
     };
 
-    const hasSrc = Boolean(m.getSource(MAP_STOPS_SRC));
+    const hasSrc = Boolean(m.getSource?.(MAP_STOPS_SRC));
     if (!hasSrc) {
       m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc });
       m.addLayer({
@@ -557,14 +606,15 @@ export default function NavLive() {
         },
       });
     } else {
-      const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource;
-      src.setData(fc);
+      const src = m.getSource(MAP_STOPS_SRC);
+      if (src && src.setData) src.setData(fc);
     }
   }
 
   function ensureBusMarker() {
     const m = mapRef.current;
-    if (!m) return null;
+    const mapboxgl = mapboxRef.current;
+    if (!m || !mapboxgl) return null;
     if (busMarkerRef.current) return busMarkerRef.current;
 
     const el = document.createElement("div");
@@ -578,7 +628,6 @@ export default function NavLive() {
     el.style.boxShadow = "0 10px 26px rgba(0,0,0,.25)";
     el.style.border = "3px solid #60a5fa";
 
-    // “bus” stylé + rotation
     const icon = document.createElement("div");
     icon.textContent = "🚌";
     icon.style.fontSize = "18px";
@@ -594,8 +643,9 @@ export default function NavLive() {
   function setBusRotation(deg: number) {
     const mk = busMarkerRef.current;
     if (!mk) return;
-    const el = mk.getElement();
-    const icon = el.querySelector('[data-bus-icon="1"]') as HTMLDivElement | null;
+    const el = mk.getElement?.();
+    if (!el) return;
+    const icon = el.querySelector?.('[data-bus-icon="1"]') as HTMLDivElement | null;
     if (!icon) return;
     icon.style.transform = `rotate(${deg}deg)`;
   }
@@ -615,7 +665,8 @@ export default function NavLive() {
       pitch: 60,
       bearing: useBearing,
       duration: 450,
-      easing: (t) => t,
+      easing: (t: number) => t,
+      essential: true,
     });
   }
 
@@ -661,15 +712,15 @@ export default function NavLive() {
     onTraceAnnouncedRef.current = false;
 
     // Map
-    const m = ensureMap();
+    const m = await ensureMap();
     if (m) {
       const apply = () => {
         upsertTraceOnMap(line);
         upsertStopsOnMap(pts);
         ensureBusMarker();
       };
-      if (m.isStyleLoaded()) apply();
-      else m.once("load", apply);
+      if (m.isStyleLoaded?.()) apply();
+      else m.once?.("load", apply);
     }
   }
 
@@ -708,9 +759,8 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    // Init map immediately
-    ensureMap();
-    ensureBusMarker();
+    // init map early (évite flash)
+    await ensureMap();
 
     await loadCircuit();
 
@@ -736,8 +786,20 @@ export default function NavLive() {
     tryExitFullscreen();
   }
 
+  // cleanup map si on quitte la page
+  useEffect(() => {
+    return () => {
+      try {
+        if (mapRef.current) mapRef.current.remove?.();
+      } catch {}
+      mapRef.current = null;
+      busMarkerRef.current = null;
+      mapboxRef.current = null;
+    };
+  }, []);
+
   /* =========================
-     GPS tracking (lissage + heading)
+     GPS tracking (lissage + bearing "au volant")
   ========================= */
 
   useEffect(() => {
@@ -762,16 +824,26 @@ export default function NavLive() {
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
-        // heading: si null, on garde le dernier
+        // ===== bearing: heading natif si dispo, sinon calcul par mouvement =====
+        const prevRaw = lastRawPosRef.current;
+        lastRawPosRef.current = raw;
+
         const hd = p.heading ?? null;
         if (hd != null && Number.isFinite(hd)) {
-          setHeading(hd);
           headingRef.current = hd;
-          lastBearingRef.current = hd;
+          setHeading(hd);
+          lastBearingRef.current = lerpAngle(lastBearingRef.current, hd, 0.25);
         } else {
-          // si pas de heading fourni, on conserve lastBearingRef
-          setHeading(null);
           headingRef.current = null;
+          setHeading(null);
+
+          if (prevRaw) {
+            const moved = haversineMeters(prevRaw, raw);
+            if (moved >= 3) {
+              const br = bearingDeg(prevRaw, raw);
+              lastBearingRef.current = lerpAngle(lastBearingRef.current, br, 0.22);
+            }
+          }
         }
       },
       (m) => setErr(m)
@@ -804,7 +876,6 @@ export default function NavLive() {
     }
     if (!isOn) {
       onTraceRef.current = false;
-      // (on ne re-speak pas quand on re-rentre; c’est voulu pour éviter spam)
     }
   }, [running, me, hasOfficial, officialLine]);
 
@@ -816,19 +887,20 @@ export default function NavLive() {
     if (!running) return;
     if (!me) return;
 
-    const m = ensureMap();
-    if (!m) return;
+    (async () => {
+      const m = await ensureMap();
+      if (!m) return;
 
-    const mk = ensureBusMarker();
-    if (!mk) return;
+      const mk = ensureBusMarker();
+      if (!mk) return;
 
-    mk.setLngLat([me.lng, me.lat]);
+      mk.setLngLat([me.lng, me.lat]);
 
-    const bearing = (headingRef.current ?? lastBearingRef.current) || 0;
+      const bearing = lastBearingRef.current || 0;
 
-    // rotation bus + caméra
-    setBusRotation(bearing);
-    updateCamera(me, bearing);
+      setBusRotation(bearing);
+      updateCamera(me, bearing);
+    })().catch(() => {});
   }, [running, me, heading]);
 
   /* =========================
@@ -847,7 +919,7 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ===== MODE INTELLIGENT: arrêt manqué => skip auto (se base sur progression trace) =====
+    // ===== MODE INTELLIGENT: arrêt manqué => skip auto =====
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
       const nearMe = nearestLineIndex(me, officialLine);
@@ -877,7 +949,6 @@ export default function NavLive() {
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
-          // Reset turn context (évite annonce qui ne correspond plus)
           lockedTurnRef.current = null;
           setLockedTurnUI(null);
           turnVoiceStageRef.current = null;
@@ -1068,11 +1139,7 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine, finished]);
 
   const turnDistanceText =
-    finished
-      ? ""
-      : lockedTurnUI && me
-      ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}`
-      : "";
+    finished ? "" : lockedTurnUI && me ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}` : "";
 
   /* =========================
      UI
@@ -1092,10 +1159,7 @@ export default function NavLive() {
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
               <div style={muted}>
-                État:{" "}
-                <b>
-                  {finished ? "Terminé" : onTraceRef.current ? "Sur le trajet" : "Hors trajet (suivre la ligne bleue)"}
-                </b>
+                État: <b>{finished ? "Terminé" : onTraceRef.current ? "Sur le trajet" : "Hors trajet (suivre la ligne bleue)"}</b>
               </div>
             </div>
 
@@ -1122,6 +1186,7 @@ export default function NavLive() {
             {/* Map */}
             <div style={{ position: "relative" }}>
               <div ref={mapElRef} style={{ height: 520, width: "100%" }} />
+
               {/* Bandeau jaune (CRUCIAL) */}
               {stopBanner.show &&
                 (() => {
@@ -1174,9 +1239,7 @@ export default function NavLive() {
 
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                          <div style={{ fontSize: 13, opacity: 0.9 }}>
-                            {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                          </div>
+                          <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                         </div>
                       </div>
 
