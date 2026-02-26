@@ -35,24 +35,6 @@ type LockedTurn = {
 };
 
 /* =========================
-   GeoJSON minimal (évite "Cannot find namespace GeoJSON")
-========================= */
-
-type GPoint = { type: "Point"; coordinates: [number, number] };
-type GLineString = { type: "LineString"; coordinates: [number, number][] };
-
-type GFeature<G> = {
-  type: "Feature";
-  properties: Record<string, any>;
-  geometry: G;
-};
-
-type GFeatureCollection<G> = {
-  type: "FeatureCollection";
-  features: Array<GFeature<G>>;
-};
-
-/* =========================
    Helpers
 ========================= */
 
@@ -453,7 +435,7 @@ export default function NavLive() {
     });
   }, [hasOfficial, officialLine, points]);
 
-     /* =========================
+  /* =========================
      Mapbox (stable overlays)
   ========================= */
 
@@ -461,7 +443,8 @@ export default function NavLive() {
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // derniers overlays connus (pour reposer après style reload)
+  // ✅ IMPORTANT: on garde toujours la dernière trace + stops ici
+  // pour que "load" / "style.load" puisse les remettre (sinon: ligne bleue disparait)
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
@@ -472,7 +455,6 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
 
   function ensureMapToken() {
-    // ✅ Vite: import.meta.env
     const token = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
     mapboxgl.accessToken = token;
     return token;
@@ -501,10 +483,7 @@ export default function NavLive() {
     icon.setAttribute("data-bus-icon", "1");
     el.appendChild(icon);
 
-    const mk = new mapboxgl.Marker({ element: el, anchor: "center" })
-      .setLngLat([-73.0, 46.8])
-      .addTo(m);
-
+    const mk = new mapboxgl.Marker({ element: el, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
     busMarkerRef.current = mk;
     return mk;
   }
@@ -529,6 +508,26 @@ export default function NavLive() {
     } catch {}
   }
 
+  function buildTraceGeoJSON(line: [number, number][]) {
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON=[lng,lat]
+    return {
+      type: "Feature" as const,
+      properties: {},
+      geometry: { type: "LineString" as const, coordinates: coords },
+    };
+  }
+
+  function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[]) {
+    return {
+      type: "FeatureCollection" as const,
+      features: pts.map((p, i) => ({
+        type: "Feature" as const,
+        properties: { idx: i, label: p.label ?? "" },
+        geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
+      })),
+    };
+  }
+
   function applyOverlays() {
     const m = mapRef.current;
     if (!m) return;
@@ -537,8 +536,7 @@ export default function NavLive() {
     const line = lineRef.current;
     const pts = stopsRef.current;
 
-    // On nettoie au cas où un ancien style/layer reste dans un état bizarre
-    // (Mapbox peut throw si on addLayer deux fois)
+    // Nettoyage (évite addLayer double)
     safeRemoveLayer(m, MAP_TRACE_LAYER);
     safeRemoveLayer(m, MAP_TRACE_HALO);
     safeRemoveSource(m, MAP_TRACE_SRC);
@@ -548,14 +546,7 @@ export default function NavLive() {
 
     // ---- TRACE (ligne bleue) ----
     if (line && line.length >= 2) {
-      const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON=[lng,lat]
-
-      const geojson = {
-        type: "Feature" as const,
-        properties: {},
-        geometry: { type: "LineString" as const, coordinates: coords },
-      };
-
+      const geojson = buildTraceGeoJSON(line);
       try {
         m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson as any });
 
@@ -591,15 +582,7 @@ export default function NavLive() {
 
     // ---- STOPS ----
     if (pts && pts.length > 0) {
-      const fc = {
-        type: "FeatureCollection" as const,
-        features: pts.map((p, i) => ({
-          type: "Feature" as const,
-          properties: { idx: i, label: p.label ?? "" },
-          geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
-        })),
-      };
-
+      const fc = buildStopsGeoJSON(pts);
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
         m.addLayer({
@@ -616,6 +599,58 @@ export default function NavLive() {
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
       }
+    }
+  }
+
+  // ✅ Ces 2 fonctions étaient manquantes ET c’est elles qui assurent
+  // que la ligne bleue + stops sont réellement posés (et persistants).
+  function upsertTraceOnMap(line: [number, number][]) {
+    lineRef.current = Array.isArray(line) ? line : [];
+
+    const m = mapRef.current;
+    if (!m) return;
+
+    // si le style est prêt, on met à jour rapidement, sinon "load/style.load" va l'appliquer
+    if (!m.isStyleLoaded()) return;
+
+    const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource | undefined;
+    const data = buildTraceGeoJSON(lineRef.current) as any;
+
+    try {
+      if (src) {
+        src.setData(data);
+        // si layers absents (après style reload), on les remet
+        if (!m.getLayer(MAP_TRACE_LAYER) || !m.getLayer(MAP_TRACE_HALO)) applyOverlays();
+      } else {
+        applyOverlays();
+      }
+    } catch (e) {
+      console.error("upsertTraceOnMap failed:", e);
+      applyOverlays();
+    }
+  }
+
+  function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
+    stopsRef.current = Array.isArray(pts) ? pts : [];
+
+    const m = mapRef.current;
+    if (!m) return;
+
+    if (!m.isStyleLoaded()) return;
+
+    const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
+    const data = buildStopsGeoJSON(stopsRef.current) as any;
+
+    try {
+      if (src) {
+        src.setData(data);
+        if (!m.getLayer(MAP_STOPS_LAYER)) applyOverlays();
+      } else {
+        applyOverlays();
+      }
+    } catch (e) {
+      console.error("upsertStopsOnMap failed:", e);
+      applyOverlays();
     }
   }
 
@@ -718,12 +753,10 @@ export default function NavLive() {
     // Map layers
     const m = ensureMap();
     if (m) {
+      // ✅ on met à jour les refs + pose sur la carte si possible
       upsertTraceOnMap(line);
       upsertStopsOnMap(pts);
       ensureBusMarker();
-
-      // Si tu veux “centrer” sur la trace au départ:
-      // on se contente de laisser la caméra suivre le GPS ensuite.
     }
   }
 
@@ -857,8 +890,6 @@ export default function NavLive() {
     }
     if (!isOn) {
       onTraceRef.current = false;
-      // IMPORTANT: aucun reroute, aucun recalcul, juste “rejoindre le trajet”
-      // On remet aussi les manœuvres pour éviter des annonces hors trace
       lockedTurnRef.current = null;
       setLockedTurnUI(null);
       turnVoiceStageRef.current = null;
@@ -889,7 +920,6 @@ export default function NavLive() {
 
   /* =========================
      Stops + bandeau jaune + ding + skip arrêt manqué
-     (indépendant du fait d’être sur la trace : bandeau reste crucial)
   ========================= */
 
   useEffect(() => {
@@ -934,7 +964,6 @@ export default function NavLive() {
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
-          // Reset manœuvre
           lockedTurnRef.current = null;
           setLockedTurnUI(null);
           turnVoiceStageRef.current = null;
@@ -1016,8 +1045,6 @@ export default function NavLive() {
 
   /* =========================
      ✅ Directions UNIQUEMENT sur la trace
-     - Aucun reroute
-     - Si hors trace => juste "Rejoindre le trajet"
   ========================= */
 
   useEffect(() => {
@@ -1027,7 +1054,6 @@ export default function NavLive() {
     if (finished) return;
 
     if (!onTraceRef.current) {
-      // hors trace : pas de directions
       lockedTurnRef.current = null;
       setLockedTurnUI(null);
       turnVoiceStageRef.current = null;
@@ -1119,21 +1145,13 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine, finished]);
 
   const turnDistanceText =
-    finished
-      ? ""
-      : lockedTurnUI && me
-      ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}`
-      : "";
+    finished ? "" : lockedTurnUI && me ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}` : "";
 
   /* =========================
      UI
   ========================= */
 
-  const statusText = finished
-    ? "Terminé"
-    : onTraceRef.current
-    ? "Sur le trajet"
-    : "Hors trajet (rejoindre la ligne bleue)";
+  const statusText = finished ? "Terminé" : onTraceRef.current ? "Sur le trajet" : "Hors trajet (rejoindre la ligne bleue)";
 
   const mainInstruction = finished
     ? "✅ Circuit terminé"
