@@ -5,6 +5,7 @@ import Record from "@/pages/Record";
 import NavLive from "@/pages/NavLive";
 import Login from "@/pages/Login";
 import RequireAuth from "@/components/RequireAuth";
+import "mapbox-gl/dist/mapbox-gl.css";
 
 export default function App() {
   return (
