@@ -6,7 +6,6 @@ import mapboxgl from "mapbox-gl";
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
 import { useWakeLock } from "@/lib/useWakeLock";
-import { page, container, card, h1, muted, row, btn, bigBtn } from "@/ui";
 
 /* =========================
    Types
@@ -29,26 +28,6 @@ type LatLng = { lat: number; lng: number };
 /* =========================
    Helpers
 ========================= */
-
-/** Arrondi “style GPS” */
-function roundMetersForDisplay(m: number) {
-  const mm = Math.max(0, Math.round(m));
-  if (mm >= 1000) return mm;
-  if (mm >= 200) return Math.round(mm / 50) * 50;
-  if (mm >= 60) return Math.round(mm / 10) * 10;
-  return Math.round(mm / 5) * 5;
-}
-
-function fmtDist(m: number) {
-  const mm = Math.max(0, Math.round(m));
-  if (mm >= 1000) {
-    const km = mm / 1000;
-    const v = Math.round(km * 10) / 10;
-    return `${v} km`;
-  }
-  return `${roundMetersForDisplay(mm)} m`;
-}
-
 
 function useQuery() {
   const { search } = useLocation();
@@ -145,31 +124,26 @@ function nearestLineIndex(me: LatLng, line: [number, number][]) {
   return { idx: bestIdx, dist: best };
 }
 
-/* ====== Camera smoothing helpers ====== */
-
-function wrap360(deg: number) {
-  let d = deg % 360;
-  if (d < 0) d += 360;
-  return d;
+/** Arrondi “style GPS” */
+function roundMetersForDisplay(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) return mm;
+  if (mm >= 200) return Math.round(mm / 50) * 50;
+  if (mm >= 60) return Math.round(mm / 10) * 10;
+  return Math.round(mm / 5) * 5;
 }
-
-// interpolation d’angle qui prend le plus court chemin (ex: 359->1)
-function lerpAngleDeg(from: number, to: number, t: number) {
-  const a = wrap360(from);
-  const b = wrap360(to);
-  let diff = b - a;
-  if (diff > 180) diff -= 360;
-  if (diff < -180) diff += 360;
-  return wrap360(a + diff * t);
-}
-
-function metersBetween(a: LatLng, b: LatLng) {
-  return haversineMeters(a, b);
+function fmtDist(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) {
+    const km = mm / 1000;
+    const v = Math.round(km * 10) / 10;
+    return `${v} km`;
+  }
+  return `${roundMetersForDisplay(mm)} m`;
 }
 
 /* =========================
-   Voix + Ding
-   - Virages OFF => on garde seulement annonces d’arrêt + ding
+   Ding + voix (arrêts seulement)
 ========================= */
 
 function useDing() {
@@ -276,24 +250,21 @@ function useSpeaker() {
 }
 
 /* =========================
-   Fullscreen helpers
+   Camera smoothing helpers
 ========================= */
 
-async function tryEnterFullscreen() {
-  try {
-    const el = document.documentElement as any;
-    if (document.fullscreenElement) return;
-    if (el.requestFullscreen) await el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-  } catch {}
+function wrap360(deg: number) {
+  let d = deg % 360;
+  if (d < 0) d += 360;
+  return d;
 }
-
-async function tryExitFullscreen() {
-  try {
-    const d: any = document;
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else if (d.webkitFullscreenElement) await d.webkitExitFullscreen();
-  } catch {}
+function lerpAngleDeg(from: number, to: number, t: number) {
+  const a = wrap360(from);
+  const b = wrap360(to);
+  let diff = b - a;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  return wrap360(a + diff * t);
 }
 
 /* =========================
@@ -358,6 +329,13 @@ export default function NavLive() {
   // Progression sur trace (pour skip arrêt manqué)
   const traceIdxRef = useRef<number>(0);
 
+  // Anti-finish si arrêts trop proches
+  const lastMeRef = useRef<LatLng | null>(null);
+  const travelSinceTargetSetRef = useRef(0);
+  const initialDistToTargetRef = useRef<number | null>(null);
+  const MIN_TRAVEL_AFTER_TARGET_SET_M = 12;
+  const ARRIVE_EPS_M = 5;
+
   // Camera smoothing refs
   const camLastAtRef = useRef(0);
   const camLastCenterRef = useRef<LatLng | null>(null);
@@ -389,12 +367,14 @@ export default function NavLive() {
   }, [hasOfficial, officialLine, points]);
 
   /* =========================
-     Mapbox (stable overlays)
+     Mapbox (plein écran + overlays)
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
-  const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
+
+  // curseur style GPS (point bleu)
+  const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
   // on conserve toujours la dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
@@ -412,41 +392,23 @@ export default function NavLive() {
     return token;
   }
 
-  function ensureBusMarker() {
+  function ensureMeMarker() {
     const m = mapRef.current;
     if (!m) return null;
-    if (busMarkerRef.current) return busMarkerRef.current;
+    if (meMarkerRef.current) return meMarkerRef.current;
 
+    // Blue dot style (Google-ish)
     const el = document.createElement("div");
-    el.style.width = "34px";
-    el.style.height = "34px";
-    el.style.borderRadius = "18px";
-    el.style.background = "#111827";
-    el.style.display = "flex";
-    el.style.alignItems = "center";
-    el.style.justifyContent = "center";
-    el.style.boxShadow = "0 10px 26px rgba(0,0,0,.25)";
-    el.style.border = "3px solid #60a5fa";
-
-    const icon = document.createElement("div");
-    icon.textContent = "🚌";
-    icon.style.fontSize = "18px";
-    icon.style.transformOrigin = "50% 50%";
-    icon.setAttribute("data-bus-icon", "1");
-    el.appendChild(icon);
+    el.style.width = "18px";
+    el.style.height = "18px";
+    el.style.borderRadius = "50%";
+    el.style.background = "#1d4ed8";
+    el.style.border = "3px solid #ffffff";
+    el.style.boxShadow = "0 8px 18px rgba(0,0,0,.25)";
 
     const mk = new mapboxgl.Marker({ element: el, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
-    busMarkerRef.current = mk;
+    meMarkerRef.current = mk;
     return mk;
-  }
-
-  function setBusRotation(deg: number) {
-    const mk = busMarkerRef.current;
-    if (!mk) return;
-    const el = mk.getElement();
-    const icon = el.querySelector('[data-bus-icon="1"]') as HTMLDivElement | null;
-    if (!icon) return;
-    icon.style.transform = `rotate(${deg}deg)`;
   }
 
   function safeRemoveLayer(m: mapboxgl.Map, id: string) {
@@ -506,11 +468,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_TRACE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#93c5fd",
-            "line-width": 12,
-            "line-opacity": 0.28,
-          },
+          paint: { "line-color": "#93c5fd", "line-width": 12, "line-opacity": 0.28 },
         });
 
         m.addLayer({
@@ -518,11 +476,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_TRACE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#2563eb",
-            "line-width": 7,
-            "line-opacity": 0.95,
-          },
+          paint: { "line-color": "#2563eb", "line-width": 7, "line-opacity": 0.95 },
         });
       } catch (e) {
         console.error("Mapbox apply trace failed:", e);
@@ -551,49 +505,12 @@ export default function NavLive() {
     }
   }
 
-  function upsertTraceOnMap(line: [number, number][]) {
-    lineRef.current = Array.isArray(line) ? line : [];
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
-
-    const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource | undefined;
-    const data = buildTraceGeoJSON(lineRef.current) as any;
-
-    try {
-      if (src) src.setData(data);
-      if (!m.getLayer(MAP_TRACE_LAYER) || !m.getLayer(MAP_TRACE_HALO)) applyOverlays();
-      if (!src) applyOverlays();
-    } catch (e) {
-      console.error("upsertTraceOnMap failed:", e);
-      applyOverlays();
-    }
-  }
-
-  function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
-    stopsRef.current = Array.isArray(pts) ? pts : [];
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
-
-    const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
-    const data = buildStopsGeoJSON(stopsRef.current) as any;
-
-    try {
-      if (src) src.setData(data);
-      if (!m.getLayer(MAP_STOPS_LAYER)) applyOverlays();
-      if (!src) applyOverlays();
-    } catch (e) {
-      console.error("upsertStopsOnMap failed:", e);
-      applyOverlays();
-    }
-  }
-
   function ensureMap() {
     if (mapRef.current) return mapRef.current;
     if (!mapElRef.current) return null;
 
     const token = ensureMapToken();
     if (!token) {
-      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant.");
       setErr("Mapbox: token manquant (VITE_MAPBOX_TOKEN).");
       return null;
     }
@@ -603,14 +520,14 @@ export default function NavLive() {
       style: "mapbox://styles/mapbox/navigation-day-v1",
       center: [-73.0, 46.8],
       zoom: 15,
-      pitch: 60,
+      pitch: 55,
       bearing: 0,
       attributionControl: false,
     });
 
-    m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
     mapRef.current = m;
 
+    // On n'ajoute PAS NavigationControl (tu veux tes + et - custom)
     m.on("load", () => {
       applyOverlays();
       try {
@@ -623,6 +540,17 @@ export default function NavLive() {
     });
 
     return m;
+  }
+
+  function zoomIn() {
+    try {
+      mapRef.current?.zoomIn({ duration: 200 });
+    } catch {}
+  }
+  function zoomOut() {
+    try {
+      mapRef.current?.zoomOut({ duration: 200 });
+    } catch {}
   }
 
   /* =========================
@@ -649,7 +577,6 @@ export default function NavLive() {
     setFinished(false);
     traceIdxRef.current = 0;
 
-    // reset UI refs
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
@@ -659,33 +586,42 @@ export default function NavLive() {
     stopTouchedRef.current = false;
     stopMinDistRef.current = Infinity;
 
-    // ✅ Toujours setter les refs même si la map n’est pas prête
+    // anti-finish
+    travelSinceTargetSetRef.current = 0;
+    initialDistToTargetRef.current = null;
+
+    // overlays refs
     lineRef.current = line;
     stopsRef.current = pts;
 
-    // Si map prête, pose overlays
     const m = ensureMap();
     if (m) {
       applyOverlays();
-      ensureBusMarker();
+      ensureMeMarker();
     }
   }
 
   /* =========================
-     Start / Stop
+     AUTO START (direct quand on ouvre /nav?circuit=...)
   ========================= */
 
-  async function start() {
+  async function startAuto() {
     setErr(null);
 
     if (!circuitId) {
-      alert("Circuit manquant. Reviens au portail.");
+      setErr("Circuit manquant.");
       return;
     }
 
-    await ding.unlock();
-    await tryEnterFullscreen();
+    // audio unlock (ding/voix) peut être bloqué sans clic; pas grave, on essaie.
+    try {
+      await ding.unlock();
+    } catch {}
 
+    // running=true tout de suite pour que la map monte en DOM
+    setRunning(true);
+
+    // init GPS position (1 fois)
     const got = await new Promise<{ lat: number; lng: number; acc?: number | null }>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
         (p) =>
@@ -706,21 +642,25 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    // ✅ running=true tout de suite pour monter le div map
-    setRunning(true);
+    lastMeRef.current = initial;
+    travelSinceTargetSetRef.current = 0;
+    initialDistToTargetRef.current = null;
 
+    // map + marker
     setTimeout(() => {
       ensureMap();
-      ensureBusMarker();
+      ensureMeMarker();
     }, 0);
 
+    await loadCircuit();
+
+    // centrer caméra une première fois
     try {
-      await loadCircuit();
-      speak("Suivi démarré.", { cooldownMs: 300, interrupt: true });
-    } catch (e: any) {
-      setRunning(false);
-      throw e;
-    }
+      const m = mapRef.current;
+      if (m) {
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.2, bearing: 0, pitch: 55 });
+      }
+    } catch {}
   }
 
   function stop() {
@@ -730,9 +670,24 @@ export default function NavLive() {
     stopTouchedRef.current = false;
     stopMinDistRef.current = Infinity;
 
+    lastMeRef.current = null;
+    travelSinceTargetSetRef.current = 0;
+    initialDistToTargetRef.current = null;
+
     stopAll();
-    tryExitFullscreen();
   }
+
+  // ✅ Auto-start au chargement de la page si circuitId présent
+  useEffect(() => {
+    if (!circuitId) return;
+    if (running) return;
+
+    startAuto().catch((e: any) => {
+      setErr(e?.message || "Erreur démarrage.");
+      setRunning(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [circuitId]);
 
   /* =========================
      GPS tracking (lissage + heading)
@@ -779,7 +734,7 @@ export default function NavLive() {
   }, [running]);
 
   /* =========================
-     Distance à la trace (info seulement)
+     Distance à la trace (info)
   ========================= */
 
   useEffect(() => {
@@ -792,8 +747,8 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Map updates (marker + caméra lissée)
-========================= */
+     Map updates (curseur + caméra lissée)
+  ========================= */
 
   useEffect(() => {
     if (!running) return;
@@ -807,48 +762,40 @@ export default function NavLive() {
       if (!m.getLayer(MAP_TRACE_LAYER) && lineRef.current.length >= 2) applyOverlays();
     }
 
-    const mk = ensureBusMarker();
-    if (!mk) return;
+    const mk = ensureMeMarker();
+    mk?.setLngLat([me.lng, me.lat]);
 
-    mk.setLngLat([me.lng, me.lat]);
-
+    // camera smoothing
     const targetBearing = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
-    // Throttle caméra
     const now = Date.now();
-    const MIN_MS = 250; // 4 fps max
+    const MIN_MS = 250; // throttle
     if (now - camLastAtRef.current < MIN_MS) {
       camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-      setBusRotation(camBearRef.current);
       return;
     }
     camLastAtRef.current = now;
 
-    // Ignore micro mouvements
     const lastC = camLastCenterRef.current;
     if (lastC) {
-      const dm = metersBetween(lastC, me);
+      const dm = haversineMeters(lastC, me);
       if (dm < 0.8) {
         camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-        setBusRotation(camBearRef.current);
         return;
       }
     }
     camLastCenterRef.current = me;
 
-    // Lissage bearing
     camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-    setBusRotation(camBearRef.current);
 
-    // Zoom doux
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.5 : kmh >= 25 ? 16.8 : 16.2;
+    const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
-      pitch: 60,
+      pitch: 55,
       bearing: camBearRef.current,
       duration: 850,
       easing: (t: number) => t,
@@ -865,6 +812,17 @@ export default function NavLive() {
     if (!running) return;
     if (!me || !target) return;
     if (finished) return;
+
+    // cumul déplacement depuis le dernier changement d'arrêt
+    if (lastMeRef.current) {
+      travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, me);
+    }
+    lastMeRef.current = me;
+
+    // initial distance au target (si pas encore set)
+    if (initialDistToTargetRef.current == null && target) {
+      initialDistToTargetRef.current = haversineMeters(me, target);
+    }
 
     const dStop = haversineMeters(me, target);
     const rawStopM = Math.round(dStop);
@@ -894,6 +852,10 @@ export default function NavLive() {
           speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
           setTargetIdx(next);
 
+          // reset anti-finish
+          travelSinceTargetSetRef.current = 0;
+          initialDistToTargetRef.current = null;
+
           stopTouchedRef.current = false;
           stopMinDistRef.current = Infinity;
 
@@ -902,7 +864,6 @@ export default function NavLive() {
           stopDingRef.current = null;
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
-
           return;
         }
       }
@@ -937,14 +898,24 @@ export default function NavLive() {
       }
     }
 
-    // arrivé arrêt -> prochain
-    if (dStop <= ARRIVE_STOP_M) {
+    // arrivé arrêt -> prochain (protège arrêts trop proches)
+    const initD = initialDistToTargetRef.current;
+    const allowArrive =
+      initD == null ||
+      initD > ARRIVE_STOP_M + ARRIVE_EPS_M ||
+      travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+
+    if (dStop <= ARRIVE_STOP_M && allowArrive) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
       const next = targetIdx + 1;
       if (next < points.length) {
         const nextTarget = points[next] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
+
+        // reset anti-finish avant switch
+        travelSinceTargetSetRef.current = 0;
+        initialDistToTargetRef.current = nextTarget ? haversineMeters(me, nextTarget) : null;
 
         speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
@@ -957,6 +928,9 @@ export default function NavLive() {
         stopTouchedRef.current = false;
         stopMinDistRef.current = Infinity;
       } else {
+        travelSinceTargetSetRef.current = 0;
+        initialDistToTargetRef.current = null;
+
         speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
         setFinished(true);
 
@@ -972,153 +946,206 @@ export default function NavLive() {
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace]);
 
   /* =========================
-     UI (navigation virages OFF)
+     UI plein écran
   ========================= */
 
-  const statusText = finished ? "Terminé" : "Suivi (trace + arrêts)";
+  const overlayBtn: React.CSSProperties = {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,.12)",
+    background: "#ffffff",
+    boxShadow: "0 10px 24px rgba(0,0,0,.18)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 22,
+    fontWeight: 900,
+    cursor: "pointer",
+    userSelect: "none",
+  };
 
-  const mainInstruction = finished ? "✅ Circuit terminé" : "Suivez la ligne bleue";
-  const arrow = finished ? "✅" : "🚌";
+  const topBar: React.CSSProperties = {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    right: 12,
+    zIndex: 9000,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    pointerEvents: "none",
+  };
+
+  const backWrap: React.CSSProperties = { pointerEvents: "auto" };
+
+  const zoomCol: React.CSSProperties = {
+    position: "absolute",
+    right: 12,
+    top: 74,
+    zIndex: 9000,
+    display: "grid",
+    gap: 10,
+    pointerEvents: "auto",
+  };
+
+  const bottomPanel: React.CSSProperties = {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 12,
+    zIndex: 9000,
+    background: "rgba(255,255,255,.92)",
+    border: "1px solid rgba(0,0,0,.10)",
+    borderRadius: 18,
+    boxShadow: "0 12px 28px rgba(0,0,0,.18)",
+    padding: "12px 14px",
+    display: "grid",
+    gap: 6,
+    pointerEvents: "none",
+  };
 
   return (
-    <div style={{ ...page, minHeight: "100vh" }}>
-      <div style={{ ...container, maxWidth: 980 }}>
-        <div style={card}>
-          <div style={row}>
-            <div style={{ flex: 1 }}>
-              <h1 style={h1}>Suivi (Trace + Arrêts)</h1>
-              <div style={muted}>
-                {hasOfficial ? <>Trace officielle active.</> : <>Trace officielle requise.</>}{" "}
-                {wlSupported ? `Écran allumé: ${wlActive ? "Oui" : "Non"}` : ""}
-              </div>
-              {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
-              {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
-              <div style={muted}>
-                État: <b>{statusText}</b>
-              </div>
-            </div>
+    <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
+      {/* MAP FULLSCREEN */}
+      <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button style={btn("ghost")} onClick={() => nav("/")}>
-                Retour
-              </button>
-              <button style={btn("ghost")} onClick={stop}>
-                Terminer
-              </button>
-            </div>
-          </div>
+      {/* TOP BAR: BACK + STATUS */}
+      <div style={topBar}>
+        <div style={backWrap}>
+          <button
+            style={{ ...overlayBtn, width: 56, justifyContent: "center", gap: 8 }}
+            onClick={() => nav("/")}
+            title="Retour"
+          >
+            ←
+          </button>
         </div>
 
-        {!running ? (
-          <div style={card}>
-            <button style={bigBtn} onClick={() => start().catch((e) => alert(e.message))} disabled={!circuitId}>
-              Démarrer
-            </button>
-            {!circuitId && <div style={{ ...muted, marginTop: 10 }}>Circuit manquant. Reviens au portail.</div>}
-          </div>
-        ) : (
-          <div style={{ ...card, position: "relative", padding: 0, overflow: "hidden" }}>
-            <div style={{ position: "relative" }}>
-              <div ref={mapElRef} style={{ height: 520, width: "100%" }} />
+        <div
+          style={{
+            pointerEvents: "none",
+            background: "rgba(17,24,39,.78)",
+            color: "white",
+            border: "1px solid rgba(255,255,255,.10)",
+            borderRadius: 14,
+            padding: "10px 12px",
+            fontWeight: 900,
+            fontSize: 14,
+          }}
+        >
+          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}
+        </div>
+      </div>
 
-              {/* Bandeau jaune */}
-              {stopBanner.show &&
-                (() => {
-                  const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
-                  const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
-                  const m = Math.max(0, Math.min(MAX, Math.round(meters)));
-                  const pct = Math.round((1 - m / MAX) * 100);
+      {/* ZOOM + / - */}
+      <div style={zoomCol}>
+        <button style={overlayBtn} onClick={zoomIn} aria-label="Zoom in">
+          +
+        </button>
+        <button style={overlayBtn} onClick={zoomOut} aria-label="Zoom out">
+          −
+        </button>
+      </div>
 
-                  const bg = "#FBBF24";
-                  const accent = "#111827";
-                  const iconBg = "#111827";
-                  const iconColor = "#FBBF24";
+      {/* BANDEAU STOP (jaune) */}
+      {stopBanner.show &&
+        (() => {
+          const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
+          const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
+          const m = Math.max(0, Math.min(MAX, Math.round(meters)));
+          const pct = Math.round((1 - m / MAX) * 100);
 
-                  return (
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: 10,
-                        left: 10,
-                        right: 10,
-                        zIndex: 9999,
-                        background: bg,
-                        color: accent,
-                        border: "1px solid rgba(0,0,0,.12)",
-                        borderRadius: 16,
-                        padding: "12px 14px",
-                        boxShadow: "0 10px 26px rgba(0,0,0,.18)",
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                        <div
-                          style={{
-                            width: 38,
-                            height: 38,
-                            borderRadius: 14,
-                            background: iconBg,
-                            color: iconColor,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontSize: 20,
-                            fontWeight: 900,
-                          }}
-                          aria-hidden
-                        >
-                          🧒
-                        </div>
-
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                          <div style={{ fontSize: 13, opacity: 0.9 }}>
-                            {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style={{ height: 12, borderRadius: 999, background: "rgba(0,0,0,.18)", overflow: "hidden" }}>
-                        <div
-                          style={{
-                            height: "100%",
-                            width: `${pct}%`,
-                            background: accent,
-                            borderRadius: 999,
-                            transition: "width 140ms linear",
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })()}
-            </div>
-
-            <div style={{ padding: 16, display: "grid", gap: 10 }}>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>
-                Prochain arrêt : {targetIdx + 1} / {points.length}
-              </div>
-              <div style={{ ...muted, fontSize: 16 }}>{target?.label ? target.label : "—"}</div>
-
-              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{ fontSize: 64, lineHeight: "64px" }}>{arrow}</div>
+          return (
+            <div
+              style={{
+                position: "absolute",
+                top: 12,
+                left: 76,
+                right: 76,
+                zIndex: 9999,
+                background: "#FBBF24",
+                color: "#111827",
+                border: "1px solid rgba(0,0,0,.12)",
+                borderRadius: 18,
+                padding: "12px 14px",
+                boxShadow: "0 10px 26px rgba(0,0,0,.18)",
+                display: "grid",
+                gap: 10,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 14,
+                    background: "#111827",
+                    color: "#FBBF24",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 20,
+                    fontWeight: 900,
+                  }}
+                  aria-hidden
+                >
+                  🧒
+                </div>
 
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 950, fontSize: 34, lineHeight: "38px" }}>{mainInstruction}</div>
+                  <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
+                  <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                 </div>
               </div>
 
-              {err && <div style={{ color: "#b91c1c", fontWeight: 900, fontSize: 16 }}>{err}</div>}
-
-              {offRouteM != null && (
-                <div style={{ ...muted, fontSize: 14 }}>
-                  Écart: <b>{Math.round(offRouteM)} m</b>
-                </div>
-              )}
+              <div style={{ height: 12, borderRadius: 999, background: "rgba(0,0,0,.18)", overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${pct}%`,
+                    background: "#111827",
+                    borderRadius: 999,
+                    transition: "width 140ms linear",
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          );
+        })()}
+
+      {/* BOTTOM PANEL: prochain arrêt */}
+      <div style={bottomPanel}>
+        <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>
+          Prochain arrêt : {Math.min(targetIdx + 1, points.length)} / {points.length}
+        </div>
+        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>{target?.label ? target.label : "—"}</div>
+        {acc != null && (
+          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h</div>
         )}
+        {offRouteM != null && (
+          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>
+        )}
+        {err && <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
+      </div>
+
+      {/* STOP BTN (optionnel) */}
+      <div style={{ position: "absolute", left: 12, bottom: 92, zIndex: 9000, pointerEvents: "auto" }}>
+        <button
+          style={{
+            ...overlayBtn,
+            width: 120,
+            height: 44,
+            borderRadius: 16,
+            fontSize: 14,
+            fontWeight: 950,
+          }}
+          onClick={stop}
+          title="Terminer"
+        >
+          Terminer
+        </button>
       </div>
     </div>
   );
