@@ -119,7 +119,7 @@ function minDistanceToPolylineMeters(me: LatLng, line: [number, number][]) {
   return Number.isFinite(best) ? best : null;
 }
 
-/** Trouve l’index de point de la polyline le plus proche (simple, rapide, assez bon ici) */
+/** index de point de la polyline le plus proche */
 function nearestLineIndex(me: LatLng, line: [number, number][]) {
   if (!line || line.length === 0) return null;
   let best = Infinity;
@@ -166,7 +166,7 @@ function angleDeg(a: LatLng, b: LatLng, c: LatLng) {
   const cy = c.lat - b.lat;
 
   const dot = ax * cx + ay * cy;
-  const det = ax * cy - ay * cx; // cross (2D)
+  const det = ax * cy - ay * cx;
   const ang = Math.atan2(det, dot) * (180 / Math.PI);
   return ang; // signed: + = left, - = right (approx)
 }
@@ -175,14 +175,37 @@ function turnTextFromAngle(signedAngle: number) {
   const a = Math.abs(signedAngle);
   if (a < 25) return null;
 
-  // “bretelle/embranchement” si angle modéré (fork), sinon virage
   if (a >= 25 && a < 55) return signedAngle > 0 ? "Prenez la bretelle à gauche" : "Prenez la bretelle à droite";
   if (a >= 55 && a < 140) return signedAngle > 0 ? "Tournez à gauche" : "Tournez à droite";
   return signedAngle > 0 ? "Faites demi-tour à gauche" : "Faites demi-tour à droite";
 }
 
+function arrowFromText(txt: string) {
+  if (txt.includes("droite")) return "➡️";
+  if (txt.includes("gauche")) return "⬅️";
+  return "⬆️";
+}
+
+/** Arrondi “style GPS” */
+function roundMetersForDisplay(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) return mm;
+  if (mm >= 200) return Math.round(mm / 50) * 50;
+  if (mm >= 60) return Math.round(mm / 10) * 10;
+  return Math.round(mm / 5) * 5;
+}
+function fmtDist(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) {
+    const km = mm / 1000;
+    const v = Math.round(km * 10) / 10;
+    return `${v} km`;
+  }
+  return `${roundMetersForDisplay(mm)} m`;
+}
+
 /* =========================
-   Voix + Ding (béton)
+   Voix + Ding
 ========================= */
 
 function useDing() {
@@ -209,8 +232,6 @@ function useDing() {
     try {
       const ctx = ensureCtx();
       if (!ctx) return;
-
-      // iOS/Android: si pas “unlocked”, on tente quand même
       try {
         if (ctx.state === "suspended") ctx.resume();
       } catch {}
@@ -218,9 +239,8 @@ function useDing() {
       const o = ctx.createOscillator();
       const g = ctx.createGain();
 
-      // ding plus “présent”
       o.type = "sine";
-      o.frequency.setValueAtTime(1046.5, ctx.currentTime); // C6
+      o.frequency.setValueAtTime(1046.5, ctx.currentTime);
       g.gain.setValueAtTime(0.0001, ctx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.45, ctx.currentTime + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
@@ -318,6 +338,14 @@ async function tryExitFullscreen() {
    Main
 ========================= */
 
+type LockedTurn = {
+  id: string; // stable key
+  text: string;
+  arrow: string;
+  turnIdx: number; // index on trace near the turn point
+  turnPoint: LatLng; // point to measure distance
+};
+
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
@@ -346,25 +374,23 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Trace officielle (OBLIGATOIRE pour la fidélité)
+  // Trace officielle
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Mode nav:
-  // - "to_start": on rejoint le point d’entrée (avant arrêt 1) via nav-api
-  // - "on_trace": on suit strictement la trace officielle
+  // Mode nav
   const [mode, setMode] = useState<"to_start" | "on_trace">("to_start");
   const entryPointRef = useRef<LatLng | null>(null);
 
-  // nav-api (seulement pour rejoindre entry point / rejoin trace)
+  // nav-api (seulement pour rejoindre entry/rejoin)
   const [routeLine, setRouteLine] = useState<[number, number][]>([]);
   const [steps, setSteps] = useState<Step[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
 
-  // Progression sur la trace (index croissant = “bon sens”)
+  // Progression trace
   const traceIdxRef = useRef<number>(0);
 
-  // Off-route + reroute (vers la trace, pas vers des routes inventées)
+  // Off-route + reroute
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
   const offRouteStrikeRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
@@ -376,16 +402,15 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
-    show: false,
-    meters: 0,
-    label: null,
-    max: 150,
-  });
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
+    { show: false, meters: 0, label: null, max: 150 }
+  );
   const stopBannerLastMRef = useRef<number | null>(null);
 
-  // Voice anti-spam for turns on trace
-  const lastTurnAnnouncedAtIdxRef = useRef<number | null>(null);
+  // Locked turn + voice stages (niveau 1)
+  const lockedTurnRef = useRef<LockedTurn | null>(null);
+  const [lockedTurnUI, setLockedTurnUI] = useState<LockedTurn | null>(null);
+  const turnVoiceStageRef = useRef<{ id: string; stage: "none" | "soon" | "now" } | null>(null);
 
   // Cache nav-api routes (entry/rejoin only)
   const routeCacheRef = useRef(new Map<string, { line: [number, number][]; steps: Step[]; at: number }>());
@@ -395,21 +420,20 @@ export default function NavLive() {
   const ARRIVE_STOP_M = 45;
   const DING_AT_M = 10;
 
-  // Zone jaune: 150 si <80 km/h, sinon 200 (figé par arrêt)
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
     return kmh >= 80 ? 200 : 150;
   }
 
-  // Rejoin / off-route
   const OFF_ROUTE_M = 28;
   const ON_ROUTE_M = 14;
   const REROUTE_COOLDOWN_MS = 7000;
 
-  // Turn detection on trace
-  const TURN_LOOKAHEAD_M = 55; // à quelle distance on regarde “devant”
-  const TURN_ANNOUNCE_AT_M = 65;
+  // Turn detection on trace (niveau 1)
+  const TURN_LOOKAHEAD_M = 55;
+  const TURN_SOON_AT_M = 260; // “Dans X…”
+  const TURN_NOW_AT_M = 70; // “Maintenant”
   const TURN_MIN_ANGLE = 25;
 
   function cacheKey(from: LatLng, to: LatLng) {
@@ -486,40 +510,34 @@ export default function NavLive() {
     stopBannerLastMRef.current = null;
     setStopBanner({ show: false, meters: 0, label: null, max: 150 });
 
-    lastTurnAnnouncedAtIdxRef.current = null;
-
     setFinished(false);
     traceIdxRef.current = 0;
 
-    // Trace officielle: indispensable
-    try {
-      const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
-      const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
+    // Reset locked turn
+    lockedTurnRef.current = null;
+    setLockedTurnUI(null);
+    turnVoiceStageRef.current = null;
 
-      if (line.length >= 2) {
-        setOfficialLine(line);
-        setHasOfficial(true);
-      } else {
-        setOfficialLine([]);
-        setHasOfficial(false);
-        throw new Error("Trace officielle introuvable (aucun trail).");
-      }
-    } catch (e: any) {
+    // Trace officielle: indispensable
+    const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
+    const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
+
+    if (line.length >= 2) {
+      setOfficialLine(line);
+      setHasOfficial(true);
+    } else {
       setOfficialLine([]);
       setHasOfficial(false);
-      throw new Error(e?.message ?? "Impossible de charger la trace officielle.");
+      throw new Error("Trace officielle introuvable (aucun trail).");
     }
 
     return pts;
   }
 
   function computeEntryPointForStop1(line: [number, number][], stop1: LatLng) {
-    // On prend le point de la trace le plus proche de l’arrêt 1,
-    // puis on recule de ~80m sur la trace pour “arriver du bon sens”.
     const near = nearestLineIndex(stop1, line);
     const stopIdxOnTrace = near ? near.idx : 0;
 
-    // recule 80m: on marche “en arrière” en soustrayant
     let idx = stopIdxOnTrace;
     let left = 80;
 
@@ -546,7 +564,6 @@ export default function NavLive() {
       return;
     }
 
-    // unlock audio + fullscreen (doit être dans un geste utilisateur)
     await ding.unlock();
     await tryEnterFullscreen();
 
@@ -570,22 +587,12 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    const pts = await loadCircuit();
+    await loadCircuit();
 
-    // On doit obligatoirement avoir la trace
-    const line = officialLine.length >= 2 ? officialLine : null;
-    // NB: officialLine state set async; on se base sur future state via ref:
-    // donc on va recalculer entry après un tick si needed.
-    // Ici on lit directement pts + on s’appuie sur setHasOfficial déjà fait,
-    // mais pour être robuste, on fera l’entrée dans un effect qui attend officialLine.
-
-    // On passe running tout de suite
     setRunning(true);
     setMode("to_start");
 
     speak("Navigation démarrée.", { cooldownMs: 300, interrupt: true });
-
-    // On prépare entry point dès que officialLine est dispo via effect
   }
 
   function stop() {
@@ -594,6 +601,10 @@ export default function NavLive() {
     setMode("to_start");
     entryPointRef.current = null;
 
+    lockedTurnRef.current = null;
+    setLockedTurnUI(null);
+    turnVoiceStageRef.current = null;
+
     try {
       routeInFlightRef.current?.abort();
     } catch {}
@@ -601,32 +612,24 @@ export default function NavLive() {
     tryExitFullscreen();
   }
 
-  // Quand officialLine est chargé et qu’on est running: calcule entry point + route vers entry
+  // Quand officialLine est chargé et qu’on est running: calcule entry + route vers entry
   useEffect(() => {
     if (!running) return;
     if (!hasOfficial || officialLine.length < 2) return;
     if (!points[0]) return;
     if (!me) return;
 
-    // Si déjà entrée calculée, skip
     if (entryPointRef.current) return;
 
     const stop1 = points[0];
-    const { entryIdx, entry, stopIdxOnTrace } = computeEntryPointForStop1(officialLine, stop1);
+    const { entryIdx, entry } = computeEntryPointForStop1(officialLine, stop1);
 
     entryPointRef.current = entry;
-
-    // On démarre la progression sur trace au point d’entrée
     traceIdxRef.current = entryIdx;
 
-    // Route nav-api uniquement pour rejoindre l’entrée (garage -> trace)
     calcRoute(me, entry)
-      .then(() => {
-        speak("Rejoignez le trajet enregistré.", { cooldownMs: 900, interrupt: true });
-      })
+      .then(() => speak("Rejoignez le trajet enregistré.", { cooldownMs: 900, interrupt: true }))
       .catch((e: any) => setErr(e?.message ?? "Erreur itinéraire vers départ"));
-
-    // Une fois à proximité de l’entrée, on basculera en on_trace (voir effect stops/trace)
   }, [running, hasOfficial, officialLine, points, me]);
 
   // GPS tracking (lissage)
@@ -659,7 +662,7 @@ export default function NavLive() {
     };
   }, [running]);
 
-  // Off-route distance (par rapport à la trace si possible)
+  // Off-route distance (trace si possible)
   useEffect(() => {
     if (!running) return;
     if (!me) return;
@@ -671,7 +674,7 @@ export default function NavLive() {
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine, routeLine]);
 
-  // REROUTE: toujours “retour à la trace” (et jamais inventer un nouveau segment stop->stop)
+  // REROUTE: toujours “retour à la trace”
   useEffect(() => {
     if (!running) return;
     if (!me) return;
@@ -690,12 +693,9 @@ export default function NavLive() {
     const near = nearestLineIndex(me, officialLine);
     if (!near) return;
 
-    // On force le “bon sens” : ne jamais reculer en arrière sur la trace.
-    // Si on est déjà avancé, on cherche un point proche MAIS >= traceIdxRef.
     let idx = near.idx;
     if (idx < traceIdxRef.current) idx = traceIdxRef.current;
 
-    // mesure off-route (distance au point le plus proche suffit ici)
     const off = near.dist;
     const isOff = off > OFF_ROUTE_M;
     if (isOff) offRouteStrikeRef.current += 1;
@@ -706,12 +706,16 @@ export default function NavLive() {
     offRouteStrikeRef.current = 0;
     lastRerouteAtRef.current = now;
 
-    // point de rejoin: un peu “devant” pour éviter de te faire ramener en arrière
     const ahead = walkForward(officialLine, idx, 25);
     const rejoin = ahead.at;
 
-    setMode("to_start"); // temporaire: guidage vers rejoin
+    setMode("to_start");
     entryPointRef.current = rejoin;
+
+    // On “déverrouille” la manœuvre car on n’est plus sûr du contexte
+    lockedTurnRef.current = null;
+    setLockedTurnUI(null);
+    turnVoiceStageRef.current = null;
 
     calcRoute(me, rejoin)
       .then(() => speak("Recalcul en cours. Revenez sur le trajet.", { cooldownMs: 900, interrupt: true }))
@@ -723,19 +727,18 @@ export default function NavLive() {
     if (!running) return;
     if (!me || !target) return;
 
-    // ----- Bascule vers on_trace quand on est proche du point d’entrée/rejoin -----
+    // Bascule vers on_trace quand on est proche du point d’entrée/rejoin
     if (hasOfficial && officialLine.length >= 2 && entryPointRef.current) {
       const dEntry = haversineMeters(me, entryPointRef.current);
       if (mode !== "on_trace" && dEntry <= 35) {
         setMode("on_trace");
-        // Met la progression au plus proche “en avant”
         const nearMe = nearestLineIndex(me, officialLine);
         if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
         speak("Trajet enregistré repris.", { cooldownMs: 900, interrupt: true });
       }
     }
 
-    /* ---------- STOP ZONE (150/200 + jaune monotone + ding 10m) ---------- */
+    // STOP ZONE (bandeau jaune monotone + ding)
     const dStop = haversineMeters(me, target);
     const rawStopM = Math.round(dStop);
 
@@ -758,12 +761,10 @@ export default function NavLive() {
 
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        // ✅ sans “Ralentissez”
         speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
       }
     }
 
-    // ✅ ding béton à 10m
     if (!finished && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
@@ -780,7 +781,7 @@ export default function NavLive() {
         const nextTarget = points[next] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
 
-        speak(`Arrêt atteint. Prochain embarquement dans ${distNext} mètres.`, { cooldownMs: 1400, interrupt: true });
+        speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
 
         stopWarnRef.current = null;
@@ -788,19 +789,21 @@ export default function NavLive() {
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
-        // Progression trace: avance au plus près de la position actuelle
         if (hasOfficial && officialLine.length >= 2) {
           const nearMe = nearestLineIndex(me, officialLine);
           if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
         }
 
-        // Recalage mode (on reste sur trace)
         setMode("on_trace");
         entryPointRef.current = null;
         setRouteLine([]);
         setSteps([]);
         setStepIdx(0);
-        lastTurnAnnouncedAtIdxRef.current = null;
+
+        // Reset manœuvre verrouillée à chaque arrêt (ça évite des fausses instructions)
+        lockedTurnRef.current = null;
+        setLockedTurnUI(null);
+        turnVoiceStageRef.current = null;
       } else {
         speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
         setFinished(true);
@@ -813,11 +816,7 @@ export default function NavLive() {
     }
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, mode]);
 
-  // Guidage “standard GPS”:
-  // - si mode=to_start : on affiche steps nav-api (entry/rejoin)
-  // - si mode=on_trace : on calcule prochain virage/bretelle par géométrie de trace
-  const [traceTurn, setTraceTurn] = useState<{ text: string; inM: number; arrow: string } | null>(null);
-
+  // ===== Niveau 1: Turn guidance stable (verrouillage + 2 annonces) =====
   useEffect(() => {
     if (!running) return;
     if (!me) return;
@@ -825,52 +824,95 @@ export default function NavLive() {
     if (finished) return;
 
     if (mode !== "on_trace") {
-      setTraceTurn(null);
+      lockedTurnRef.current = null;
+      setLockedTurnUI(null);
+      turnVoiceStageRef.current = null;
       return;
     }
 
-    // Position la plus proche sur trace
     const near = nearestLineIndex(me, officialLine);
     if (!near) return;
 
-    // Assure progression monotone
     traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
-
-    // Cherche un “virage” en avant: on regarde un triplet (idx, idx+k, idx+2k)
     const baseIdx = traceIdxRef.current;
+
+    // Si on a déjà une manœuvre verrouillée, on la garde tant qu’elle n’est pas “passée”
+    const existing = lockedTurnRef.current;
+    if (existing) {
+      const distToTurn = haversineMeters(me, existing.turnPoint);
+
+      // passé si on est très proche puis on dépasse, OU si on a avancé sur trace au-delà de turnIdx + marge
+      const passedByIndex = baseIdx >= existing.turnIdx + 8;
+      const passedByDistance = distToTurn <= 18;
+
+      if (passedByDistance || passedByIndex) {
+        lockedTurnRef.current = null;
+        setLockedTurnUI(null);
+        turnVoiceStageRef.current = null;
+      } else {
+        // Annonces 2 étapes (soon / now) sans spam
+        const stage = turnVoiceStageRef.current;
+        const id = existing.id;
+
+        if ((!stage || stage.id !== id) && distToTurn <= TURN_SOON_AT_M && distToTurn > TURN_NOW_AT_M) {
+          turnVoiceStageRef.current = { id, stage: "soon" };
+          speak(`${existing.text} dans ${fmtDist(distToTurn)}.`, { cooldownMs: 1200, interrupt: true });
+        }
+
+        if ((stage?.id !== id || stage.stage !== "now") && distToTurn <= TURN_NOW_AT_M) {
+          turnVoiceStageRef.current = { id, stage: "now" };
+          speak(`${existing.text} maintenant.`, { cooldownMs: 900, interrupt: true });
+        }
+
+        // UI: garder instruction + distance arrondie
+        setLockedTurnUI(existing);
+        return;
+      }
+    }
+
+    // Sinon: on détecte une nouvelle manœuvre en regardant la géométrie “en avant”
     const ahead1 = walkForward(officialLine, baseIdx, TURN_LOOKAHEAD_M);
     const ahead2 = walkForward(officialLine, ahead1.idx, TURN_LOOKAHEAD_M);
 
     const A = linePoint(officialLine, baseIdx);
-    const B = ahead1.at;
+    const B = ahead1.at; // point de “virage”
     const C = ahead2.at;
 
     const ang = angleDeg(A, B, C);
     const txt = turnTextFromAngle(ang);
 
     if (!txt || Math.abs(ang) < TURN_MIN_ANGLE) {
-      setTraceTurn(null);
+      lockedTurnRef.current = null;
+      setLockedTurnUI(null);
+      turnVoiceStageRef.current = null;
       return;
     }
 
-    const distToTurn = Math.round(haversineMeters(me, B));
+    const distToTurn = haversineMeters(me, B);
 
-    // annonce vocale 1 seule fois par zone (index)
-    if (distToTurn <= TURN_ANNOUNCE_AT_M) {
-      if (lastTurnAnnouncedAtIdxRef.current !== baseIdx) {
-        lastTurnAnnouncedAtIdxRef.current = baseIdx;
-        speak(`${txt} maintenant.`, { cooldownMs: 900, interrupt: true });
-      }
-    } else if (distToTurn <= 220) {
-      if (lastTurnAnnouncedAtIdxRef.current !== baseIdx) {
-        // annonce “dans X mètres” une seule fois
-        lastTurnAnnouncedAtIdxRef.current = baseIdx;
-        speak(`${txt} dans ${distToTurn} mètres.`, { cooldownMs: 1200, interrupt: true });
-      }
+    // On ne verrouille que si la manœuvre est dans une fenêtre raisonnable (sinon ça “panique” trop tôt)
+    if (distToTurn > 650) {
+      setLockedTurnUI(null);
+      return;
     }
 
-    const arrow = txt.includes("droite") ? "➡️" : txt.includes("gauche") ? "⬅️" : "⬆️";
-    setTraceTurn({ text: txt, inM: distToTurn, arrow });
+    const id = `t:${ahead1.idx}:${txt}`;
+    const locked: LockedTurn = {
+      id,
+      text: txt,
+      arrow: arrowFromText(txt),
+      turnIdx: ahead1.idx,
+      turnPoint: B,
+    };
+
+    lockedTurnRef.current = locked;
+    setLockedTurnUI(locked);
+
+    // Et on fait l’annonce “soon” dès qu’on rentre dans la zone
+    if (distToTurn <= TURN_SOON_AT_M && distToTurn > TURN_NOW_AT_M) {
+      turnVoiceStageRef.current = { id, stage: "soon" };
+      speak(`${txt} dans ${fmtDist(distToTurn)}.`, { cooldownMs: 1200, interrupt: true });
+    }
   }, [running, me, hasOfficial, officialLine, finished, mode]);
 
   // UI instruction affichée
@@ -887,31 +929,26 @@ export default function NavLive() {
     if (d <= 16 && stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
   }, [running, me, mode, showNavStep, stepIdx, steps.length]);
 
+  const turnDistanceText =
+    finished
+      ? ""
+      : mode === "on_trace"
+      ? lockedTurnUI
+        ? `dans ${fmtDist(haversineMeters(me!, lockedTurnUI.turnPoint))}`
+        : ""
+      : me && showNavStep?.location
+      ? `dans ${fmtDist(haversineMeters(me, showNavStep.location))}`
+      : "";
+
   return (
-    <div
-      style={{
-        ...page,
-        // “plein écran” visuel même si fullscreen API est bloquée
-        minHeight: "100vh",
-      }}
-    >
-      <div
-        style={{
-          ...container,
-          // plein écran: on enlève les marges “confort” si tu veux
-          maxWidth: 900,
-        }}
-      >
+    <div style={{ ...page, minHeight: "100vh" }}>
+      <div style={{ ...container, maxWidth: 900 }}>
         <div style={card}>
           <div style={row}>
             <div style={{ flex: 1 }}>
               <h1 style={h1}>Navigation (GPS fidèle)</h1>
               <div style={muted}>
-                {hasOfficial ? (
-                  <>Trace officielle active. Trajet identique à l’enregistrement.</>
-                ) : (
-                  <>Trace officielle requise.</>
-                )}{" "}
+                {hasOfficial ? <>Trace officielle active. Trajet identique à l’enregistrement.</> : <>Trace officielle requise.</>}{" "}
                 {wlSupported ? `Écran allumé: ${wlActive ? "Oui" : "Non"}` : ""}
               </div>
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
@@ -941,7 +978,7 @@ export default function NavLive() {
           </div>
         ) : (
           <div style={{ ...card, position: "relative" }}>
-            {/* Bandeau jaune 150/200 (monotone) */}
+            {/* Bandeau jaune (crucial) */}
             {stopBanner.show &&
               (() => {
                 const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
@@ -993,18 +1030,28 @@ export default function NavLive() {
 
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                        <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
+                        <div style={{ fontSize: 13, opacity: 0.9 }}>
+                          {stopBanner.label ?? "Zone d’embarquement / débarquement"}
+                        </div>
                       </div>
                     </div>
 
                     <div style={{ height: 12, borderRadius: 999, background: "rgba(0,0,0,.18)", overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${pct}%`, background: accent, borderRadius: 999, transition: "width 140ms linear" }} />
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${pct}%`,
+                          background: accent,
+                          borderRadius: 999,
+                          transition: "width 140ms linear",
+                        }}
+                      />
                     </div>
                   </div>
                 );
               })()}
 
-            {/* UI conduite (gros) */}
+            {/* UI conduite */}
             <div style={{ display: "grid", gap: 14, paddingTop: 86 }}>
               <div style={{ fontWeight: 900, fontSize: 18 }}>
                 Prochain arrêt : {targetIdx + 1} / {points.length}
@@ -1012,17 +1059,13 @@ export default function NavLive() {
 
               <div style={{ ...muted, fontSize: 16 }}>{target?.label ? target.label : "—"}</div>
 
-              {me && target && (
-                <div style={{ fontSize: 54, fontWeight: 950, letterSpacing: -0.8, lineHeight: "56px" }}>
-                  {Math.round(haversineMeters(me, target))} m
-                </div>
-              )}
+              {/* ✅ IMPORTANT: on a ENLEVÉ le gros compteur “XXX m” ici */}
 
               <div style={{ height: 8 }} />
 
               <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
                 <div style={{ fontSize: 72, lineHeight: "72px" }}>
-                  {finished ? "✅" : mode === "on_trace" ? traceTurn?.arrow ?? "⬆️" : "⬆️"}
+                  {finished ? "✅" : mode === "on_trace" ? lockedTurnUI?.arrow ?? "⬆️" : "⬆️"}
                 </div>
 
                 <div style={{ flex: 1 }}>
@@ -1030,23 +1073,17 @@ export default function NavLive() {
                     {finished
                       ? "✅ Circuit terminé"
                       : mode === "on_trace"
-                      ? traceTurn
-                        ? traceTurn.text
+                      ? lockedTurnUI
+                        ? lockedTurnUI.text
                         : "Suivez le trajet enregistré"
                       : showNavStep?.instruction
                       ? showNavStep.instruction
                       : "Rejoindre le trajet…"}
                   </div>
 
-                  {!finished && mode === "on_trace" && traceTurn && (
+                  {!finished && turnDistanceText && (
                     <div style={{ fontSize: 28, opacity: 0.85, marginTop: 10 }}>
-                      dans <b>{traceTurn.inM} m</b>
-                    </div>
-                  )}
-
-                  {!finished && mode !== "on_trace" && me && showNavStep?.location && (
-                    <div style={{ fontSize: 28, opacity: 0.85, marginTop: 10 }}>
-                      dans <b>{Math.round(haversineMeters(me, showNavStep.location))} m</b>
+                      <b>{turnDistanceText}</b>
                     </div>
                   )}
                 </div>
