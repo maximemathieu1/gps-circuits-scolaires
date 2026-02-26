@@ -1,6 +1,7 @@
 // src/pages/NavLive.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import mapboxgl from "mapbox-gl";
 
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
@@ -25,13 +26,31 @@ type TraceResp = {
 
 type LatLng = { lat: number; lng: number };
 
+type LockedTurn = {
+  id: string;
+  text: string;
+  arrow: string;
+  turnIdx: number;
+  turnPoint: LatLng;
+};
+
 /* =========================
-   Minimal GeoJSON types (évite dépendance @types/geojson)
+   GeoJSON minimal (évite "Cannot find namespace GeoJSON")
 ========================= */
-type GeoFeature<G> = { type: "Feature"; properties: Record<string, any>; geometry: G };
-type GeoFeatureCollection<G> = { type: "FeatureCollection"; features: Array<GeoFeature<G>> };
-type GeoLineString = { type: "LineString"; coordinates: [number, number][] };
-type GeoPoint = { type: "Point"; coordinates: [number, number] };
+
+type GPoint = { type: "Point"; coordinates: [number, number] };
+type GLineString = { type: "LineString"; coordinates: [number, number][] };
+
+type GFeature<G> = {
+  type: "Feature";
+  properties: Record<string, any>;
+  geometry: G;
+};
+
+type GFeatureCollection<G> = {
+  type: "FeatureCollection";
+  features: Array<GFeature<G>>;
+};
 
 /* =========================
    Helpers
@@ -202,31 +221,6 @@ function fmtDist(m: number) {
 }
 
 /* =========================
-   Bearing "au volant" (heading réel sinon par mouvement)
-========================= */
-
-function bearingDeg(from: LatLng, to: LatLng) {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const toDeg = (r: number) => (r * 180) / Math.PI;
-
-  const lat1 = toRad(from.lat);
-  const lat2 = toRad(to.lat);
-  const dLng = toRad(to.lng - from.lng);
-
-  const y = Math.sin(dLng) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-
-  let brng = toDeg(Math.atan2(y, x));
-  brng = (brng + 360) % 360;
-  return brng;
-}
-
-function lerpAngle(a: number, b: number, t: number) {
-  let delta = ((b - a + 540) % 360) - 180;
-  return (a + delta * t + 360) % 360;
-}
-
-/* =========================
    Voix + Ding
 ========================= */
 
@@ -355,18 +349,6 @@ async function tryExitFullscreen() {
 }
 
 /* =========================
-   Turn lock (annonce 2 étapes)
-========================= */
-
-type LockedTurn = {
-  id: string;
-  text: string;
-  arrow: string;
-  turnIdx: number;
-  turnPoint: LatLng;
-};
-
-/* =========================
    Main
 ========================= */
 
@@ -391,11 +373,9 @@ export default function NavLive() {
   const [speed, setSpeed] = useState<number | null>(null);
   const speedRef = useRef<number | null>(null);
 
-  // cap "au volant"
-  const lastRawPosRef = useRef<LatLng | null>(null);
-  const [heading, setHeading] = useState<number | null>(null); // UI/debug
-  const headingRef = useRef<number | null>(null); // heading natif si dispo
-  const lastBearingRef = useRef<number>(0); // bearing final (heading ou calcul + lissé)
+  const [heading, setHeading] = useState<number | null>(null);
+  const headingRef = useRef<number | null>(null);
+  const lastBearingRef = useRef<number>(0);
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -408,7 +388,7 @@ export default function NavLive() {
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Distance à la polyline (pour “embarqué”)
+  // Distance à la polyline (pour état “sur trace”)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
   const onTraceRef = useRef(false);
   const onTraceAnnouncedRef = useRef(false);
@@ -429,7 +409,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Turn guidance (seulement quand “embarqué” sur la trace)
+  // Turn guidance (UNIQUEMENT quand sur trace)
   const lockedTurnRef = useRef<LockedTurn | null>(null);
   const [lockedTurnUI, setLockedTurnUI] = useState<LockedTurn | null>(null);
   const turnVoiceStageRef = useRef<{ id: string; stage: "none" | "soon" | "now" } | null>(null);
@@ -441,19 +421,18 @@ export default function NavLive() {
   const ARRIVE_STOP_M = 45;
   const DING_AT_M = 10;
 
-  // Bandeau zone jaune
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
     return kmh >= 80 ? 200 : 150;
   }
 
-  // “Embarqué sur la polyline”
-  const ON_TRACE_M = 18; // <= 18m de la trace => “sur le trajet”
+  // “Sur trace”
+  const ON_TRACE_M = 18; // <= 18m => sur trace
   const MIN_SPEED_FOR_TURNS = 1.0; // m/s
   const MAX_ACC_FOR_TURNS = 40; // m
 
-  // Mode intelligent (arrêt manqué)
+  // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
@@ -465,7 +444,7 @@ export default function NavLive() {
   const TURN_NOW_AT_M = 70;
   const TURN_MIN_ANGLE = 25;
 
-  // index de chaque arrêt sur la trace (pour “passé après l'arrêt”)
+  // index de chaque arrêt sur la trace
   const stopIdxOnTrace = useMemo(() => {
     if (!hasOfficial || officialLine.length < 2) return [];
     return points.map((p) => {
@@ -475,146 +454,61 @@ export default function NavLive() {
   }, [hasOfficial, officialLine, points]);
 
   /* =========================
-     Mapbox (Option B)
-     IMPORTANT: pour éviter l’erreur TS "Cannot find module 'mapbox-gl'",
-     on charge mapbox-gl en import dynamique.
+     Mapbox
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<any | null>(null);
-  const mapboxRef = useRef<any | null>(null);
-  const busMarkerRef = useRef<any | null>(null);
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
   const MAP_TRACE_SRC = "trace-src";
-  const MAP_TRACE_LAYER_HALO = "trace-layer-halo";
   const MAP_TRACE_LAYER = "trace-layer";
+  const MAP_TRACE_HALO = "trace-layer-halo";
   const MAP_STOPS_SRC = "stops-src";
   const MAP_STOPS_LAYER = "stops-layer";
 
-  async function loadMapbox() {
-    if (mapboxRef.current) return mapboxRef.current;
-    // @ts-ignore
-    const mod = await import("mapbox-gl");
-    const mapboxgl = mod?.default ?? mod;
-    mapboxRef.current = mapboxgl;
-    return mapboxgl;
+  function ensureMapToken() {
+    const token = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
+    mapboxgl.accessToken = token;
+    return token;
   }
 
-  async function ensureMap() {
+  function ensureMap() {
     if (mapRef.current) return mapRef.current;
     if (!mapElRef.current) return null;
 
-    const mapboxgl = await loadMapbox();
-
-    // token Mapbox AVANT new Map()
-    mapboxgl.accessToken = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
-    if (!mapboxgl.accessToken) {
+    const token = ensureMapToken();
+    if (!token) {
       console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant (page blanche probable).");
+      setErr("Mapbox: token manquant (VITE_MAPBOX_TOKEN).");
       return null;
     }
 
     const m = new mapboxgl.Map({
       container: mapElRef.current,
       style: "mapbox://styles/mapbox/navigation-day-v1",
-      center: [-73.0, 46.8], // fallback
+      center: [-73.0, 46.8],
       zoom: 15,
       pitch: 60,
       bearing: 0,
       attributionControl: false,
     });
 
-    // contrôles utiles
     m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
 
     mapRef.current = m;
+
+    // IMPORTANT: si Mapbox recharge le style (rare), on doit remettre les layers
+    m.on("style.load", () => {
+      // On remettra les sources/layers via effect quand officialLine/points sont là
+    });
+
     return m;
-  }
-
-  function upsertTraceOnMap(line: [number, number][]) {
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded?.()) return;
-    if (!line || line.length < 2) return;
-
-    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON = [lng,lat]
-    const geojson: GeoFeature<GeoLineString> = {
-      type: "Feature",
-      properties: {},
-      geometry: { type: "LineString", coordinates: coords },
-    };
-
-    const hasSrc = Boolean(m.getSource?.(MAP_TRACE_SRC));
-    if (!hasSrc) {
-      m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson });
-
-      // Halo en dessous
-      m.addLayer({
-        id: MAP_TRACE_LAYER_HALO,
-        type: "line",
-        source: MAP_TRACE_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#93c5fd",
-          "line-width": 12,
-          "line-opacity": 0.25,
-        },
-      });
-
-      // Ligne principale au-dessus
-      m.addLayer({
-        id: MAP_TRACE_LAYER,
-        type: "line",
-        source: MAP_TRACE_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#2563eb",
-          "line-width": 7,
-          "line-opacity": 0.9,
-        },
-      });
-    } else {
-      const src = m.getSource(MAP_TRACE_SRC);
-      if (src && src.setData) src.setData(geojson);
-    }
-  }
-
-  function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded?.()) return;
-    if (!pts || pts.length === 0) return;
-
-    const fc: GeoFeatureCollection<GeoPoint> = {
-      type: "FeatureCollection",
-      features: pts.map((p, i) => ({
-        type: "Feature",
-        properties: { idx: i, label: p.label ?? "" },
-        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-      })),
-    };
-
-    const hasSrc = Boolean(m.getSource?.(MAP_STOPS_SRC));
-    if (!hasSrc) {
-      m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc });
-      m.addLayer({
-        id: MAP_STOPS_LAYER,
-        type: "circle",
-        source: MAP_STOPS_SRC,
-        paint: {
-          "circle-radius": 6,
-          "circle-color": "#111827",
-          "circle-stroke-width": 3,
-          "circle-stroke-color": "#FBBF24",
-        },
-      });
-    } else {
-      const src = m.getSource(MAP_STOPS_SRC);
-      if (src && src.setData) src.setData(fc);
-    }
   }
 
   function ensureBusMarker() {
     const m = mapRef.current;
-    const mapboxgl = mapboxRef.current;
-    if (!m || !mapboxgl) return null;
+    if (!m) return null;
     if (busMarkerRef.current) return busMarkerRef.current;
 
     const el = document.createElement("div");
@@ -643,31 +537,120 @@ export default function NavLive() {
   function setBusRotation(deg: number) {
     const mk = busMarkerRef.current;
     if (!mk) return;
-    const el = mk.getElement?.();
-    if (!el) return;
-    const icon = el.querySelector?.('[data-bus-icon="1"]') as HTMLDivElement | null;
+    const el = mk.getElement();
+    const icon = el.querySelector('[data-bus-icon="1"]') as HTMLDivElement | null;
     if (!icon) return;
     icon.style.transform = `rotate(${deg}deg)`;
   }
 
-  function updateCamera(mePos: LatLng, useBearing: number) {
+  function updateCamera(mePos: LatLng, bearing: number) {
     const m = mapRef.current;
     if (!m) return;
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-
     const targetZoom = kmh >= 60 ? 17.5 : kmh >= 25 ? 16.8 : 16.2;
 
     m.easeTo({
       center: [mePos.lng, mePos.lat],
       zoom: targetZoom,
       pitch: 60,
-      bearing: useBearing,
+      bearing,
       duration: 450,
       easing: (t: number) => t,
-      essential: true,
     });
+  }
+
+  function upsertTraceOnMap(line: [number, number][]) {
+    const m = mapRef.current;
+    if (!m) return;
+    if (!line || line.length < 2) return;
+
+    // GeoJSON coords: [lng, lat]
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]);
+
+    const geojson: GFeature<GLineString> = {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "LineString", coordinates: coords },
+    };
+
+    const addOrUpdate = () => {
+      // source
+      const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource | undefined;
+      if (!src) {
+        m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson });
+
+        // halo d'abord (dessous)
+        m.addLayer({
+          id: MAP_TRACE_HALO,
+          type: "line",
+          source: MAP_TRACE_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": "#93c5fd",
+            "line-width": 12,
+            "line-opacity": 0.28,
+          },
+        });
+
+        // ligne principale au-dessus
+        m.addLayer({
+          id: MAP_TRACE_LAYER,
+          type: "line",
+          source: MAP_TRACE_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": "#2563eb",
+            "line-width": 7,
+            "line-opacity": 0.95,
+          },
+        });
+      } else {
+        src.setData(geojson as any);
+      }
+    };
+
+    if (m.loaded()) addOrUpdate();
+    else m.once("load", addOrUpdate);
+  }
+
+  function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
+    const m = mapRef.current;
+    if (!m) return;
+    if (!pts || pts.length === 0) return;
+
+    const fc: GFeatureCollection<GPoint> = {
+      type: "FeatureCollection",
+      features: pts.map((p, i) => ({
+        type: "Feature",
+        properties: { idx: i, label: p.label ?? "" },
+        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+      })),
+    };
+
+    const addOrUpdate = () => {
+      const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
+      if (!src) {
+        m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
+        m.addLayer({
+          id: MAP_STOPS_LAYER,
+          type: "circle",
+          source: MAP_STOPS_SRC,
+          paint: {
+            "circle-radius": 6,
+            "circle-color": "#111827",
+            "circle-stroke-width": 3,
+            "circle-stroke-color": "#FBBF24",
+          },
+        });
+      } else {
+        src.setData(fc as any);
+      }
+    };
+
+    if (m.loaded()) addOrUpdate();
+    else m.once("load", addOrUpdate);
   }
 
   /* =========================
@@ -711,16 +694,15 @@ export default function NavLive() {
     onTraceRef.current = false;
     onTraceAnnouncedRef.current = false;
 
-    // Map
-    const m = await ensureMap();
+    // Map layers
+    const m = ensureMap();
     if (m) {
-      const apply = () => {
-        upsertTraceOnMap(line);
-        upsertStopsOnMap(pts);
-        ensureBusMarker();
-      };
-      if (m.isStyleLoaded?.()) apply();
-      else m.once?.("load", apply);
+      upsertTraceOnMap(line);
+      upsertStopsOnMap(pts);
+      ensureBusMarker();
+
+      // Si tu veux “centrer” sur la trace au départ:
+      // on se contente de laisser la caméra suivre le GPS ensuite.
     }
   }
 
@@ -759,8 +741,8 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    // init map early (évite flash)
-    await ensureMap();
+    ensureMap();
+    ensureBusMarker();
 
     await loadCircuit();
 
@@ -786,20 +768,8 @@ export default function NavLive() {
     tryExitFullscreen();
   }
 
-  // cleanup map si on quitte la page
-  useEffect(() => {
-    return () => {
-      try {
-        if (mapRef.current) mapRef.current.remove?.();
-      } catch {}
-      mapRef.current = null;
-      busMarkerRef.current = null;
-      mapboxRef.current = null;
-    };
-  }, []);
-
   /* =========================
-     GPS tracking (lissage + bearing "au volant")
+     GPS tracking (lissage + heading)
   ========================= */
 
   useEffect(() => {
@@ -824,26 +794,14 @@ export default function NavLive() {
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
-        // ===== bearing: heading natif si dispo, sinon calcul par mouvement =====
-        const prevRaw = lastRawPosRef.current;
-        lastRawPosRef.current = raw;
-
         const hd = p.heading ?? null;
         if (hd != null && Number.isFinite(hd)) {
-          headingRef.current = hd;
           setHeading(hd);
-          lastBearingRef.current = lerpAngle(lastBearingRef.current, hd, 0.25);
+          headingRef.current = hd;
+          lastBearingRef.current = hd;
         } else {
-          headingRef.current = null;
           setHeading(null);
-
-          if (prevRaw) {
-            const moved = haversineMeters(prevRaw, raw);
-            if (moved >= 3) {
-              const br = bearingDeg(prevRaw, raw);
-              lastBearingRef.current = lerpAngle(lastBearingRef.current, br, 0.22);
-            }
-          }
+          headingRef.current = null;
         }
       },
       (m) => setErr(m)
@@ -855,7 +813,7 @@ export default function NavLive() {
   }, [running]);
 
   /* =========================
-     Off-route distance + on-trace flag
+     Off-route distance + sur-trace flag
   ========================= */
 
   useEffect(() => {
@@ -869,6 +827,8 @@ export default function NavLive() {
     const isOn = dLine != null && dLine <= ON_TRACE_M;
     if (isOn && !onTraceRef.current) {
       onTraceRef.current = true;
+
+      // annonce 1 seule fois quand on embarque sur la trace
       if (!onTraceAnnouncedRef.current) {
         onTraceAnnouncedRef.current = true;
         speak("Trajet repris.", { cooldownMs: 900, interrupt: true });
@@ -876,35 +836,39 @@ export default function NavLive() {
     }
     if (!isOn) {
       onTraceRef.current = false;
+      // IMPORTANT: aucun reroute, aucun recalcul, juste “rejoindre le trajet”
+      // On remet aussi les manœuvres pour éviter des annonces hors trace
+      lockedTurnRef.current = null;
+      setLockedTurnUI(null);
+      turnVoiceStageRef.current = null;
     }
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Map updates (polyline + bus marker + camera “au volant”)
+     Map updates (marker + caméra “au volant”)
   ========================= */
 
   useEffect(() => {
     if (!running) return;
     if (!me) return;
 
-    (async () => {
-      const m = await ensureMap();
-      if (!m) return;
+    const m = ensureMap();
+    if (!m) return;
 
-      const mk = ensureBusMarker();
-      if (!mk) return;
+    const mk = ensureBusMarker();
+    if (!mk) return;
 
-      mk.setLngLat([me.lng, me.lat]);
+    mk.setLngLat([me.lng, me.lat]);
 
-      const bearing = lastBearingRef.current || 0;
+    const bearing = (headingRef.current ?? lastBearingRef.current) || 0;
 
-      setBusRotation(bearing);
-      updateCamera(me, bearing);
-    })().catch(() => {});
+    setBusRotation(bearing);
+    updateCamera(me, bearing);
   }, [running, me, heading]);
 
   /* =========================
-     Stops + bandeau jaune + ding + mode intelligent (skip arrêt manqué)
+     Stops + bandeau jaune + ding + skip arrêt manqué
+     (indépendant du fait d’être sur la trace : bandeau reste crucial)
   ========================= */
 
   useEffect(() => {
@@ -919,7 +883,7 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ===== MODE INTELLIGENT: arrêt manqué => skip auto =====
+    // Mode intelligent: arrêt manqué (si trace existe)
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
       const nearMe = nearestLineIndex(me, officialLine);
@@ -949,10 +913,10 @@ export default function NavLive() {
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
+          // Reset manœuvre
           lockedTurnRef.current = null;
           setLockedTurnUI(null);
           turnVoiceStageRef.current = null;
-
           return;
         }
       }
@@ -1030,9 +994,9 @@ export default function NavLive() {
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace]);
 
   /* =========================
-     ✅ Directions (seulement une fois “embarqué” sur la polyline)
+     ✅ Directions UNIQUEMENT sur la trace
      - Aucun reroute
-     - 2 annonces: “dans X” + “maintenant”
+     - Si hors trace => juste "Rejoindre le trajet"
   ========================= */
 
   useEffect(() => {
@@ -1041,8 +1005,8 @@ export default function NavLive() {
     if (!hasOfficial || officialLine.length < 2) return;
     if (finished) return;
 
-    // On annonce seulement si on est “embarqué”
     if (!onTraceRef.current) {
+      // hors trace : pas de directions
       lockedTurnRef.current = null;
       setLockedTurnUI(null);
       turnVoiceStageRef.current = null;
@@ -1062,7 +1026,6 @@ export default function NavLive() {
     traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
     const baseIdx = traceIdxRef.current;
 
-    // si manœuvre verrouillée -> on la suit jusqu’à “passée”
     const existing = lockedTurnRef.current;
     if (existing) {
       const distToTurn = haversineMeters(me, existing.turnPoint);
@@ -1093,7 +1056,6 @@ export default function NavLive() {
       }
     }
 
-    // détecter nouvelle manœuvre
     const ahead1 = walkForward(officialLine, baseIdx, TURN_LOOKAHEAD_M);
     const ahead2 = walkForward(officialLine, ahead1.idx, TURN_LOOKAHEAD_M);
 
@@ -1112,8 +1074,6 @@ export default function NavLive() {
     }
 
     const distToTurn = haversineMeters(me, B);
-
-    // éviter panique trop tôt
     if (distToTurn > 650) {
       setLockedTurnUI(null);
       return;
@@ -1131,7 +1091,6 @@ export default function NavLive() {
     lockedTurnRef.current = locked;
     setLockedTurnUI(locked);
 
-    // annonce “soon” si déjà dans la fenêtre
     if (distToTurn <= TURN_SOON_AT_M && distToTurn > TURN_NOW_AT_M) {
       turnVoiceStageRef.current = { id, stage: "soon" };
       speak(`${txt} dans ${fmtDist(distToTurn)}.`, { cooldownMs: 1200, interrupt: true });
@@ -1139,11 +1098,31 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine, finished]);
 
   const turnDistanceText =
-    finished ? "" : lockedTurnUI && me ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}` : "";
+    finished
+      ? ""
+      : lockedTurnUI && me
+      ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}`
+      : "";
 
   /* =========================
      UI
   ========================= */
+
+  const statusText = finished
+    ? "Terminé"
+    : onTraceRef.current
+    ? "Sur le trajet"
+    : "Hors trajet (rejoindre la ligne bleue)";
+
+  const mainInstruction = finished
+    ? "✅ Circuit terminé"
+    : onTraceRef.current
+    ? lockedTurnUI
+      ? lockedTurnUI.text
+      : "Suivez la ligne bleue"
+    : "Rejoindre le trajet";
+
+  const arrow = finished ? "✅" : onTraceRef.current ? lockedTurnUI?.arrow ?? "⬆️" : "⬆️";
 
   return (
     <div style={{ ...page, minHeight: "100vh" }}>
@@ -1159,7 +1138,7 @@ export default function NavLive() {
               {acc != null && <div style={muted}>Précision GPS: ~{Math.round(acc)} m</div>}
               {speed != null && <div style={muted}>Vitesse: ~{Math.round(speed * 3.6)} km/h</div>}
               <div style={muted}>
-                État: <b>{finished ? "Terminé" : onTraceRef.current ? "Sur le trajet" : "Hors trajet (suivre la ligne bleue)"}</b>
+                État: <b>{statusText}</b>
               </div>
             </div>
 
@@ -1239,7 +1218,9 @@ export default function NavLive() {
 
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                          <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
+                          <div style={{ fontSize: 13, opacity: 0.9 }}>
+                            {stopBanner.label ?? "Zone d’embarquement / débarquement"}
+                          </div>
                         </div>
                       </div>
 
@@ -1259,7 +1240,7 @@ export default function NavLive() {
                 })()}
             </div>
 
-            {/* Panneau conduite (sans gros compteur) */}
+            {/* Panneau conduite */}
             <div style={{ padding: 16, display: "grid", gap: 10 }}>
               <div style={{ fontWeight: 900, fontSize: 18 }}>
                 Prochain arrêt : {targetIdx + 1} / {points.length}
@@ -1267,14 +1248,13 @@ export default function NavLive() {
               <div style={{ ...muted, fontSize: 16 }}>{target?.label ? target.label : "—"}</div>
 
               <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{ fontSize: 64, lineHeight: "64px" }}>{finished ? "✅" : lockedTurnUI?.arrow ?? "⬆️"}</div>
+                <div style={{ fontSize: 64, lineHeight: "64px" }}>{arrow}</div>
 
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 950, fontSize: 34, lineHeight: "38px" }}>
-                    {finished ? "✅ Circuit terminé" : lockedTurnUI ? lockedTurnUI.text : "Suivez la ligne bleue"}
-                  </div>
+                  <div style={{ fontWeight: 950, fontSize: 34, lineHeight: "38px" }}>{mainInstruction}</div>
 
-                  {!finished && turnDistanceText && (
+                  {/* Distance seulement si on est sur trace + manœuvre active */}
+                  {!finished && onTraceRef.current && turnDistanceText && (
                     <div style={{ fontSize: 24, opacity: 0.85, marginTop: 8 }}>
                       <b>{turnDistanceText}</b>
                     </div>
