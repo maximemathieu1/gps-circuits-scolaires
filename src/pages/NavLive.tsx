@@ -453,13 +453,17 @@ export default function NavLive() {
     });
   }, [hasOfficial, officialLine, points]);
 
-  /* =========================
-     Mapbox
+     /* =========================
+     Mapbox (stable overlays)
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
+
+  // derniers overlays connus (pour reposer après style reload)
+  const lineRef = useRef<[number, number][]>([]);
+  const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
   const MAP_TRACE_SRC = "trace-src";
   const MAP_TRACE_LAYER = "trace-layer";
@@ -468,42 +472,10 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
 
   function ensureMapToken() {
+    // ✅ Vite: import.meta.env
     const token = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
     mapboxgl.accessToken = token;
     return token;
-  }
-
-  function ensureMap() {
-    if (mapRef.current) return mapRef.current;
-    if (!mapElRef.current) return null;
-
-    const token = ensureMapToken();
-    if (!token) {
-      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant (page blanche probable).");
-      setErr("Mapbox: token manquant (VITE_MAPBOX_TOKEN).");
-      return null;
-    }
-
-    const m = new mapboxgl.Map({
-      container: mapElRef.current,
-      style: "mapbox://styles/mapbox/navigation-day-v1",
-      center: [-73.0, 46.8],
-      zoom: 15,
-      pitch: 60,
-      bearing: 0,
-      attributionControl: false,
-    });
-
-    m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
-
-    mapRef.current = m;
-
-    // IMPORTANT: si Mapbox recharge le style (rare), on doit remettre les layers
-    m.on("style.load", () => {
-      // On remettra les sources/layers via effect quand officialLine/points sont là
-    });
-
-    return m;
   }
 
   function ensureBusMarker() {
@@ -529,7 +501,10 @@ export default function NavLive() {
     icon.setAttribute("data-bus-icon", "1");
     el.appendChild(icon);
 
-    const mk = new mapboxgl.Marker({ element: el, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
+    const mk = new mapboxgl.Marker({ element: el, anchor: "center" })
+      .setLngLat([-73.0, 46.8])
+      .addTo(m);
+
     busMarkerRef.current = mk;
     return mk;
   }
@@ -543,45 +518,48 @@ export default function NavLive() {
     icon.style.transform = `rotate(${deg}deg)`;
   }
 
-  function updateCamera(mePos: LatLng, bearing: number) {
-    const m = mapRef.current;
-    if (!m) return;
-
-    const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.5 : kmh >= 25 ? 16.8 : 16.2;
-
-    m.easeTo({
-      center: [mePos.lng, mePos.lat],
-      zoom: targetZoom,
-      pitch: 60,
-      bearing,
-      duration: 450,
-      easing: (t: number) => t,
-    });
+  function safeRemoveLayer(m: mapboxgl.Map, id: string) {
+    try {
+      if (m.getLayer(id)) m.removeLayer(id);
+    } catch {}
+  }
+  function safeRemoveSource(m: mapboxgl.Map, id: string) {
+    try {
+      if (m.getSource(id)) m.removeSource(id);
+    } catch {}
   }
 
-  function upsertTraceOnMap(line: [number, number][]) {
+  function applyOverlays() {
     const m = mapRef.current;
     if (!m) return;
-    if (!line || line.length < 2) return;
+    if (!m.isStyleLoaded()) return;
 
-    // GeoJSON coords: [lng, lat]
-    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]);
+    const line = lineRef.current;
+    const pts = stopsRef.current;
 
-    const geojson: GFeature<GLineString> = {
-      type: "Feature",
-      properties: {},
-      geometry: { type: "LineString", coordinates: coords },
-    };
+    // On nettoie au cas où un ancien style/layer reste dans un état bizarre
+    // (Mapbox peut throw si on addLayer deux fois)
+    safeRemoveLayer(m, MAP_TRACE_LAYER);
+    safeRemoveLayer(m, MAP_TRACE_HALO);
+    safeRemoveSource(m, MAP_TRACE_SRC);
 
-    const addOrUpdate = () => {
-      // source
-      const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource | undefined;
-      if (!src) {
-        m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson });
+    safeRemoveLayer(m, MAP_STOPS_LAYER);
+    safeRemoveSource(m, MAP_STOPS_SRC);
 
-        // halo d'abord (dessous)
+    // ---- TRACE (ligne bleue) ----
+    if (line && line.length >= 2) {
+      const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON=[lng,lat]
+
+      const geojson = {
+        type: "Feature" as const,
+        properties: {},
+        geometry: { type: "LineString" as const, coordinates: coords },
+      };
+
+      try {
+        m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson as any });
+
+        // halo dessous
         m.addLayer({
           id: MAP_TRACE_HALO,
           type: "line",
@@ -606,32 +584,23 @@ export default function NavLive() {
             "line-opacity": 0.95,
           },
         });
-      } else {
-        src.setData(geojson as any);
+      } catch (e) {
+        console.error("Mapbox apply trace failed:", e);
       }
-    };
+    }
 
-    if (m.loaded()) addOrUpdate();
-    else m.once("load", addOrUpdate);
-  }
+    // ---- STOPS ----
+    if (pts && pts.length > 0) {
+      const fc = {
+        type: "FeatureCollection" as const,
+        features: pts.map((p, i) => ({
+          type: "Feature" as const,
+          properties: { idx: i, label: p.label ?? "" },
+          geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
+        })),
+      };
 
-  function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
-    const m = mapRef.current;
-    if (!m) return;
-    if (!pts || pts.length === 0) return;
-
-    const fc: GFeatureCollection<GPoint> = {
-      type: "FeatureCollection",
-      features: pts.map((p, i) => ({
-        type: "Feature",
-        properties: { idx: i, label: p.label ?? "" },
-        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-      })),
-    };
-
-    const addOrUpdate = () => {
-      const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
-      if (!src) {
+      try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
         m.addLayer({
           id: MAP_STOPS_LAYER,
@@ -644,13 +613,65 @@ export default function NavLive() {
             "circle-stroke-color": "#FBBF24",
           },
         });
-      } else {
-        src.setData(fc as any);
+      } catch (e) {
+        console.error("Mapbox apply stops failed:", e);
       }
-    };
+    }
+  }
 
-    if (m.loaded()) addOrUpdate();
-    else m.once("load", addOrUpdate);
+  function ensureMap() {
+    if (mapRef.current) return mapRef.current;
+    if (!mapElRef.current) return null;
+
+    const token = ensureMapToken();
+    if (!token) {
+      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant (page blanche probable).");
+      setErr("Mapbox: token manquant (VITE_MAPBOX_TOKEN).");
+      return null;
+    }
+
+    const m = new mapboxgl.Map({
+      container: mapElRef.current,
+      style: "mapbox://styles/mapbox/navigation-day-v1",
+      center: [-73.0, 46.8],
+      zoom: 15,
+      pitch: 60,
+      bearing: 0,
+      attributionControl: false,
+    });
+
+    m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
+    mapRef.current = m;
+
+    // ✅ Dès que c'est prêt, on pose les overlays connus
+    m.on("load", () => {
+      applyOverlays();
+    });
+
+    // ✅ Si Mapbox reload le style (mobile, mémoire, etc.), les layers disparaissent:
+    m.on("style.load", () => {
+      applyOverlays();
+    });
+
+    return m;
+  }
+
+  function updateCamera(mePos: LatLng, bearing: number) {
+    const m = mapRef.current;
+    if (!m) return;
+
+    const v = speedRef.current ?? null;
+    const kmh = v != null ? v * 3.6 : 0;
+    const targetZoom = kmh >= 60 ? 17.5 : kmh >= 25 ? 16.8 : 16.2;
+
+    m.easeTo({
+      center: [mePos.lng, mePos.lat],
+      zoom: targetZoom,
+      pitch: 60,
+      bearing,
+      duration: 450,
+      easing: (t: number) => t,
+    });
   }
 
   /* =========================
