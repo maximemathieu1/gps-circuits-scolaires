@@ -8,7 +8,9 @@ import { page, container, card, h1, muted, row, btn, select, input } from "@/ui"
 type TCode = "B" | "C" | "S";
 type Circuit = { id: string; nom: string };
 type Point = { idx: number; lat: number; lng: number; label: string | null; created_at?: string };
-type SaveTraceResp = { ok: true; version_id: string; points_saved: number };
+
+// ✅ réponse souple (ça évite de “casser” si ton API retourne un shape légèrement différent)
+type SaveTraceResp = { ok?: boolean; version_id?: string; points_saved?: number };
 
 function useQuery() {
   const { search } = useLocation();
@@ -75,6 +77,8 @@ export default function Record() {
   // TRACE (moteur conservé)
   const [trace, setTrace] = useState<[number, number][]>([]);
   const [tracePaused, setTracePaused] = useState(false);
+
+  // ✅ NEW: état sauvegarde trace
   const [savingTrace, setSavingTrace] = useState(false);
 
   // GPS
@@ -358,7 +362,63 @@ export default function Record() {
     }
   }
 
+  // ✅ NEW: Sauvegarder la trace (circuit_traces) avant de quitter
+  async function saveTraceIfAny(vId: string) {
+    if (!vId) return;
+    if (!trace || trace.length < 2) return; // évite trail inutile
+
+    // format attendu: [{idx,lat,lng}, ...]
+    const trail = trace.map(([lat, lng], i) => ({ idx: i + 1, lat, lng }));
+
+    // retry léger (mobile / réseau)
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await callFn<SaveTraceResp>("circuits-api", {
+          action: "save_trace",
+          version_id: vId,
+          trail,
+          points_count: trail.length,
+        });
+
+        if (r?.ok) return;
+        // si l’API retourne ok:true strict ou ok boolean, on gère les deux
+        if ((r as any)?.ok === true) return;
+
+        throw new Error("save_trace: réponse invalide");
+      } catch (e: any) {
+        lastErr = e;
+        await sleep(300 * attempt);
+      }
+    }
+
+    throw lastErr ?? new Error("save_trace failed");
+  }
+
   async function stop() {
+    const vId = versionId; // ✅ capture avant reset
+
+    // ✅ on tente de sauvegarder la trace AVANT de quitter
+    if (vId && !savingTrace) {
+      setSavingTrace(true);
+      try {
+        await requireAuth();
+        await saveTraceIfAny(vId);
+      } catch (e: any) {
+        const ok = confirm(
+          `Impossible de sauvegarder la trace (réseau / permissions).\n\n` +
+            `Voulez-vous quitter quand même ?\n\n` +
+            `Détail: ${e?.message ?? e}`
+        );
+        if (!ok) {
+          setSavingTrace(false);
+          return;
+        }
+      } finally {
+        setSavingTrace(false);
+      }
+    }
+
     setRecording(false);
     setVersionId(null);
     setPoints([]);
@@ -430,14 +490,14 @@ export default function Record() {
       <div style={container}>
         {/* Header minimal: Retour à gauche seulement */}
         {!recording && step === "pick" && (
-  <div style={headerCardStyle}>
-    <div style={{ display: "flex", justifyContent: "flex-start" }}>
-      <button style={btn("ghost")} onClick={() => nav("/")}>
-        Retour
-      </button>
-    </div>
-  </div>
-)}
+          <div style={headerCardStyle}>
+            <div style={{ display: "flex", justifyContent: "flex-start" }}>
+              <button style={btn("ghost")} onClick={() => nav("/")}>
+                Retour
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ENREGISTREMENT */}
         {recording ? (
@@ -445,25 +505,39 @@ export default function Record() {
             <div style={card}>
               <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
                 <div style={{ ...muted, textAlign: "center" }}>
-                  Arrêts : <b>{points.length}</b> · GPS :{" "}
+                  Arrêts : <b>{points.length}</b> · Trace : <b>{trace.length}</b> points · GPS :{" "}
                   <b>{gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}</b>
                 </div>
 
                 <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
-                  <button style={{ ...circleGood, ...(busy ? disabledStyle : {}) }} onClick={addStop} disabled={busy}>
+                  <button
+                    style={{ ...circleGood, ...(busy || savingTrace ? disabledStyle : {}) }}
+                    onClick={addStop}
+                    disabled={busy || savingTrace}
+                  >
                     <div style={{ textAlign: "center" }}>
                       <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>ARRÊT</div>
                       <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>ENREGISTRER</div>
                     </div>
                   </button>
 
-                  <button style={{ ...circleWarn, ...(busy ? disabledStyle : {}) }} onClick={stop} disabled={busy}>
+                  <button
+                    style={{ ...circleWarn, ...(busy || savingTrace ? disabledStyle : {}) }}
+                    onClick={stop}
+                    disabled={busy || savingTrace}
+                  >
                     <div style={{ textAlign: "center" }}>
-                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>STOP</div>
-                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>TERMINER</div>
+                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>
+                        {savingTrace ? "STOP…" : "STOP"}
+                      </div>
+                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>
+                        {savingTrace ? "SAUVEGARDE" : "TERMINER"}
+                      </div>
                     </div>
                   </button>
                 </div>
+
+                {savingTrace && <div style={{ ...muted, textAlign: "center" }}>Sauvegarde de la trace…</div>}
               </div>
             </div>
 
