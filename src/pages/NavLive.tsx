@@ -345,6 +345,10 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
+  // ✅ armement: tant qu’on n’a pas atteint le départ, pas de manœuvres
+  const [armed, setArmed] = useState(false);
+  const armedRef = useRef(false);
+
   // GPS
   const [me, setMe] = useState<LatLng | null>(null);
   const meSmoothRef = useRef<LatLng | null>(null);
@@ -414,6 +418,11 @@ export default function NavLive() {
   const MIN_SPEED_FOR_TURNS = 1.0; // m/s
   const MAX_ACC_FOR_TURNS = 40; // m
 
+  // Armement départ
+  const ARM_FIRST_STOP_M = 120; // proche du 1er arrêt
+  const ARM_TRACE_START_M = 30; // proche du début de la trace
+  const ARM_TRACE_IDX_MAX = 25; // et proche des premiers points de la trace
+
   // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
@@ -443,8 +452,7 @@ export default function NavLive() {
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const busMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // ✅ IMPORTANT: on garde toujours la dernière trace + stops ici
-  // pour que "load" / "style.load" puisse les remettre (sinon: ligne bleue disparait)
+  // on conserve toujours la dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
@@ -536,7 +544,6 @@ export default function NavLive() {
     const line = lineRef.current;
     const pts = stopsRef.current;
 
-    // Nettoyage (évite addLayer double)
     safeRemoveLayer(m, MAP_TRACE_LAYER);
     safeRemoveLayer(m, MAP_TRACE_HALO);
     safeRemoveSource(m, MAP_TRACE_SRC);
@@ -544,13 +551,12 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // ---- TRACE (ligne bleue) ----
+    // TRACE
     if (line && line.length >= 2) {
       const geojson = buildTraceGeoJSON(line);
       try {
         m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson as any });
 
-        // halo dessous
         m.addLayer({
           id: MAP_TRACE_HALO,
           type: "line",
@@ -563,7 +569,6 @@ export default function NavLive() {
           },
         });
 
-        // ligne principale au-dessus
         m.addLayer({
           id: MAP_TRACE_LAYER,
           type: "line",
@@ -580,7 +585,7 @@ export default function NavLive() {
       }
     }
 
-    // ---- STOPS ----
+    // STOPS
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts);
       try {
@@ -602,28 +607,19 @@ export default function NavLive() {
     }
   }
 
-  // ✅ Ces 2 fonctions étaient manquantes ET c’est elles qui assurent
-  // que la ligne bleue + stops sont réellement posés (et persistants).
+  // ✅ IMPORTANT: toujours setter les refs, même si la map n’est pas prête
   function upsertTraceOnMap(line: [number, number][]) {
     lineRef.current = Array.isArray(line) ? line : [];
-
     const m = mapRef.current;
-    if (!m) return;
-
-    // si le style est prêt, on met à jour rapidement, sinon "load/style.load" va l'appliquer
-    if (!m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded()) return;
 
     const src = m.getSource(MAP_TRACE_SRC) as mapboxgl.GeoJSONSource | undefined;
     const data = buildTraceGeoJSON(lineRef.current) as any;
 
     try {
-      if (src) {
-        src.setData(data);
-        // si layers absents (après style reload), on les remet
-        if (!m.getLayer(MAP_TRACE_LAYER) || !m.getLayer(MAP_TRACE_HALO)) applyOverlays();
-      } else {
-        applyOverlays();
-      }
+      if (src) src.setData(data);
+      if (!m.getLayer(MAP_TRACE_LAYER) || !m.getLayer(MAP_TRACE_HALO)) applyOverlays();
+      if (!src) applyOverlays();
     } catch (e) {
       console.error("upsertTraceOnMap failed:", e);
       applyOverlays();
@@ -632,22 +628,16 @@ export default function NavLive() {
 
   function upsertStopsOnMap(pts: { lat: number; lng: number; label?: string | null }[]) {
     stopsRef.current = Array.isArray(pts) ? pts : [];
-
     const m = mapRef.current;
-    if (!m) return;
-
-    if (!m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded()) return;
 
     const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
     const data = buildStopsGeoJSON(stopsRef.current) as any;
 
     try {
-      if (src) {
-        src.setData(data);
-        if (!m.getLayer(MAP_STOPS_LAYER)) applyOverlays();
-      } else {
-        applyOverlays();
-      }
+      if (src) src.setData(data);
+      if (!m.getLayer(MAP_STOPS_LAYER)) applyOverlays();
+      if (!src) applyOverlays();
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
       applyOverlays();
@@ -660,7 +650,7 @@ export default function NavLive() {
 
     const token = ensureMapToken();
     if (!token) {
-      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant (page blanche probable).");
+      console.error("❌ Mapbox: VITE_MAPBOX_TOKEN manquant.");
       setErr("Mapbox: token manquant (VITE_MAPBOX_TOKEN).");
       return null;
     }
@@ -678,12 +668,14 @@ export default function NavLive() {
     m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "bottom-right");
     mapRef.current = m;
 
-    // ✅ Dès que c'est prêt, on pose les overlays connus
+    // Dès que c’est prêt: remettre overlays depuis refs
     m.on("load", () => {
       applyOverlays();
+      try {
+        m.resize();
+      } catch {}
     });
 
-    // ✅ Si Mapbox reload le style (mobile, mémoire, etc.), les layers disparaissent:
     m.on("style.load", () => {
       applyOverlays();
     });
@@ -750,12 +742,18 @@ export default function NavLive() {
     onTraceRef.current = false;
     onTraceAnnouncedRef.current = false;
 
-    // Map layers
+    // ✅ reset armement à chaque load
+    armedRef.current = false;
+    setArmed(false);
+
+    // ✅ Toujours mettre les refs à jour (même si map pas prête)
+    upsertTraceOnMap(line);
+    upsertStopsOnMap(pts);
+
+    // Si la map existe déjà, applique tout de suite
     const m = ensureMap();
     if (m) {
-      // ✅ on met à jour les refs + pose sur la carte si possible
-      upsertTraceOnMap(line);
-      upsertStopsOnMap(pts);
+      applyOverlays();
       ensureBusMarker();
     }
   }
@@ -795,13 +793,22 @@ export default function NavLive() {
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
-    ensureMap();
-    ensureBusMarker();
-
-    await loadCircuit();
-
+    // ✅ IMPORTANT: on passe running=true tout de suite pour que le div map existe
     setRunning(true);
-    speak("Navigation démarrée.", { cooldownMs: 300, interrupt: true });
+
+    // Laisse React monter la view map avant ensureMap()
+    setTimeout(() => {
+      ensureMap();
+      ensureBusMarker();
+    }, 0);
+
+    try {
+      await loadCircuit();
+      speak("Navigation démarrée. Dirigez-vous vers le départ.", { cooldownMs: 300, interrupt: true });
+    } catch (e: any) {
+      setRunning(false);
+      throw e;
+    }
   }
 
   function stop() {
@@ -817,6 +824,9 @@ export default function NavLive() {
 
     onTraceRef.current = false;
     onTraceAnnouncedRef.current = false;
+
+    armedRef.current = false;
+    setArmed(false);
 
     stopAll();
     tryExitFullscreen();
@@ -867,7 +877,35 @@ export default function NavLive() {
   }, [running]);
 
   /* =========================
+     ✅ Armement départ
+     - on arme quand on est près du 1er arrêt OU près du début de trace
+  ========================= */
+
+  useEffect(() => {
+    if (!running) return;
+    if (finished) return;
+    if (armedRef.current) return;
+    if (!me) return;
+    if (!hasOfficial || officialLine.length < 2) return;
+    const firstStop = points[0] ?? null;
+    if (!firstStop) return;
+
+    const dFirstStop = haversineMeters(me, firstStop);
+    const near = nearestLineIndex(me, officialLine);
+
+    const okFirstStop = dFirstStop <= ARM_FIRST_STOP_M;
+    const okTraceStart = near != null && near.idx <= ARM_TRACE_IDX_MAX && near.dist <= ARM_TRACE_START_M;
+
+    if (okFirstStop || okTraceStart) {
+      armedRef.current = true;
+      setArmed(true);
+      speak("Départ atteint. Suivez la ligne bleue.", { cooldownMs: 900, interrupt: true });
+    }
+  }, [running, finished, me, hasOfficial, officialLine, points]);
+
+  /* =========================
      Off-route distance + sur-trace flag
+     ✅ uniquement si ARMED
   ========================= */
 
   useEffect(() => {
@@ -878,11 +916,19 @@ export default function NavLive() {
     const dLine = minDistanceToPolylineMeters(me, officialLine);
     setOffRouteM(dLine);
 
+    // ✅ tant que pas armé: jamais "sur trace"
+    if (!armedRef.current) {
+      onTraceRef.current = false;
+      lockedTurnRef.current = null;
+      setLockedTurnUI(null);
+      turnVoiceStageRef.current = null;
+      return;
+    }
+
     const isOn = dLine != null && dLine <= ON_TRACE_M;
     if (isOn && !onTraceRef.current) {
       onTraceRef.current = true;
 
-      // annonce 1 seule fois quand on embarque sur la trace
       if (!onTraceAnnouncedRef.current) {
         onTraceAnnouncedRef.current = true;
         speak("Trajet repris.", { cooldownMs: 900, interrupt: true });
@@ -906,6 +952,11 @@ export default function NavLive() {
 
     const m = ensureMap();
     if (!m) return;
+
+    // overlays peuvent être perdus après création => on les ré-applique si nécessaire
+    if (m.isStyleLoaded()) {
+      if (!m.getLayer(MAP_TRACE_LAYER) && lineRef.current.length >= 2) applyOverlays();
+    }
 
     const mk = ensureBusMarker();
     if (!mk) return;
@@ -1044,7 +1095,7 @@ export default function NavLive() {
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace]);
 
   /* =========================
-     ✅ Directions UNIQUEMENT sur la trace
+     ✅ Directions UNIQUEMENT sur la trace ET ARMED
   ========================= */
 
   useEffect(() => {
@@ -1053,6 +1104,14 @@ export default function NavLive() {
     if (!hasOfficial || officialLine.length < 2) return;
     if (finished) return;
 
+    // ✅ pas armé => pas de directions
+    if (!armedRef.current) {
+      lockedTurnRef.current = null;
+      setLockedTurnUI(null);
+      turnVoiceStageRef.current = null;
+      return;
+    }
+
     if (!onTraceRef.current) {
       lockedTurnRef.current = null;
       setLockedTurnUI(null);
@@ -1060,7 +1119,6 @@ export default function NavLive() {
       return;
     }
 
-    // garde-fous
     const a = accRef.current ?? null;
     if (a != null && a > MAX_ACC_FOR_TURNS) return;
 
@@ -1151,17 +1209,25 @@ export default function NavLive() {
      UI
   ========================= */
 
-  const statusText = finished ? "Terminé" : onTraceRef.current ? "Sur le trajet" : "Hors trajet (rejoindre la ligne bleue)";
+  const statusText = finished
+    ? "Terminé"
+    : !armed
+    ? "Rejoindre le départ"
+    : onTraceRef.current
+    ? "Sur le trajet"
+    : "Hors trajet (rejoindre la ligne bleue)";
 
   const mainInstruction = finished
     ? "✅ Circuit terminé"
+    : !armed
+    ? "Dirigez-vous vers le départ"
     : onTraceRef.current
     ? lockedTurnUI
       ? lockedTurnUI.text
       : "Suivez la ligne bleue"
     : "Rejoindre le trajet";
 
-  const arrow = finished ? "✅" : onTraceRef.current ? lockedTurnUI?.arrow ?? "⬆️" : "⬆️";
+  const arrow = finished ? "✅" : !armed ? "⬆️" : onTraceRef.current ? lockedTurnUI?.arrow ?? "⬆️" : "⬆️";
 
   return (
     <div style={{ ...page, minHeight: "100vh" }}>
@@ -1201,11 +1267,10 @@ export default function NavLive() {
           </div>
         ) : (
           <div style={{ ...card, position: "relative", padding: 0, overflow: "hidden" }}>
-            {/* Map */}
             <div style={{ position: "relative" }}>
               <div ref={mapElRef} style={{ height: 520, width: "100%" }} />
 
-              {/* Bandeau jaune (CRUCIAL) */}
+              {/* Bandeau jaune */}
               {stopBanner.show &&
                 (() => {
                   const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
@@ -1279,7 +1344,6 @@ export default function NavLive() {
                 })()}
             </div>
 
-            {/* Panneau conduite */}
             <div style={{ padding: 16, display: "grid", gap: 10 }}>
               <div style={{ fontWeight: 900, fontSize: 18 }}>
                 Prochain arrêt : {targetIdx + 1} / {points.length}
@@ -1292,8 +1356,7 @@ export default function NavLive() {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 950, fontSize: 34, lineHeight: "38px" }}>{mainInstruction}</div>
 
-                  {/* Distance seulement si on est sur trace + manœuvre active */}
-                  {!finished && onTraceRef.current && turnDistanceText && (
+                  {!finished && armed && onTraceRef.current && turnDistanceText && (
                     <div style={{ fontSize: 24, opacity: 0.85, marginTop: 8 }}>
                       <b>{turnDistanceText}</b>
                     </div>
