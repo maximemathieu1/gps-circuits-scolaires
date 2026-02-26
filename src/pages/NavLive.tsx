@@ -318,6 +318,15 @@ export default function NavLive() {
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
+  // ✅ Zoom “style Waze” (plus proche, dynamique)
+  function zoomForSpeed(kmh: number) {
+    // plus le chiffre est grand, plus c'est proche
+    if (kmh >= 80) return 16.9; // autoroute: un peu plus loin
+    if (kmh >= 50) return 17.4;
+    if (kmh >= 25) return 17.8;
+    return 18.2; // ville/lent: très proche
+  }
+
   // index de chaque arrêt sur la trace (pour segment actif + skip)
   const stopIdxOnTrace = useMemo(() => {
     if (!hasOfficial || officialLine.length < 2) return [];
@@ -453,14 +462,14 @@ export default function NavLive() {
           type: "line",
           source: MAP_TRACE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#2563eb", "line-width": 7, "line-opacity": 0.90 },
+          paint: { "line-color": "#2563eb", "line-width": 7, "line-opacity": 0.9 },
         });
       } catch (e) {
         console.error("Mapbox apply trace failed:", e);
       }
     }
 
-    // ACTIVE SEGMENT (Option A)
+    // ACTIVE SEGMENT
     const active = activeLineRef.current;
     if (active && active.length >= 2) {
       const geojson = buildLineGeoJSON(active);
@@ -494,7 +503,6 @@ export default function NavLive() {
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
-        // cercle (plus gros)
         m.addLayer({
           id: MAP_STOPS_LAYER,
           type: "circle",
@@ -507,7 +515,6 @@ export default function NavLive() {
           },
         });
 
-        // numéro
         m.addLayer({
           id: MAP_STOPS_NUM_LAYER,
           type: "symbol",
@@ -544,7 +551,6 @@ export default function NavLive() {
         src.setData(data);
         if (!m.getLayer(MAP_ACTIVE_TRACE_LAYER) || !m.getLayer(MAP_ACTIVE_TRACE_HALO)) applyOverlays();
       } else {
-        // si absent, on réapplique
         applyOverlays();
       }
     } catch {
@@ -566,7 +572,7 @@ export default function NavLive() {
       container: mapElRef.current,
       style: "mapbox://styles/mapbox/navigation-day-v1",
       center: [-73.0, 46.8],
-      zoom: 15,
+      zoom: 16.9, // ✅ plus proche par défaut
       pitch: 55,
       bearing: 0,
       attributionControl: false,
@@ -582,6 +588,10 @@ export default function NavLive() {
       followRef.current = false;
     });
     m.on("pitchstart", () => {
+      followRef.current = false;
+    });
+    // ✅ IMPORTANT: si l'utilisateur zoom (pinch ou boutons), on arrête l'auto-follow
+    m.on("zoomstart", () => {
       followRef.current = false;
     });
 
@@ -602,11 +612,15 @@ export default function NavLive() {
 
   function zoomIn() {
     try {
+      ensureMap();
+      followRef.current = false; // ✅ laisse le conducteur zoomer sans que ça revienne tout seul
       mapRef.current?.zoomIn({ duration: 200 });
     } catch {}
   }
   function zoomOut() {
     try {
+      ensureMap();
+      followRef.current = false; // ✅ idem
       mapRef.current?.zoomOut({ duration: 200 });
     } catch {}
   }
@@ -620,7 +634,7 @@ export default function NavLive() {
 
       const v = speedRef.current ?? null;
       const kmh = v != null ? v * 3.6 : 0;
-      const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
+      const targetZoom = zoomForSpeed(kmh);
 
       m.easeTo({
         center: [p.lng, p.lat],
@@ -743,7 +757,7 @@ export default function NavLive() {
       const m = mapRef.current;
       if (m) {
         followRef.current = true;
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.2, bearing: 0, pitch: 55 });
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 17.8, bearing: 0, pitch: 55 }); // ✅ plus proche
       }
     } catch {}
   }
@@ -782,7 +796,6 @@ export default function NavLive() {
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
-        // UI state (pas trop fréquent)
         setAcc(p.acc ?? null);
         setSpeed(p.speed ?? null);
       },
@@ -796,9 +809,6 @@ export default function NavLive() {
 
   /* =========================
      Smooth animation loop (rAF)
-     - smooth marker position
-     - smooth camera
-     - updates active segment (Option A)
   ========================= */
 
   const rafRef = useRef<number | null>(null);
@@ -818,7 +828,6 @@ export default function NavLive() {
       const raw = meRawRef.current;
       if (!raw) return;
 
-      // smoothing alpha based on dt
       const dt = clamp(dtMs / 1000, 0.01, 0.2);
       const alpha = clamp(0.10 + dt * 0.9, 0.10, 0.35);
 
@@ -829,30 +838,15 @@ export default function NavLive() {
       };
       meSmoothRef.current = sm;
 
-      // marker update
       ensureMap();
       const mk = ensureMeMarker();
       mk?.setLngLat([sm.lng, sm.lat]);
 
-      // offRoute UI (throttle)
-      if (hasOfficial && officialLine.length >= 2) {
-        // update trace idx for segment actif
-        const near = nearestLineIndex(sm, officialLine);
-        if (near) traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
-
-        // offRoute (1x/600ms)
-        if (dtMs >= 0) {
-          // cheap throttle via time
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-        }
-      }
-
-      // camera follow (smooth) — si follow activé
       const m = mapRef.current;
       if (m && followRef.current) {
         const v = speedRef.current ?? null;
         const kmh = v != null ? v * 3.6 : 0;
-        const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
+        const targetZoom = zoomForSpeed(kmh); // ✅ zoom dynamique plus proche
 
         const prevC = camCenterRef.current ?? sm;
         const camAlpha = clamp(0.08 + dt * 0.8, 0.08, 0.22);
@@ -862,7 +856,6 @@ export default function NavLive() {
         };
         camCenterRef.current = camC;
 
-        // tiny deadzone to avoid micro jitter
         if (haversineMeters(prevC, camC) > 0.5) {
           m.easeTo({
             center: [camC.lng, camC.lat],
@@ -875,20 +868,17 @@ export default function NavLive() {
         }
       }
 
-      // Active segment update (Option A) — throttle ~ 2x/sec
-      // (assez pour être clair sans surcharger)
-      // On recalc le segment vers le prochain arrêt (targetIdx)
       if (hasOfficial && officialLine.length >= 2 && points.length > 0) {
-        // throttle by time
-        // use t in ms
-        const key = Math.floor(t / 450); // ~2.2/sec
+        const key = Math.floor(t / 450);
         (tick as any)._k = (tick as any)._k ?? -1;
         if ((tick as any)._k !== key) {
           (tick as any)._k = key;
 
-          // offRoute UI
           const dLine = minDistanceToPolylineMeters(sm, officialLine);
           setOffRouteM(dLine);
+
+          const near = nearestLineIndex(sm, officialLine);
+          if (near) traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
 
           const stopIdx = stopIdxOnTrace[targetIdx] ?? 0;
           const fromIdx = clamp(traceIdxRef.current, 0, officialLine.length - 1);
@@ -915,7 +905,6 @@ export default function NavLive() {
 
   /* =========================
      Stops + bandeau jaune + ding + skip arrêt manqué
-     (annonces d’arrêt conservées)
   ========================= */
 
   useEffect(() => {
@@ -924,13 +913,11 @@ export default function NavLive() {
     if (!me || !target) return;
     if (finished) return;
 
-    // cumul déplacement depuis le dernier changement d'arrêt
     if (lastMeForTravelRef.current) {
       travelSinceTargetSetRef.current += haversineMeters(lastMeForTravelRef.current, me);
     }
     lastMeForTravelRef.current = me;
 
-    // initial distance au target (si pas encore set)
     if (initialDistToTargetRef.current == null && target) {
       initialDistToTargetRef.current = haversineMeters(me, target);
     }
@@ -942,7 +929,6 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // Mode intelligent: arrêt manqué (si trace existe)
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
       const nearMe = nearestLineIndex(me, officialLine);
@@ -963,7 +949,6 @@ export default function NavLive() {
           speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
           setTargetIdx(next);
 
-          // reset anti-finish
           travelSinceTargetSetRef.current = 0;
           initialDistToTargetRef.current = null;
           lastMeForTravelRef.current = me;
@@ -981,13 +966,11 @@ export default function NavLive() {
       }
     }
 
-    // hors zone
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    // dans zone -> bandeau + annonce 1x
     if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
@@ -1002,7 +985,6 @@ export default function NavLive() {
       }
     }
 
-    // ding à 10m
     if (rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
@@ -1010,7 +992,6 @@ export default function NavLive() {
       }
     }
 
-    // arrivé arrêt -> prochain (protège arrêts trop proches)
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1023,7 +1004,6 @@ export default function NavLive() {
         const nextTarget = points[next] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
 
-        // reset anti-finish avant switch
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(me, nextTarget) : null;
         lastMeForTravelRef.current = me;
@@ -1146,8 +1126,7 @@ export default function NavLive() {
             fontSize: 14,
           }}
         >
-          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"}{" "}
-          {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}
+          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}
         </div>
       </div>
 
