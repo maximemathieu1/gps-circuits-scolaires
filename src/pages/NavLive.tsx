@@ -159,7 +159,6 @@ function walkForward(line: [number, number][], fromIdx: number, metersAhead: num
 }
 
 function angleDeg(a: LatLng, b: LatLng, c: LatLng) {
-  // angle between vectors BA and BC (signed via cross)
   const ax = a.lng - b.lng;
   const ay = a.lat - b.lat;
   const cx = c.lng - b.lng;
@@ -339,11 +338,11 @@ async function tryExitFullscreen() {
 ========================= */
 
 type LockedTurn = {
-  id: string; // stable key
+  id: string;
   text: string;
   arrow: string;
-  turnIdx: number; // index on trace near the turn point
-  turnPoint: LatLng; // point to measure distance
+  turnIdx: number;
+  turnPoint: LatLng;
 };
 
 export default function NavLive() {
@@ -416,9 +415,19 @@ export default function NavLive() {
   const routeCacheRef = useRef(new Map<string, { line: [number, number][]; steps: Step[]; at: number }>());
   const routeInFlightRef = useRef<AbortController | null>(null);
 
+  // --- Mode intelligent: arrêt manqué / skip auto ---
+  const stopTouchedRef = useRef(false);
+  const stopMinDistRef = useRef<number>(Infinity);
+
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
   const DING_AT_M = 10;
+
+  // Mode intelligent (ajuste au besoin)
+  const STOP_TOUCH_M = 35; // on a vraiment “passé proche”
+  const STOP_SKIP_CONFIRM_M = 90; // on s'éloigne clairement
+  const STOP_SKIP_MIN_SPEED = 1.2; // m/s ~ 4.3 km/h
+  const STOP_SKIP_TRACE_AHEAD_PTS = 12; // marge d'index sur la trace
 
   function warnStopMeters() {
     const v = speedRef.current ?? null;
@@ -435,6 +444,15 @@ export default function NavLive() {
   const TURN_SOON_AT_M = 260; // “Dans X…”
   const TURN_NOW_AT_M = 70; // “Maintenant”
   const TURN_MIN_ANGLE = 25;
+
+  // index de chaque arrêt sur la trace (pour “passé après l'arrêt”)
+  const stopIdxOnTrace = useMemo(() => {
+    if (!hasOfficial || officialLine.length < 2) return [];
+    return points.map((p) => {
+      const near = nearestLineIndex({ lat: p.lat, lng: p.lng }, officialLine);
+      return near?.idx ?? 0;
+    });
+  }, [hasOfficial, officialLine, points]);
 
   function cacheKey(from: LatLng, to: LatLng) {
     const rf = (v: number) => Math.round(v * 10000) / 10000;
@@ -518,6 +536,10 @@ export default function NavLive() {
     setLockedTurnUI(null);
     turnVoiceStageRef.current = null;
 
+    // Reset mode intelligent
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+
     // Trace officielle: indispensable
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
     const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
@@ -536,9 +558,9 @@ export default function NavLive() {
 
   function computeEntryPointForStop1(line: [number, number][], stop1: LatLng) {
     const near = nearestLineIndex(stop1, line);
-    const stopIdxOnTrace = near ? near.idx : 0;
+    const stopIdxOnTraceLocal = near ? near.idx : 0;
 
-    let idx = stopIdxOnTrace;
+    let idx = stopIdxOnTraceLocal;
     let left = 80;
 
     while (idx > 0 && left > 0) {
@@ -553,7 +575,7 @@ export default function NavLive() {
       idx--;
     }
 
-    return { entryIdx: Math.max(0, idx), entry: linePoint(line, Math.max(0, idx)), stopIdxOnTrace };
+    return { entryIdx: Math.max(0, idx), entry: linePoint(line, Math.max(0, idx)), stopIdxOnTrace: stopIdxOnTraceLocal };
   }
 
   async function start() {
@@ -604,6 +626,9 @@ export default function NavLive() {
     lockedTurnRef.current = null;
     setLockedTurnUI(null);
     turnVoiceStageRef.current = null;
+
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
 
     try {
       routeInFlightRef.current?.abort();
@@ -722,7 +747,7 @@ export default function NavLive() {
       .catch((e: any) => setErr(e?.message ?? "Erreur recalculation"));
   }, [running, me, hasOfficial, officialLine, finished]);
 
-  // Stops + banner + ding + bascule mode on_trace
+  // Stops + bandeau + ding + mode intelligent + bascule on_trace
   useEffect(() => {
     if (!running) return;
     if (!me || !target) return;
@@ -745,6 +770,46 @@ export default function NavLive() {
     const dynamicMax = warnStopMeters();
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
+
+    // ===== MODE INTELLIGENT: arrêt manqué => skip auto (anti faux-positifs par index de trace) =====
+    if (!finished && hasOfficial && officialLine.length >= 2) {
+      const speedNow = speedRef.current ?? null;
+
+      const nearMe = nearestLineIndex(me, officialLine);
+      if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
+
+      if (rawStopM < stopMinDistRef.current) stopMinDistRef.current = rawStopM;
+      if (stopMinDistRef.current <= STOP_TOUCH_M) stopTouchedRef.current = true;
+
+      const stopTraceIdx = stopIdxOnTrace[targetIdx] ?? 0;
+
+      const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
+      const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
+      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
+
+      if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
+        const next = targetIdx + 1;
+        if (next < points.length) {
+          speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
+          setTargetIdx(next);
+
+          stopTouchedRef.current = false;
+          stopMinDistRef.current = Infinity;
+
+          stopWarnRef.current = null;
+          stopWarnMaxRef.current = null;
+          stopDingRef.current = null;
+          stopBannerLastMRef.current = null;
+          setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+          lockedTurnRef.current = null;
+          setLockedTurnUI(null);
+          turnVoiceStageRef.current = null;
+
+          return; // important: on sort de l'effect pour éviter double logique dans le même tick
+        }
+      }
+    }
 
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
@@ -789,6 +854,9 @@ export default function NavLive() {
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
+        stopTouchedRef.current = false;
+        stopMinDistRef.current = Infinity;
+
         if (hasOfficial && officialLine.length >= 2) {
           const nearMe = nearestLineIndex(me, officialLine);
           if (nearMe) traceIdxRef.current = Math.max(traceIdxRef.current, nearMe.idx);
@@ -800,7 +868,6 @@ export default function NavLive() {
         setSteps([]);
         setStepIdx(0);
 
-        // Reset manœuvre verrouillée à chaque arrêt (ça évite des fausses instructions)
         lockedTurnRef.current = null;
         setLockedTurnUI(null);
         turnVoiceStageRef.current = null;
@@ -812,9 +879,12 @@ export default function NavLive() {
         stopWarnMaxRef.current = null;
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
+
+        stopTouchedRef.current = false;
+        stopMinDistRef.current = Infinity;
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, mode]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, mode, stopIdxOnTrace]);
 
   // ===== Niveau 1: Turn guidance stable (verrouillage + 2 annonces) =====
   useEffect(() => {
@@ -836,12 +906,10 @@ export default function NavLive() {
     traceIdxRef.current = Math.max(traceIdxRef.current, near.idx);
     const baseIdx = traceIdxRef.current;
 
-    // Si on a déjà une manœuvre verrouillée, on la garde tant qu’elle n’est pas “passée”
     const existing = lockedTurnRef.current;
     if (existing) {
       const distToTurn = haversineMeters(me, existing.turnPoint);
 
-      // passé si on est très proche puis on dépasse, OU si on a avancé sur trace au-delà de turnIdx + marge
       const passedByIndex = baseIdx >= existing.turnIdx + 8;
       const passedByDistance = distToTurn <= 18;
 
@@ -850,7 +918,6 @@ export default function NavLive() {
         setLockedTurnUI(null);
         turnVoiceStageRef.current = null;
       } else {
-        // Annonces 2 étapes (soon / now) sans spam
         const stage = turnVoiceStageRef.current;
         const id = existing.id;
 
@@ -864,18 +931,16 @@ export default function NavLive() {
           speak(`${existing.text} maintenant.`, { cooldownMs: 900, interrupt: true });
         }
 
-        // UI: garder instruction + distance arrondie
         setLockedTurnUI(existing);
         return;
       }
     }
 
-    // Sinon: on détecte une nouvelle manœuvre en regardant la géométrie “en avant”
     const ahead1 = walkForward(officialLine, baseIdx, TURN_LOOKAHEAD_M);
     const ahead2 = walkForward(officialLine, ahead1.idx, TURN_LOOKAHEAD_M);
 
     const A = linePoint(officialLine, baseIdx);
-    const B = ahead1.at; // point de “virage”
+    const B = ahead1.at;
     const C = ahead2.at;
 
     const ang = angleDeg(A, B, C);
@@ -890,7 +955,6 @@ export default function NavLive() {
 
     const distToTurn = haversineMeters(me, B);
 
-    // On ne verrouille que si la manœuvre est dans une fenêtre raisonnable (sinon ça “panique” trop tôt)
     if (distToTurn > 650) {
       setLockedTurnUI(null);
       return;
@@ -908,7 +972,6 @@ export default function NavLive() {
     lockedTurnRef.current = locked;
     setLockedTurnUI(locked);
 
-    // Et on fait l’annonce “soon” dès qu’on rentre dans la zone
     if (distToTurn <= TURN_SOON_AT_M && distToTurn > TURN_NOW_AT_M) {
       turnVoiceStageRef.current = { id, stage: "soon" };
       speak(`${txt} dans ${fmtDist(distToTurn)}.`, { cooldownMs: 1200, interrupt: true });
@@ -933,8 +996,8 @@ export default function NavLive() {
     finished
       ? ""
       : mode === "on_trace"
-      ? lockedTurnUI
-        ? `dans ${fmtDist(haversineMeters(me!, lockedTurnUI.turnPoint))}`
+      ? lockedTurnUI && me
+        ? `dans ${fmtDist(haversineMeters(me, lockedTurnUI.turnPoint))}`
         : ""
       : me && showNavStep?.location
       ? `dans ${fmtDist(haversineMeters(me, showNavStep.location))}`
@@ -1030,9 +1093,7 @@ export default function NavLive() {
 
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                        <div style={{ fontSize: 13, opacity: 0.9 }}>
-                          {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                        </div>
+                        <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                       </div>
                     </div>
 
