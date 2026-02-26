@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
-import { page, container, card, h1, muted, row, btn, select, input } from "@/ui";
+import { page, container, card, muted, btn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
 type Circuit = { id: string; nom: string };
@@ -98,6 +98,28 @@ export default function Record() {
   const TRACE_MIN_MS = 1200;
   const TRACE_MAX_POINTS = 12000;
 
+  // ✅ KEEP SCREEN AWAKE (Wake Lock)
+  const wakeLockRef = useRef<any>(null);
+
+  async function requestWakeLock() {
+    try {
+      const navAny = navigator as any;
+      if (!navAny?.wakeLock?.request) return; // pas supporté (souvent iOS Safari)
+      wakeLockRef.current = await navAny.wakeLock.request("screen");
+    } catch {
+      // silence
+    }
+  }
+
+  async function releaseWakeLock() {
+    try {
+      await wakeLockRef.current?.release?.();
+    } catch {
+      // silence
+    }
+    wakeLockRef.current = null;
+  }
+
   async function refreshAuth() {
     try {
       const { data, error } = await supabase.auth.getUser();
@@ -187,6 +209,35 @@ export default function Record() {
       cancelled = true;
     };
   }, [canGeo]);
+
+  // ✅ Empêche l'écran de se mettre en veille pendant l'enregistrement
+  useEffect(() => {
+    if (!recording) {
+      releaseWakeLock();
+      return;
+    }
+
+    let cancelled = false;
+
+    const onVis = async () => {
+      if (cancelled) return;
+      if (document.visibilityState === "visible" && recording) {
+        await requestWakeLock();
+      }
+    };
+
+    (async () => {
+      await requestWakeLock();
+    })();
+
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      releaseWakeLock();
+    };
+  }, [recording]);
 
   // WATCH GPS pendant enregistrement : construit TRACE
   useEffect(() => {
@@ -382,7 +433,6 @@ export default function Record() {
         });
 
         if (r?.ok) return;
-        // si l’API retourne ok:true strict ou ok boolean, on gère les deux
         if ((r as any)?.ok === true) return;
 
         throw new Error("save_trace: réponse invalide");
@@ -396,6 +446,8 @@ export default function Record() {
   }
 
   async function stop() {
+    await releaseWakeLock(); // ✅ coupe le wake lock tout de suite
+
     const vId = versionId; // ✅ capture avant reset
 
     // ✅ on tente de sauvegarder la trace AVANT de quitter
@@ -412,6 +464,8 @@ export default function Record() {
         );
         if (!ok) {
           setSavingTrace(false);
+          // ✅ redemande wake lock si on reste dans l'écran
+          await requestWakeLock();
           return;
         }
       } finally {
