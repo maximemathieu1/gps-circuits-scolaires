@@ -281,31 +281,6 @@ function lerpAngleDeg(from: number, to: number, t: number) {
 }
 
 /* =========================
-   Follow offset helper (presque en bas)
-========================= */
-
-function computeFollowOffsetY(map: mapboxgl.Map, kmh: number) {
-  const h = map.getCanvas().clientHeight || window.innerHeight;
-
-  // Approx UI overlays (top bar + banner + bottom panel + bouton)
-  const topUi = 110;
-  const bottomUi = 230;
-
-  const usable = Math.max(280, h - topUi - bottomUi);
-
-  // ✅ presque en bas : plus le ratio est haut, plus le curseur descend
-  // 0.62~0.72 => très bas. Ici 0.68.
-  const base = Math.round(usable * 0.50);
-
-  // Un peu plus bas quand tu roules vite (look-ahead plus long)
-  const extra = Math.round(clamp(kmh * 1.8, 0, 170));
-
-  // Clamp final pour éviter des cas extrêmes
-  const y = base + extra;
-  return clamp(y, Math.round(h * 0.30), Math.round(h * 0.55));
-}
-
-/* =========================
    Main
 ========================= */
 
@@ -364,7 +339,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (pour skip arrêt manqué + trace restante)
+  // Progression sur trace
   const traceIdxRef = useRef<number>(0);
 
   // Anti-finish si arrêts trop proches
@@ -375,9 +350,8 @@ export default function NavLive() {
   const ARRIVE_EPS_M = 5;
 
   // Camera smoothing refs
-  const camLastAtRef = useRef(0);
-  const camLastCenterRef = useRef<LatLng | null>(null);
   const camBearRef = useRef(0);
+  const camLastEaseAtRef = useRef(0);
 
   // Follow mode (centré GPS)
   const followRef = useRef(true);
@@ -398,7 +372,7 @@ export default function NavLive() {
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
-  // index de chaque arrêt sur la trace (pour skip + segment actif)
+  // index de chaque arrêt sur la trace
   const stopIdxOnTrace = useMemo(() => {
     if (!hasOfficial || officialLine.length < 2) return [];
     return points.map((p) => {
@@ -408,7 +382,7 @@ export default function NavLive() {
   }, [hasOfficial, officialLine, points]);
 
   /* =========================
-     Mapbox (plein écran + overlays)
+     Mapbox
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
@@ -417,8 +391,8 @@ export default function NavLive() {
   // curseur style GPS (marker)
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // ✅ on garde une ref vers l'élément de la flèche pour la rotation
-  const meArrowElRef = useRef<HTMLDivElement | null>(null);
+  // ✅ rond (le "curseur comme avant")
+  const meDotElRef = useRef<HTMLDivElement | null>(null);
 
   // on conserve toujours la dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
@@ -426,11 +400,6 @@ export default function NavLive() {
 
   // ✅ Segment actif (entre arrêts consécutifs)
   const activeLineRef = useRef<[number, number][]>([]);
-
-  // (on garde les anciens IDs pour cleanup si jamais)
-  const MAP_TRACE_SRC = "trace-src";
-  const MAP_TRACE_LAYER = "trace-layer";
-  const MAP_TRACE_HALO = "trace-layer-halo";
 
   // ✅ Trace restante uniquement
   const MAP_REMAIN_SRC = "remain-src";
@@ -450,9 +419,9 @@ export default function NavLive() {
     return token;
   }
 
-  // ✅ rotation visuelle de la flèche (simple + stable)
-  function setArrowBearing(deg: number) {
-    const el = meArrowElRef.current;
+  // ✅ rotation visuelle du rond (petit "cap")
+  function setDotBearing(deg: number) {
+    const el = meDotElRef.current;
     if (!el) return;
     el.style.transform = `rotate(${wrap360(deg)}deg)`;
   }
@@ -462,42 +431,58 @@ export default function NavLive() {
     if (!m) return null;
     if (meMarkerRef.current) return meMarkerRef.current;
 
-    // ===== Curseur "GPS flèche" =====
+    // ===== Curseur "rond" =====
     const wrap = document.createElement("div");
-    wrap.style.width = "36px";
-    wrap.style.height = "36px";
+    wrap.style.width = "34px";
+    wrap.style.height = "34px";
     wrap.style.display = "flex";
     wrap.style.alignItems = "center";
     wrap.style.justifyContent = "center";
     wrap.style.pointerEvents = "none";
-
-    // Flèche (triangle) + noyau
-    const arrow = document.createElement("div");
-    arrow.style.width = "0";
-    arrow.style.height = "0";
-    arrow.style.borderLeft = "10px solid transparent";
-    arrow.style.borderRight = "10px solid transparent";
-    arrow.style.borderBottom = "18px solid #1d4ed8"; // bleu
-    arrow.style.filter = "drop-shadow(0 10px 18px rgba(0,0,0,.30))";
-    arrow.style.transformOrigin = "50% 65%";
-    arrow.style.transform = "rotate(0deg)";
-
-    // petit noyau blanc pour effet "Google/Waze"
-    const core = document.createElement("div");
-    core.style.position = "absolute";
-    core.style.width = "10px";
-    core.style.height = "10px";
-    core.style.borderRadius = "999px";
-    core.style.background = "#ffffff";
-    core.style.boxShadow = "0 6px 14px rgba(0,0,0,.18)";
-
     wrap.style.position = "relative";
-    wrap.appendChild(arrow);
-    wrap.appendChild(core);
 
-    meArrowElRef.current = arrow;
+    // rond principal
+    const dot = document.createElement("div");
+    dot.style.width = "18px";
+    dot.style.height = "18px";
+    dot.style.borderRadius = "999px";
+    dot.style.background = "#2563eb";
+    dot.style.border = "3px solid #ffffff";
+    dot.style.boxShadow = "0 10px 18px rgba(0,0,0,.28)";
+    dot.style.transformOrigin = "50% 50%";
+    dot.style.transform = "rotate(0deg)";
 
-    const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
+    // petit "cap" direction (mini triangle)
+    const cap = document.createElement("div");
+    cap.style.position = "absolute";
+    cap.style.top = "4px";
+    cap.style.left = "50%";
+    cap.style.width = "0";
+    cap.style.height = "0";
+    cap.style.transform = "translateX(-50%)";
+    cap.style.borderLeft = "6px solid transparent";
+    cap.style.borderRight = "6px solid transparent";
+    cap.style.borderBottom = "10px solid rgba(37,99,235,.95)";
+    cap.style.filter = "drop-shadow(0 6px 10px rgba(0,0,0,.20))";
+
+    // on fait tourner l'ensemble dot+cap
+    const rot = document.createElement("div");
+    rot.style.width = "34px";
+    rot.style.height = "34px";
+    rot.style.display = "flex";
+    rot.style.alignItems = "center";
+    rot.style.justifyContent = "center";
+    rot.style.position = "relative";
+    rot.appendChild(dot);
+    rot.appendChild(cap);
+
+    meDotElRef.current = rot;
+
+    wrap.appendChild(rot);
+
+    const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" })
+      .setLngLat([-73.0, 46.8])
+      .addTo(m);
 
     meMarkerRef.current = mk;
     return mk;
@@ -515,7 +500,7 @@ export default function NavLive() {
   }
 
   function buildLineGeoJSON(line: [number, number][]) {
-    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON=[lng,lat]
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]);
     return {
       type: "Feature" as const,
       properties: {},
@@ -543,36 +528,26 @@ export default function NavLive() {
     const pts = stopsRef.current;
     const active = activeLineRef.current;
 
-    // cleanup (avoid double add)
-    // anciens ids (au cas où)
-    safeRemoveLayer(m, MAP_TRACE_LAYER);
-    safeRemoveLayer(m, MAP_TRACE_HALO);
-    safeRemoveSource(m, MAP_TRACE_SRC);
-
-    // trace restante
+    // cleanup
     safeRemoveLayer(m, MAP_REMAIN_LAYER);
     safeRemoveLayer(m, MAP_REMAIN_HALO);
     safeRemoveSource(m, MAP_REMAIN_SRC);
 
-    // segment actif
     safeRemoveLayer(m, MAP_ACTIVE_LAYER);
     safeRemoveLayer(m, MAP_ACTIVE_HALO);
     safeRemoveSource(m, MAP_ACTIVE_SRC);
 
-    // stops
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // ✅ TRACE RESTANTE (bleu) seulement — cache la partie effectuée
+    // ✅ TRACE RESTANTE (bleu)
     if (fullLine && fullLine.length >= 2) {
       const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, fullLine.length - 2));
       const remain = fullLine.slice(start);
-
       if (remain.length >= 2) {
         const geojson = buildLineGeoJSON(remain);
         try {
           m.addSource(MAP_REMAIN_SRC, { type: "geojson", data: geojson as any });
-
           m.addLayer({
             id: MAP_REMAIN_HALO,
             type: "line",
@@ -580,7 +555,6 @@ export default function NavLive() {
             layout: { "line-join": "round", "line-cap": "round" },
             paint: { "line-color": "#93c5fd", "line-width": 12, "line-opacity": 0.22 },
           });
-
           m.addLayer({
             id: MAP_REMAIN_LAYER,
             type: "line",
@@ -594,12 +568,11 @@ export default function NavLive() {
       }
     }
 
-    // ✅ ACTIVE SEGMENT (au-dessus de la trace restante) — ROSE (pour éviter routes vertes)
+    // ✅ ACTIVE SEGMENT (rose) entre arrêts consécutifs
     if (active && active.length >= 2) {
       const geojsonA = buildLineGeoJSON(active);
       try {
         m.addSource(MAP_ACTIVE_SRC, { type: "geojson", data: geojsonA as any });
-
         m.addLayer({
           id: MAP_ACTIVE_HALO,
           type: "line",
@@ -607,7 +580,6 @@ export default function NavLive() {
           layout: { "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "#fbcfe8", "line-width": 16, "line-opacity": 0.35 },
         });
-
         m.addLayer({
           id: MAP_ACTIVE_LAYER,
           type: "line",
@@ -644,7 +616,6 @@ export default function NavLive() {
 
   function upsertActiveSegmentOnMap(line: [number, number][]) {
     activeLineRef.current = Array.isArray(line) ? line : [];
-
     const m = mapRef.current;
     if (!m) return;
     if (!m.isStyleLoaded()) return;
@@ -680,14 +651,14 @@ export default function NavLive() {
       style: "mapbox://styles/mapbox/navigation-day-v1",
       center: [-73.0, 46.8],
       zoom: 15,
-      pitch: 55,
+      pitch: 52, // ✅ un peu moins que 55 => moins “saccadé” visuellement
       bearing: 0,
       attributionControl: false,
     });
 
     mapRef.current = m;
 
-    // ✅ follow OFF uniquement sur geste utilisateur (sinon easeTo déclenche des events)
+    // follow OFF uniquement sur geste utilisateur
     m.on("dragstart", (e: any) => {
       if (e?.originalEvent) followRef.current = false;
     });
@@ -726,6 +697,24 @@ export default function NavLive() {
     } catch {}
   }
 
+  function computeYOffsetPx(m: mapboxgl.Map, kmh: number) {
+    // ✅ Offset “confort” : bas, mais PAS collé au bas (stable iPhone + tablette)
+    const h = m.getCanvas().clientHeight || window.innerHeight;
+
+    // on retire l'espace approx du panneau bas (sinon tu te sens "trop bas")
+    const bottomPanelApprox = 165;
+    const usable = Math.max(240, h - bottomPanelApprox);
+
+    // ratio modéré (0.46-0.56). Ici 0.52 = assez bas pour voir d’avance, mais pas extrême.
+    const base = Math.round(usable * 0.52);
+
+    // petit extra selon vitesse, mais limité
+    const extra = Math.round(clamp(kmh * 1.2, 0, 90));
+
+    // clamp final
+    return clamp(base + extra, 80, 240);
+  }
+
   function recenter() {
     followRef.current = true;
     tryEnterFullscreen();
@@ -734,21 +723,23 @@ export default function NavLive() {
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
-    // ✅ Offset vertical très bas (presque en bas)
-    const yOff = computeFollowOffsetY(m, kmh);
+    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.8 : 16.3;
+    const yOff = computeYOffsetPx(m, kmh);
 
+    // ✅ IMPORTANT : yOff POSITIF => curseur plus BAS
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
-      pitch: 55,
+      pitch: 52,
       bearing: wrap360((headingRef.current ?? lastBearingRef.current) || 0),
-      offset: [0, yOff], // ✅ NEGATIF => curseur plus BAS
-      duration: 550,
+      offset: [0, yOff],
+      duration: 520,
       easing: (t: number) => t,
       essential: true,
     });
+
+    camLastEaseAtRef.current = Date.now();
   }
 
   /* =========================
@@ -784,15 +775,12 @@ export default function NavLive() {
     stopTouchedRef.current = false;
     stopMinDistRef.current = Infinity;
 
-    // anti-finish
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
-    // overlays refs
     lineRef.current = line;
     stopsRef.current = pts;
 
-    // init active segment
     activeLineRef.current = [];
 
     const m = ensureMap();
@@ -855,7 +843,8 @@ export default function NavLive() {
       const m = mapRef.current;
       if (m) {
         followRef.current = true;
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.2, bearing: 0, pitch: 55 });
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.3, bearing: 0, pitch: 52 });
+        camLastEaseAtRef.current = Date.now();
       }
     } catch {}
   }
@@ -959,7 +948,7 @@ export default function NavLive() {
 
   /* =========================
      Active segment (arrêt courant -> prochain arrêt)
-     ✅ segment ROSE seulement entre arrêts consécutifs
+     ✅ segment rose seulement entre arrêts consécutifs
   ========================= */
 
   useEffect(() => {
@@ -972,8 +961,8 @@ export default function NavLive() {
       return;
     }
 
-    const aIdx = stopIdxOnTrace[targetIdx] ?? null; // arrêt courant
-    const bIdx = stopIdxOnTrace[targetIdx + 1] ?? null; // prochain arrêt
+    const aIdx = stopIdxOnTrace[targetIdx] ?? null;
+    const bIdx = stopIdxOnTrace[targetIdx + 1] ?? null;
     if (aIdx == null || bIdx == null) {
       upsertActiveSegmentOnMap([]);
       return;
@@ -983,8 +972,6 @@ export default function NavLive() {
     const to = Math.max(aIdx, bIdx);
 
     let seg = officialLine.slice(from, to + 1);
-
-    // ✅ garder direction "courant -> prochain"
     if (aIdx > bIdx) seg = seg.slice().reverse();
 
     if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
@@ -993,10 +980,8 @@ export default function NavLive() {
   }, [running, hasOfficial, officialLine, targetIdx, points.length, stopIdxOnTrace]);
 
   /* =========================
-     Map updates (curseur + caméra lissée + follow)
-     ✅ + flèche orientée
-     ✅ + trace restante bleue (live)
-     ✅ + follow presque en bas (offset)
+     Map updates (curseur + caméra)
+     ✅ moins saccadé: on n'appelle pas easeTo à chaque tick
   ========================= */
 
   useEffect(() => {
@@ -1006,7 +991,7 @@ export default function NavLive() {
     const m = ensureMap();
     if (!m) return;
 
-    // ✅ refresh trace restante (bleu) en live
+    // refresh trace restante (bleu) en live
     try {
       if (m.isStyleLoaded() && lineRef.current.length >= 2) {
         const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, lineRef.current.length - 2));
@@ -1028,40 +1013,31 @@ export default function NavLive() {
     const mk = ensureMeMarker();
     mk?.setLngLat([me.lng, me.lat]);
 
-    // bearing cible
     const targetBearing = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
-
-    // ✅ flèche orientée (même si follow off, la flèche suit ton heading)
-    setArrowBearing(targetBearing);
+    camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
+    setDotBearing(camBearRef.current);
 
     if (!followRef.current) return;
 
-    // smoothing bearing
-    const now = Date.now();
-    const MIN_MS = 180;
-    if (now - camLastAtRef.current < MIN_MS) {
-      camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-      return;
-    }
-    camLastAtRef.current = now;
-
-    camLastCenterRef.current = me;
-    camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
+    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.8 : 16.3;
 
-    // ✅ Offset vertical très bas (presque en bas)
-    const yOff = computeFollowOffsetY(m, kmh);
+    const yOff = computeYOffsetPx(m, kmh);
+
+    // ✅ throttle caméra (réduit énormément le "saccade")
+    const now = Date.now();
+    const MIN_EASE_MS = 260; // plus grand = moins d'appels => plus smooth
+    if (now - camLastEaseAtRef.current < MIN_EASE_MS) return;
+    camLastEaseAtRef.current = now;
 
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
-      pitch: 55,
+      pitch: 52,
       bearing: camBearRef.current,
-      offset: [0, yOff],
-      duration: 650,
+      offset: [0, yOff], // ✅ y positif => curseur descend
+      duration: 420,
       easing: (t: number) => t,
       essential: true,
     });
@@ -1194,7 +1170,7 @@ export default function NavLive() {
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace]);
 
   /* =========================
-     UI plein écran
+     UI
   ========================= */
 
   const overlayBtn: React.CSSProperties = {
@@ -1377,23 +1353,14 @@ export default function NavLive() {
             GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
           </div>
         )}
-        {offRouteM != null && (
-          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>
-        )}
+        {offRouteM != null && <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>}
         {err && <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
       </div>
 
       {/* STOP BTN */}
       <div style={{ position: "absolute", left: 12, bottom: 92, zIndex: 9000, pointerEvents: "auto" }}>
         <button
-          style={{
-            ...overlayBtn,
-            width: 120,
-            height: 44,
-            borderRadius: 16,
-            fontSize: 14,
-            fontWeight: 950,
-          }}
+          style={{ ...overlayBtn, width: 120, height: 44, borderRadius: 16, fontSize: 14, fontWeight: 950 }}
           onClick={stop}
           title="Terminer"
         >
