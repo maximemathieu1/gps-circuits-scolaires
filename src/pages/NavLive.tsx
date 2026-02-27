@@ -339,7 +339,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (pour skip arrêt manqué + segment actif)
+  // Progression sur trace (pour skip arrêt manqué + trace restante)
   const traceIdxRef = useRef<number>(0);
 
   // Anti-finish si arrêts trop proches
@@ -399,12 +399,18 @@ export default function NavLive() {
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
-  // ✅ Segment actif (brillance vers prochain arrêt)
+  // ✅ Segment actif (entre arrêts consécutifs)
   const activeLineRef = useRef<[number, number][]>([]);
 
+  // (on garde les anciens IDs pour cleanup si jamais)
   const MAP_TRACE_SRC = "trace-src";
   const MAP_TRACE_LAYER = "trace-layer";
   const MAP_TRACE_HALO = "trace-layer-halo";
+
+  // ✅ Trace restante uniquement
+  const MAP_REMAIN_SRC = "remain-src";
+  const MAP_REMAIN_LAYER = "remain-layer";
+  const MAP_REMAIN_HALO = "remain-halo";
 
   const MAP_ACTIVE_SRC = "active-trace-src";
   const MAP_ACTIVE_LAYER = "active-trace-layer";
@@ -510,49 +516,62 @@ export default function NavLive() {
     if (!m) return;
     if (!m.isStyleLoaded()) return;
 
-    const line = lineRef.current;
+    const fullLine = lineRef.current;
     const pts = stopsRef.current;
     const active = activeLineRef.current;
 
     // cleanup (avoid double add)
+    // anciens ids (au cas où)
     safeRemoveLayer(m, MAP_TRACE_LAYER);
     safeRemoveLayer(m, MAP_TRACE_HALO);
     safeRemoveSource(m, MAP_TRACE_SRC);
 
+    // trace restante
+    safeRemoveLayer(m, MAP_REMAIN_LAYER);
+    safeRemoveLayer(m, MAP_REMAIN_HALO);
+    safeRemoveSource(m, MAP_REMAIN_SRC);
+
+    // segment actif
     safeRemoveLayer(m, MAP_ACTIVE_LAYER);
     safeRemoveLayer(m, MAP_ACTIVE_HALO);
     safeRemoveSource(m, MAP_ACTIVE_SRC);
 
+    // stops
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // TRACE
-    if (line && line.length >= 2) {
-      const geojson = buildLineGeoJSON(line);
-      try {
-        m.addSource(MAP_TRACE_SRC, { type: "geojson", data: geojson as any });
+    // ✅ TRACE RESTANTE (bleu) seulement — cache la partie effectuée
+    if (fullLine && fullLine.length >= 2) {
+      const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, fullLine.length - 2));
+      const remain = fullLine.slice(start);
 
-        m.addLayer({
-          id: MAP_TRACE_HALO,
-          type: "line",
-          source: MAP_TRACE_SRC,
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#93c5fd", "line-width": 12, "line-opacity": 0.28 },
-        });
+      if (remain.length >= 2) {
+        const geojson = buildLineGeoJSON(remain);
+        try {
+          m.addSource(MAP_REMAIN_SRC, { type: "geojson", data: geojson as any });
 
-        m.addLayer({
-          id: MAP_TRACE_LAYER,
-          type: "line",
-          source: MAP_TRACE_SRC,
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#2563eb", "line-width": 7, "line-opacity": 0.95 },
-        });
-      } catch (e) {
-        console.error("Mapbox apply trace failed:", e);
+          m.addLayer({
+            id: MAP_REMAIN_HALO,
+            type: "line",
+            source: MAP_REMAIN_SRC,
+            layout: { "line-join": "round", "line-cap": "round" },
+            paint: { "line-color": "#93c5fd", "line-width": 12, "line-opacity": 0.22 },
+          });
+
+          m.addLayer({
+            id: MAP_REMAIN_LAYER,
+            type: "line",
+            source: MAP_REMAIN_SRC,
+            layout: { "line-join": "round", "line-cap": "round" },
+            paint: { "line-color": "#2563eb", "line-width": 7, "line-opacity": 0.95 },
+          });
+        } catch (e) {
+          console.error("Mapbox apply remain failed:", e);
+        }
       }
     }
 
-    // ✅ ACTIVE SEGMENT (au-dessus de la trace)
+    // ✅ ACTIVE SEGMENT (au-dessus de la trace restante) — VERT navigation
     if (active && active.length >= 2) {
       const geojsonA = buildLineGeoJSON(active);
       try {
@@ -563,7 +582,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#ffffff", "line-width": 14, "line-opacity": 0.25 },
+          paint: { "line-color": "#bbf7d0", "line-width": 16, "line-opacity": 0.35 },
         });
 
         m.addLayer({
@@ -571,7 +590,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#38bdf8", "line-width": 9, "line-opacity": 1.0 },
+          paint: { "line-color": "#22c55e", "line-width": 9, "line-opacity": 1.0 },
         });
       } catch (e) {
         console.error("Mapbox apply active segment failed:", e);
@@ -694,11 +713,18 @@ export default function NavLive() {
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
+    // ✅ Offset vertical (curseur plus bas, plus de route devant)
+    const h = m.getCanvas().clientHeight || window.innerHeight;
+    const base = Math.round(h * 0.28); // ajuste 0.24 - 0.34 au besoin
+    const extra = Math.round(clamp(kmh * 2.0, 0, 180));
+    const yOff = base + extra;
+
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
       pitch: 55,
       bearing: wrap360((headingRef.current ?? lastBearingRef.current) || 0),
+      offset: [0, -yOff],
       duration: 550,
       easing: (t: number) => t,
       essential: true,
@@ -746,7 +772,7 @@ export default function NavLive() {
     lineRef.current = line;
     stopsRef.current = pts;
 
-    // ✅ init active segment
+    // init active segment
     activeLineRef.current = [];
 
     const m = ensureMap();
@@ -897,35 +923,60 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Active segment (me -> prochain arrêt sur la trace)
+     Progression sur la trace (index le plus proche)
   ========================= */
 
   useEffect(() => {
     if (!running) return;
     if (!me) return;
     if (!hasOfficial || officialLine.length < 2) return;
-    if (!points.length) return;
 
     const nearMe = nearestLineIndex(me, officialLine);
     if (!nearMe) return;
 
     traceIdxRef.current = nearMe.idx;
+  }, [running, me, hasOfficial, officialLine]);
 
-    const stopIdx = stopIdxOnTrace[targetIdx] ?? null;
-    if (stopIdx == null) return;
+  /* =========================
+     Active segment (arrêt courant -> prochain arrêt)
+     ✅ segment vert seulement entre arrêts consécutifs
+  ========================= */
 
-    const from = Math.min(nearMe.idx, stopIdx);
-    const to = Math.max(nearMe.idx, stopIdx);
+  useEffect(() => {
+    if (!running) return;
+    if (!hasOfficial || officialLine.length < 2) return;
+    if (!points.length) return;
 
-    const seg = officialLine.slice(from, to + 1);
+    if (targetIdx >= points.length - 1) {
+      upsertActiveSegmentOnMap([]);
+      return;
+    }
+
+    const aIdx = stopIdxOnTrace[targetIdx] ?? null; // arrêt courant
+    const bIdx = stopIdxOnTrace[targetIdx + 1] ?? null; // prochain arrêt
+    if (aIdx == null || bIdx == null) {
+      upsertActiveSegmentOnMap([]);
+      return;
+    }
+
+    const from = Math.min(aIdx, bIdx);
+    const to = Math.max(aIdx, bIdx);
+
+    let seg = officialLine.slice(from, to + 1);
+
+    // ✅ garder direction "courant -> prochain"
+    if (aIdx > bIdx) seg = seg.slice().reverse();
+
     if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
     else upsertActiveSegmentOnMap([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, me, hasOfficial, officialLine, targetIdx, points.length, stopIdxOnTrace]);
+  }, [running, hasOfficial, officialLine, targetIdx, points.length, stopIdxOnTrace]);
 
   /* =========================
      Map updates (curseur + caméra lissée + follow)
-     ✅ + flèche orientée + look-ahead (GPS style)
+     ✅ + flèche orientée
+     ✅ + trace restante bleue (live)
+     ✅ + follow abaissé (offset)
   ========================= */
 
   useEffect(() => {
@@ -935,8 +986,22 @@ export default function NavLive() {
     const m = ensureMap();
     if (!m) return;
 
+    // ✅ refresh trace restante (bleu) en live
+    try {
+      if (m.isStyleLoaded() && lineRef.current.length >= 2) {
+        const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, lineRef.current.length - 2));
+        const remain = lineRef.current.slice(start);
+
+        const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
+        const data = buildLineGeoJSON(remain) as any;
+
+        if (src) src.setData(data);
+        else applyOverlays();
+      }
+    } catch {}
+
     if (m.isStyleLoaded()) {
-      if (!m.getLayer(MAP_TRACE_LAYER) && lineRef.current.length >= 2) applyOverlays();
+      if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
       if (!m.getLayer(MAP_ACTIVE_LAYER) && activeLineRef.current.length >= 2) applyOverlays();
     }
 
@@ -967,25 +1032,18 @@ export default function NavLive() {
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
-    // ✅ LOOK-AHEAD: centre décalé pour que le curseur soit plus bas à l’écran
-    // Plus tu vas vite, plus on "regarde" loin.
-    let centerLngLat: [number, number] = [me.lng, me.lat];
-    try {
-      const pt = m.project([me.lng, me.lat]); // pixels écran
-      const base = 140; // offset constant (look-ahead)
-      const extra = clamp(kmh * 1.8, 0, 160); // + offset selon vitesse
-      const yOff = base + extra;
-      const shifted = m.unproject([pt.x, pt.y + yOff]); // +Y => centre plus bas => tu vois plus loin devant
-      centerLngLat = [shifted.lng, shifted.lat];
-    } catch {
-      centerLngLat = [me.lng, me.lat];
-    }
+    // ✅ Offset vertical pour avoir plus de route/arrêts devant (curseur plus bas à l’écran)
+    const h = m.getCanvas().clientHeight || window.innerHeight;
+    const base = Math.round(h * 0.28); // ajuste 0.24-0.34 au besoin
+    const extra = Math.round(clamp(kmh * 2.0, 0, 180));
+    const yOff = base + extra;
 
     m.easeTo({
-      center: centerLngLat,
+      center: [me.lng, me.lat],
       zoom: targetZoom,
       pitch: 55,
       bearing: camBearRef.current,
+      offset: [0, -yOff], // ✅ NEGATIF => curseur plus BAS
       duration: 650,
       easing: (t: number) => t,
       essential: true,
