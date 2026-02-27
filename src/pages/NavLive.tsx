@@ -295,7 +295,7 @@ function computeFollowOffsetY(map: mapboxgl.Map, kmh: number) {
 
   // ✅ presque en bas : plus le ratio est haut, plus le curseur descend
   // 0.62~0.72 => très bas. Ici 0.68.
-  const base = Math.round(usable * 0.60);
+  const base = Math.round(usable * 0.50);
 
   // Un peu plus bas quand tu roules vite (look-ahead plus long)
   const extra = Math.round(clamp(kmh * 1.8, 0, 170));
