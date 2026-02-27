@@ -582,7 +582,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#bbf7d0", "line-width": 16, "line-opacity": 0.35 },
+          paint: { "line-color": "#fbcfe8", "line-width": 16, "line-opacity": 0.35 },
         });
 
         m.addLayer({
@@ -590,7 +590,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#22c55e", "line-width": 9, "line-opacity": 1.0 },
+          paint: { "line-color": "#ec4899", "line-width": 9, "line-opacity": 1.0 },
         });
       } catch (e) {
         console.error("Mapbox apply active segment failed:", e);
