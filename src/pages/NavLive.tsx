@@ -48,20 +48,12 @@ function watchPos(
         speed: (pos.coords as any).speed ?? null,
       }),
     (err) => onErr(err.message),
-    { enableHighAccuracy: true, maximumAge: 800, timeout: 15000 }
+    { enableHighAccuracy: true, maximumAge: 500, timeout: 15000 }
   );
 }
 
 function clamp(v: number, a: number, b: number) {
   return Math.max(a, Math.min(b, v));
-}
-
-function smoothPos(prev: LatLng | null, next: LatLng, alpha: number) {
-  if (!prev) return next;
-  return {
-    lat: prev.lat + (next.lat - prev.lat) * alpha,
-    lng: prev.lng + (next.lng - prev.lng) * alpha,
-  };
 }
 
 // Approx meters using equirectangular projection around current latitude
@@ -109,7 +101,7 @@ function minDistanceToPolylineMeters(me: LatLng, line: [number, number][]) {
   return Number.isFinite(best) ? best : null;
 }
 
-/** index de point de la polyline le plus proche */
+/** index de point de la polyline le plus proche (vertex) */
 function nearestLineIndex(me: LatLng, line: [number, number][]) {
   if (!line || line.length === 0) return null;
   let best = Infinity;
@@ -263,36 +255,13 @@ async function tryEnterFullscreen() {
 }
 
 /* =========================
-   Camera smoothing helpers
+   Bearing helpers
 ========================= */
 
 function wrap360(deg: number) {
   let d = deg % 360;
   if (d < 0) d += 360;
   return d;
-}
-function lerpAngleDeg(from: number, to: number, t: number) {
-  const a = wrap360(from);
-  const b = wrap360(to);
-  let diff = b - a;
-  if (diff > 180) diff -= 360;
-  if (diff < -180) diff += 360;
-  return wrap360(a + diff * t);
-}
-
-// ✅ Bearing par déplacement (quand heading est null)
-function bearingBetween(a: LatLng, b: LatLng) {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const toDeg = (r: number) => (r * 180) / Math.PI;
-
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const dLon = toRad(b.lng - a.lng);
-
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  const brng = toDeg(Math.atan2(y, x));
-  return wrap360(brng);
 }
 
 /* =========================
@@ -310,21 +279,20 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
-  // GPS
+  // GPS (état affichage)
   const [me, setMe] = useState<LatLng | null>(null);
-  const meSmoothRef = useRef<LatLng | null>(null);
-
   const [acc, setAcc] = useState<number | null>(null);
-  const accRef = useRef<number | null>(null);
-
   const [speed, setSpeed] = useState<number | null>(null);
-  const speedRef = useRef<number | null>(null);
-
   const [heading, setHeading] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // GPS refs (animation fluide)
+  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
+  const animPosRef = useRef<LatLng | null>(null);   // position animée (60fps)
+  const accRef = useRef<number | null>(null);
+  const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
-
-  const [err, setErr] = useState<string | null>(null);
 
   // Stops
   const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
@@ -354,7 +322,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (pour skip arrêt manqué + trace restante)
+  // Progression sur trace
   const traceIdxRef = useRef<number>(0);
 
   // Anti-finish si arrêts trop proches
@@ -364,10 +332,7 @@ export default function NavLive() {
   const MIN_TRAVEL_AFTER_TARGET_SET_M = 12;
   const ARRIVE_EPS_M = 5;
 
-  // Camera smoothing refs
-  const camBearRef = useRef(0);
-
-  // Follow mode (centré GPS)
+  // Follow mode
   const followRef = useRef(true);
 
   // ====== Tuning ======
@@ -386,33 +351,20 @@ export default function NavLive() {
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
-  // index de chaque arrêt sur la trace (pour skip + segment actif)
-  const stopIdxOnTrace = useMemo(() => {
-    if (!hasOfficial || officialLine.length < 2) return [];
-    return points.map((p) => {
-      const near = nearestLineIndex({ lat: p.lat, lng: p.lng }, officialLine);
-      return near?.idx ?? 0;
-    });
-  }, [hasOfficial, officialLine, points]);
-
   /* =========================
-     Mapbox (plein écran + overlays)
+     Mapbox
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
 
-  // curseur style GPS (marker)
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
   // on conserve toujours la dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
-
-  // ✅ Segment actif (entre arrêts consécutifs)
   const activeLineRef = useRef<[number, number][]>([]);
 
-  // ✅ Trace restante uniquement
   const MAP_REMAIN_SRC = "remain-src";
   const MAP_REMAIN_LAYER = "remain-layer";
   const MAP_REMAIN_HALO = "remain-halo";
@@ -435,12 +387,11 @@ export default function NavLive() {
     if (!m) return null;
     if (meMarkerRef.current) return meMarkerRef.current;
 
-    // ===== Curseur "rond" =====
     const wrap = document.createElement("div");
     wrap.style.width = "22px";
     wrap.style.height = "22px";
     wrap.style.borderRadius = "999px";
-    wrap.style.background = "#2563eb"; // bleu
+    wrap.style.background = "#2563eb";
     wrap.style.border = "3px solid #ffffff";
     wrap.style.boxShadow = "0 10px 18px rgba(0,0,0,.25)";
     wrap.style.pointerEvents = "none";
@@ -460,7 +411,6 @@ export default function NavLive() {
     wrap.appendChild(core);
 
     const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
-
     meMarkerRef.current = mk;
     return mk;
   }
@@ -477,12 +427,8 @@ export default function NavLive() {
   }
 
   function buildLineGeoJSON(line: [number, number][]) {
-    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]); // GeoJSON=[lng,lat]
-    return {
-      type: "Feature" as const,
-      properties: {},
-      geometry: { type: "LineString" as const, coordinates: coords },
-    };
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]);
+    return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[]) {
@@ -498,28 +444,24 @@ export default function NavLive() {
 
   function applyOverlays() {
     const m = mapRef.current;
-    if (!m) return;
-    if (!m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded()) return;
 
     const fullLine = lineRef.current;
     const pts = stopsRef.current;
     const active = activeLineRef.current;
 
-    // trace restante
     safeRemoveLayer(m, MAP_REMAIN_LAYER);
     safeRemoveLayer(m, MAP_REMAIN_HALO);
     safeRemoveSource(m, MAP_REMAIN_SRC);
 
-    // segment actif (rose)
     safeRemoveLayer(m, MAP_ACTIVE_LAYER);
     safeRemoveLayer(m, MAP_ACTIVE_HALO);
     safeRemoveSource(m, MAP_ACTIVE_SRC);
 
-    // stops
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // ✅ TRACE RESTANTE (bleu) seulement — cache la partie effectuée
+    // TRACE RESTANTE (bleu)
     if (fullLine && fullLine.length >= 2) {
       const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, fullLine.length - 2));
       const remain = fullLine.slice(start);
@@ -550,7 +492,7 @@ export default function NavLive() {
       }
     }
 
-    // ✅ ACTIVE SEGMENT (rose, entre arrêts)
+    // ACTIVE SEGMENT (rose)
     if (active && active.length >= 2) {
       const geojsonA = buildLineGeoJSON(active);
       try {
@@ -602,8 +544,7 @@ export default function NavLive() {
     activeLineRef.current = Array.isArray(line) ? line : [];
 
     const m = mapRef.current;
-    if (!m) return;
-    if (!m.isStyleLoaded()) return;
+    if (!m || !m.isStyleLoaded()) return;
 
     try {
       const src = m.getSource(MAP_ACTIVE_SRC) as mapboxgl.GeoJSONSource | undefined;
@@ -635,7 +576,7 @@ export default function NavLive() {
       container: mapElRef.current,
       style: "mapbox://styles/mapbox/navigation-day-v1",
       center: [-73.0, 46.8],
-      zoom: 15,
+      zoom: 16.0,
       pitch: 55,
       bearing: 0,
       attributionControl: false,
@@ -643,19 +584,11 @@ export default function NavLive() {
 
     mapRef.current = m;
 
-    // ✅ follow OFF uniquement sur geste utilisateur
-    m.on("dragstart", (e: any) => {
-      if (e?.originalEvent) followRef.current = false;
-    });
-    m.on("pitchstart", (e: any) => {
-      if (e?.originalEvent) followRef.current = false;
-    });
-    m.on("rotatestart", (e: any) => {
-      if (e?.originalEvent) followRef.current = false;
-    });
-    m.on("zoomstart", (e: any) => {
-      if (e?.originalEvent) followRef.current = false;
-    });
+    // follow OFF uniquement sur geste utilisateur
+    m.on("dragstart", (e: any) => e?.originalEvent && (followRef.current = false));
+    m.on("pitchstart", (e: any) => e?.originalEvent && (followRef.current = false));
+    m.on("rotatestart", (e: any) => e?.originalEvent && (followRef.current = false));
+    m.on("zoomstart", (e: any) => e?.originalEvent && (followRef.current = false));
 
     m.on("load", () => {
       applyOverlays();
@@ -663,10 +596,7 @@ export default function NavLive() {
         m.resize();
       } catch {}
     });
-
-    m.on("style.load", () => {
-      applyOverlays();
-    });
+    m.on("style.load", () => applyOverlays());
 
     return m;
   }
@@ -682,40 +612,77 @@ export default function NavLive() {
     } catch {}
   }
 
-  // ✅ recenter propre
+  function computeFollowOffsetPx(m: mapboxgl.Map) {
+    // ✅ REMONTER la nav: offset beaucoup plus petit
+    // (sur ta photo, ton yOff est trop gros)
+    const h = m.getCanvas().clientHeight || window.innerHeight;
+    const usable = Math.max(280, h - 170);
+
+    const v = speedRef.current ?? null;
+    const kmh = v != null ? v * 3.6 : 0;
+
+    // base plus petit = curseur plus haut
+    const base = Math.round(usable * 0.22); // <<<<<< clé (avant 0.52)
+    const extra = Math.round(clamp(kmh * 0.6, 0, 35)); // extra réduit + cap
+    const yOff = clamp(base + extra, 30, 120);
+
+    return yOff;
+  }
+
   function recenter() {
     followRef.current = true;
     tryEnterFullscreen();
 
     const m = mapRef.current;
-    if (!m || !me) return;
+    const p = animPosRef.current ?? me;
+    if (!m || !p) return;
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
+    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
 
-    const h = m.getCanvas().clientHeight || window.innerHeight;
-    const usable = Math.max(280, h - 170);
+    const yOff = computeFollowOffsetPx(m);
 
-    // 🔥 Ajuste ici si tu veux remonter/descendre le point:
-    // 0.42 = plus haut
-    // 0.52 = milieu
-    // 0.56 = plus bas
-    const base = Math.round(usable * 0.42);
-    const extra = Math.round(clamp(kmh * 1.2, 0, 90));
-    const yOff = base + extra;
+    const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
     m.easeTo({
-      center: [me.lng, me.lat],
+      center: [p.lng, p.lat],
       zoom: targetZoom,
       pitch: 55,
-      bearing: wrap360((headingRef.current ?? lastBearingRef.current) || 0),
+      bearing: b,
       offset: [0, yOff],
-      duration: 420,
+      duration: 450,
       easing: (t: number) => t,
       essential: true,
     });
   }
+
+  /* =========================
+     stop index sur trace (dé-doublonné, monotone)
+  ========================= */
+
+  const stopIdxOnTrace = useMemo(() => {
+    if (!hasOfficial || officialLine.length < 2) return [];
+    if (!points.length) return [];
+
+    const raw = points.map((p) => {
+      const near = nearestLineIndex({ lat: p.lat, lng: p.lng }, officialLine);
+      return near?.idx ?? 0;
+    });
+
+    // ✅ rendre les indices croissants pour éviter "segment vide"
+    const out = raw.slice();
+    for (let i = 1; i < out.length; i++) {
+      if (out[i] <= out[i - 1]) out[i] = Math.min(out[i - 1] + 1, officialLine.length - 1);
+    }
+
+    // ✅ si encore égalité (polyline trop courte), on force un écart min
+    for (let i = 0; i < out.length - 1; i++) {
+      if (out[i + 1] <= out[i]) out[i + 1] = Math.min(out[i] + 1, officialLine.length - 1);
+    }
+
+    return out;
+  }, [hasOfficial, officialLine, points]);
 
   /* =========================
      Load circuit
@@ -753,11 +720,8 @@ export default function NavLive() {
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
-    // overlays refs
     lineRef.current = line;
     stopsRef.current = pts;
-
-    // init active segment
     activeLineRef.current = [];
 
     const m = ensureMap();
@@ -794,14 +758,17 @@ export default function NavLive() {
             acc: p.coords.accuracy ?? null,
           }),
         (e) => reject(new Error(e.message)),
-        { enableHighAccuracy: true, maximumAge: 800, timeout: 15000 }
+        { enableHighAccuracy: true, maximumAge: 500, timeout: 15000 }
       );
     });
 
     const initial = { lat: got.lat, lng: got.lng };
-    meSmoothRef.current = initial;
-    setMe(initial);
 
+    // init animation refs
+    targetPosRef.current = initial;
+    animPosRef.current = initial;
+
+    setMe(initial);
     setAcc(got.acc ?? null);
     accRef.current = got.acc ?? null;
 
@@ -820,7 +787,7 @@ export default function NavLive() {
       const m = mapRef.current;
       if (m) {
         followRef.current = true;
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.2, bearing: 0, pitch: 55 });
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55 });
       }
     } catch {}
   }
@@ -851,7 +818,7 @@ export default function NavLive() {
   }, [circuitId]);
 
   /* =========================
-     GPS tracking
+     GPS tracking (on met à jour targetPosRef)
   ========================= */
 
   useEffect(() => {
@@ -862,19 +829,10 @@ export default function NavLive() {
     watchId = watchPos(
       (p) => {
         const raw = { lat: p.lat, lng: p.lng };
-
-        const v = p.speed ?? null;
-        const alpha = v != null ? clamp(0.18 + v * 0.02, 0.18, 0.38) : 0.22;
-
-        const prev = meSmoothRef.current;
-        const sm = smoothPos(prev, raw, alpha);
-
-        meSmoothRef.current = sm;
-        setMe(sm);
+        targetPosRef.current = raw;
 
         setAcc(p.acc ?? null);
         setSpeed(p.speed ?? null);
-
         accRef.current = p.acc ?? null;
         speedRef.current = p.speed ?? null;
 
@@ -882,18 +840,10 @@ export default function NavLive() {
         if (hd != null && Number.isFinite(hd)) {
           setHeading(hd);
           headingRef.current = hd;
-          lastBearingRef.current = wrap360(hd);
+          lastBearingRef.current = hd;
         } else {
           setHeading(null);
           headingRef.current = null;
-
-          // ✅ heading absent => bearing par déplacement
-          if (prev) {
-            const d = haversineMeters(prev, sm);
-            if (d >= 1.5) {
-              lastBearingRef.current = bearingBetween(prev, sm);
-            }
-          }
         }
       },
       (m) => setErr(m)
@@ -905,36 +855,107 @@ export default function NavLive() {
   }, [running]);
 
   /* =========================
+     Animation loop (fluide) + follow standard + rotation
+  ========================= */
+
+  useEffect(() => {
+    if (!running) return;
+
+    let raf = 0;
+    let lastT = performance.now();
+
+    const tick = (t: number) => {
+      const dt = Math.max(0, Math.min(0.05, (t - lastT) / 1000));
+      lastT = t;
+
+      const targetP = targetPosRef.current;
+      if (targetP) {
+        const cur = animPosRef.current ?? targetP;
+
+        // ✅ interpolation temps-réel (plus dt est grand, plus on rattrape vite)
+        const k = 1 - Math.pow(0.001, dt); // stable
+        const next = {
+          lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
+          lng: cur.lng + (targetP.lng - cur.lng) * clamp(k * 6.0, 0.05, 0.9),
+        };
+
+        animPosRef.current = next;
+        setMe(next);
+
+        const m = ensureMap();
+        if (m) {
+          // marker
+          ensureMeMarker()?.setLngLat([next.lng, next.lat]);
+
+          // progress trace idx
+          if (hasOfficial && lineRef.current.length >= 2) {
+            const near = nearestLineIndex(next, lineRef.current);
+            if (near) traceIdxRef.current = near.idx;
+
+            // refresh remain
+            try {
+              const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, lineRef.current.length - 2));
+              const remain = lineRef.current.slice(start);
+              const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
+              const data = buildLineGeoJSON(remain) as any;
+              if (src) src.setData(data);
+            } catch {}
+          }
+
+          if (m.isStyleLoaded()) {
+            if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
+            if (!m.getLayer(MAP_ACTIVE_LAYER) && activeLineRef.current.length >= 2) applyOverlays();
+          }
+
+          // ✅ follow standard: camera suit en continu
+          if (followRef.current) {
+            const v = speedRef.current ?? null;
+            const kmh = v != null ? v * 3.6 : 0;
+            const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+
+            const yOff = computeFollowOffsetPx(m);
+
+            // rotation: heading si dispo, sinon lastBearing
+            const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
+
+            m.easeTo({
+              center: [next.lng, next.lat],
+              zoom: targetZoom,
+              pitch: 55,
+              bearing: b,
+              offset: [0, yOff],
+              duration: 180, // court (frame-friendly)
+              easing: (x: number) => x,
+              essential: true,
+            });
+          }
+        }
+      }
+
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, hasOfficial]);
+
+  /* =========================
      Distance à la trace (info)
   ========================= */
 
   useEffect(() => {
     if (!running) return;
-    if (!me) return;
+    const p = animPosRef.current ?? me;
+    if (!p) return;
     if (!hasOfficial || officialLine.length < 2) return;
 
-    const dLine = minDistanceToPolylineMeters(me, officialLine);
+    const dLine = minDistanceToPolylineMeters(p, officialLine);
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Progression sur la trace (index le plus proche)
-  ========================= */
-
-  useEffect(() => {
-    if (!running) return;
-    if (!me) return;
-    if (!hasOfficial || officialLine.length < 2) return;
-
-    const nearMe = nearestLineIndex(me, officialLine);
-    if (!nearMe) return;
-
-    traceIdxRef.current = nearMe.idx;
-  }, [running, me, hasOfficial, officialLine]);
-
-  /* =========================
-     Active segment (arrêt courant -> prochain arrêt)
-     ✅ segment rose seulement entre arrêts consécutifs
+     Active segment (arrêt courant -> prochain)
   ========================= */
 
   useEffect(() => {
@@ -947,123 +968,43 @@ export default function NavLive() {
       return;
     }
 
-    const aIdx = stopIdxOnTrace[targetIdx] ?? null; // arrêt courant
-    const bIdx = stopIdxOnTrace[targetIdx + 1] ?? null; // prochain arrêt
+    const aIdx = stopIdxOnTrace[targetIdx] ?? null;
+    const bIdx = stopIdxOnTrace[targetIdx + 1] ?? null;
     if (aIdx == null || bIdx == null) {
       upsertActiveSegmentOnMap([]);
       return;
     }
 
-    // ✅ si 2 arrêts "snap" au même point sur la trace => force un mini segment
-    let a = aIdx;
-    let b = bIdx;
-    if (a === b) {
-      if (b < officialLine.length - 1) b = b + 1;
-      else if (a > 0) a = a - 1;
-    }
-
-    const from = Math.min(a, b);
-    const to = Math.max(a, b);
+    const from = Math.min(aIdx, bIdx);
+    const to = Math.max(aIdx, bIdx);
 
     let seg = officialLine.slice(from, to + 1);
-
-    // ✅ garder direction "courant -> prochain"
-    if (a > b) seg = seg.slice().reverse();
+    if (aIdx > bIdx) seg = seg.slice().reverse();
 
     if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
     else upsertActiveSegmentOnMap([]);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, hasOfficial, officialLine, targetIdx, points.length, stopIdxOnTrace]);
 
   /* =========================
-     Map updates (curseur + caméra lissée + follow)
-     ✅ trace restante bleue (live)
-     ✅ follow STANDARD + rotation + moins saccadé
+     Stops + bandeau + ding + skip
   ========================= */
 
   useEffect(() => {
     if (!running) return;
-    if (!me) return;
-
-    const m = ensureMap();
-    if (!m) return;
-
-    // refresh trace restante (bleu) en live
-    try {
-      if (m.isStyleLoaded() && lineRef.current.length >= 2) {
-        const start = clamp(traceIdxRef.current ?? 0, 0, Math.max(0, lineRef.current.length - 2));
-        const remain = lineRef.current.slice(start);
-
-        const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
-        const data = buildLineGeoJSON(remain) as any;
-
-        if (src) src.setData(data);
-        else applyOverlays();
-      }
-    } catch {}
-
-    if (m.isStyleLoaded()) {
-      if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
-      if (!m.getLayer(MAP_ACTIVE_LAYER) && activeLineRef.current.length >= 2) applyOverlays();
-    }
-
-    // marker
-    const mk = ensureMeMarker();
-    mk?.setLngLat([me.lng, me.lat]);
-
-    if (!followRef.current) return;
-
-    // bearing cible (heading OU lastBearingRef calculé par déplacement)
-    const targetBearing = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
-
-    // ✅ lissage standard
-    camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.22);
-
-    const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
-
-    // Offset stable (même logique que recenter)
-    const h = m.getCanvas().clientHeight || window.innerHeight;
-    const usable = Math.max(280, h - 170);
-
-    // 🔥 Ajuste ici si tu veux remonter/descendre le point
-    const base = Math.round(usable * 0.42);
-    const extra = Math.round(clamp(kmh * 1.2, 0, 90));
-    const yOff = base + extra;
-
-    // ✅ Animation longue pour lisser les updates GPS (~1/sec)
-    const duration = 900;
-
-    m.easeTo({
-      center: [me.lng, me.lat],
-      zoom: targetZoom,
-      pitch: 55,
-      bearing: camBearRef.current,
-      offset: [0, yOff],
-      duration,
-      easing: (t: number) => t,
-      essential: true,
-    });
-  }, [running, me, heading]);
-
-  /* =========================
-     Stops + bandeau jaune + ding + skip arrêt manqué
-  ========================= */
-
-  useEffect(() => {
-    if (!running) return;
-    if (!me || !target) return;
+    const p = animPosRef.current ?? me;
+    if (!p || !target) return;
     if (finished) return;
 
-    if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, me);
-    lastMeRef.current = me;
+    if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
+    lastMeRef.current = p;
 
     if (initialDistToTargetRef.current == null && target) {
-      initialDistToTargetRef.current = haversineMeters(me, target);
+      initialDistToTargetRef.current = haversineMeters(p, target);
     }
 
-    const dStop = haversineMeters(me, target);
+    const dStop = haversineMeters(p, target);
     const rawStopM = Math.round(dStop);
 
     const dynamicMax = warnStopMeters();
@@ -1142,10 +1083,10 @@ export default function NavLive() {
       const next = targetIdx + 1;
       if (next < points.length) {
         const nextTarget = points[next] ?? null;
-        const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
+        const distNext = nextTarget ? Math.round(haversineMeters(p, nextTarget)) : 0;
 
         travelSinceTargetSetRef.current = 0;
-        initialDistToTargetRef.current = nextTarget ? haversineMeters(me, nextTarget) : null;
+        initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
         speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
@@ -1176,7 +1117,7 @@ export default function NavLive() {
   }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace]);
 
   /* =========================
-     UI plein écran
+     UI
   ========================= */
 
   const overlayBtn: React.CSSProperties = {
@@ -1355,9 +1296,7 @@ export default function NavLive() {
             GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
           </div>
         )}
-        {offRouteM != null && (
-          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>
-        )}
+        {offRouteM != null && <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>}
         {err && <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
       </div>
 
