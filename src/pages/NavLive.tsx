@@ -389,8 +389,11 @@ export default function NavLive() {
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
 
-  // curseur style GPS (point bleu)
+  // curseur style GPS (marker)
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
+
+  // ✅ on garde une ref vers l'élément de la flèche pour la rotation
+  const meArrowElRef = useRef<HTMLDivElement | null>(null);
 
   // on conserve toujours la dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
@@ -416,21 +419,57 @@ export default function NavLive() {
     return token;
   }
 
+  // ✅ rotation visuelle de la flèche (simple + stable)
+  function setArrowBearing(deg: number) {
+    const el = meArrowElRef.current;
+    if (!el) return;
+    el.style.transform = `rotate(${wrap360(deg)}deg)`;
+  }
+
   function ensureMeMarker() {
     const m = mapRef.current;
     if (!m) return null;
     if (meMarkerRef.current) return meMarkerRef.current;
 
-    // Blue dot style (Google-ish)
-    const el = document.createElement("div");
-    el.style.width = "18px";
-    el.style.height = "18px";
-    el.style.borderRadius = "50%";
-    el.style.background = "#1d4ed8";
-    el.style.border = "3px solid #ffffff";
-    el.style.boxShadow = "0 8px 18px rgba(0,0,0,.25)";
+    // ===== Curseur "GPS flèche" =====
+    const wrap = document.createElement("div");
+    wrap.style.width = "36px";
+    wrap.style.height = "36px";
+    wrap.style.display = "flex";
+    wrap.style.alignItems = "center";
+    wrap.style.justifyContent = "center";
+    wrap.style.pointerEvents = "none";
 
-    const mk = new mapboxgl.Marker({ element: el, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
+    // Flèche (triangle) + noyau
+    const arrow = document.createElement("div");
+    arrow.style.width = "0";
+    arrow.style.height = "0";
+    arrow.style.borderLeft = "10px solid transparent";
+    arrow.style.borderRight = "10px solid transparent";
+    arrow.style.borderBottom = "18px solid #1d4ed8"; // bleu
+    arrow.style.filter = "drop-shadow(0 10px 18px rgba(0,0,0,.30))";
+    arrow.style.transformOrigin = "50% 65%";
+    arrow.style.transform = "rotate(0deg)";
+
+    // petit noyau blanc pour effet "Google/Waze"
+    const core = document.createElement("div");
+    core.style.position = "absolute";
+    core.style.width = "10px";
+    core.style.height = "10px";
+    core.style.borderRadius = "999px";
+    core.style.background = "#ffffff";
+    core.style.boxShadow = "0 6px 14px rgba(0,0,0,.18)";
+
+    wrap.style.position = "relative";
+    wrap.appendChild(arrow);
+    wrap.appendChild(core);
+
+    meArrowElRef.current = arrow;
+
+    const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" })
+      .setLngLat([-73.0, 46.8])
+      .addTo(m);
+
     meMarkerRef.current = mk;
     return mk;
   }
@@ -606,13 +645,18 @@ export default function NavLive() {
 
     mapRef.current = m;
 
-    // ✅ si l’utilisateur bouge la map -> on désactive le follow (GPS centré)
-    m.on("dragstart", () => (followRef.current = false));
-    m.on("pitchstart", () => (followRef.current = false));
-    m.on("rotatestart", () => (followRef.current = false));
+    // ✅ follow OFF uniquement sur geste utilisateur (sinon easeTo déclenche des events)
+    m.on("dragstart", (e: any) => {
+      if (e?.originalEvent) followRef.current = false;
+    });
+    m.on("pitchstart", (e: any) => {
+      if (e?.originalEvent) followRef.current = false;
+    });
+    m.on("rotatestart", (e: any) => {
+      if (e?.originalEvent) followRef.current = false;
+    });
     m.on("zoomstart", (e: any) => {
-      // si c'est un zoom utilisateur, on coupe le follow
-      if (e && e.originalEvent) followRef.current = false;
+      if (e?.originalEvent) followRef.current = false;
     });
 
     m.on("load", () => {
@@ -642,7 +686,7 @@ export default function NavLive() {
 
   function recenter() {
     followRef.current = true;
-    tryEnterFullscreen(); // best-effort (fonctionne surtout si clic utilisateur)
+    tryEnterFullscreen();
     const m = mapRef.current;
     if (!m || !me) return;
 
@@ -702,7 +746,7 @@ export default function NavLive() {
     lineRef.current = line;
     stopsRef.current = pts;
 
-    // ✅ init active segment (vide au départ, sera calculé dès que me+target)
+    // ✅ init active segment
     activeLineRef.current = [];
 
     const m = ensureMap();
@@ -713,7 +757,7 @@ export default function NavLive() {
   }
 
   /* =========================
-     AUTO START (direct quand on ouvre /nav?circuit=...)
+     AUTO START
   ========================= */
 
   async function startAuto() {
@@ -724,7 +768,6 @@ export default function NavLive() {
       return;
     }
 
-    // audio unlock (peut être bloqué sans clic)
     try {
       await ding.unlock();
     } catch {}
@@ -785,7 +828,6 @@ export default function NavLive() {
     stopAll();
   }
 
-  // Auto-start au chargement de la page si circuitId présent
   useEffect(() => {
     if (!circuitId) return;
     if (running) return;
@@ -798,7 +840,7 @@ export default function NavLive() {
   }, [circuitId]);
 
   /* =========================
-     GPS tracking (lissage + heading)
+     GPS tracking
   ========================= */
 
   useEffect(() => {
@@ -875,18 +917,15 @@ export default function NavLive() {
     const from = Math.min(nearMe.idx, stopIdx);
     const to = Math.max(nearMe.idx, stopIdx);
 
-    // slice propre (au moins 2 points)
     const seg = officialLine.slice(from, to + 1);
-    if (seg.length >= 2) {
-      upsertActiveSegmentOnMap(seg);
-    } else {
-      upsertActiveSegmentOnMap([]);
-    }
+    if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
+    else upsertActiveSegmentOnMap([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, me, hasOfficial, officialLine, targetIdx, points.length, stopIdxOnTrace]);
 
   /* =========================
      Map updates (curseur + caméra lissée + follow)
+     ✅ + flèche orientée + look-ahead (GPS style)
   ========================= */
 
   useEffect(() => {
@@ -896,7 +935,6 @@ export default function NavLive() {
     const m = ensureMap();
     if (!m) return;
 
-    // overlays peuvent être perdus => re-apply si besoin
     if (m.isStyleLoaded()) {
       if (!m.getLayer(MAP_TRACE_LAYER) && lineRef.current.length >= 2) applyOverlays();
       if (!m.getLayer(MAP_ACTIVE_LAYER) && activeLineRef.current.length >= 2) applyOverlays();
@@ -905,38 +943,46 @@ export default function NavLive() {
     const mk = ensureMeMarker();
     mk?.setLngLat([me.lng, me.lat]);
 
-    // si l'utilisateur a bougé la map, on ne force pas la caméra
-    if (!followRef.current) return;
-
-    // camera smoothing
+    // bearing cible
     const targetBearing = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
+    // ✅ flèche orientée (même si follow off, la flèche suit ton heading)
+    setArrowBearing(targetBearing);
+
+    if (!followRef.current) return;
+
+    // smoothing bearing
     const now = Date.now();
-    const MIN_MS = 180; // plus fluide
+    const MIN_MS = 180;
     if (now - camLastAtRef.current < MIN_MS) {
       camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
       return;
     }
     camLastAtRef.current = now;
 
-    const lastC = camLastCenterRef.current;
-    if (lastC) {
-      const dm = haversineMeters(lastC, me);
-      if (dm < 0.6) {
-        camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
-        return;
-      }
-    }
     camLastCenterRef.current = me;
-
     camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.18);
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
+    // ✅ LOOK-AHEAD: centre décalé pour que le curseur soit plus bas à l’écran
+    // Plus tu vas vite, plus on "regarde" loin.
+    let centerLngLat: [number, number] = [me.lng, me.lat];
+    try {
+      const pt = m.project([me.lng, me.lat]); // pixels écran
+      const base = 140; // offset constant (look-ahead)
+      const extra = clamp(kmh * 1.8, 0, 160); // + offset selon vitesse
+      const yOff = base + extra;
+      const shifted = m.unproject([pt.x, pt.y + yOff]); // +Y => centre plus bas => tu vois plus loin devant
+      centerLngLat = [shifted.lng, shifted.lat];
+    } catch {
+      centerLngLat = [me.lng, me.lat];
+    }
+
     m.easeTo({
-      center: [me.lng, me.lat],
+      center: centerLngLat,
       zoom: targetZoom,
       pitch: 55,
       bearing: camBearRef.current,
@@ -948,7 +994,6 @@ export default function NavLive() {
 
   /* =========================
      Stops + bandeau jaune + ding + skip arrêt manqué
-     (annonces d’arrêt conservées)
   ========================= */
 
   useEffect(() => {
@@ -956,13 +1001,9 @@ export default function NavLive() {
     if (!me || !target) return;
     if (finished) return;
 
-    // cumul déplacement depuis le dernier changement d'arrêt
-    if (lastMeRef.current) {
-      travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, me);
-    }
+    if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, me);
     lastMeRef.current = me;
 
-    // initial distance au target (si pas encore set)
     if (initialDistToTargetRef.current == null && target) {
       initialDistToTargetRef.current = haversineMeters(me, target);
     }
@@ -974,7 +1015,6 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // Mode intelligent: arrêt manqué (si trace existe)
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
 
@@ -993,7 +1033,6 @@ export default function NavLive() {
           speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
           setTargetIdx(next);
 
-          // reset anti-finish
           travelSinceTargetSetRef.current = 0;
           initialDistToTargetRef.current = null;
 
@@ -1010,13 +1049,11 @@ export default function NavLive() {
       }
     }
 
-    // hors zone
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    // dans zone -> bandeau + annonce 1x
     if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
@@ -1031,7 +1068,6 @@ export default function NavLive() {
       }
     }
 
-    // ding à 10m
     if (rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
@@ -1039,12 +1075,9 @@ export default function NavLive() {
       }
     }
 
-    // arrivé arrêt -> prochain (protège arrêts trop proches)
     const initD = initialDistToTargetRef.current;
     const allowArrive =
-      initD == null ||
-      initD > ARRIVE_STOP_M + ARRIVE_EPS_M ||
-      travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+      initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
 
     if (dStop <= ARRIVE_STOP_M && allowArrive) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
@@ -1054,7 +1087,6 @@ export default function NavLive() {
         const nextTarget = points[next] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(me, nextTarget)) : 0;
 
-        // reset anti-finish avant switch
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(me, nextTarget) : null;
 
@@ -1152,7 +1184,7 @@ export default function NavLive() {
       {/* MAP FULLSCREEN */}
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* TOP BAR: BACK + STATUS */}
+      {/* TOP BAR */}
       <div style={topBar}>
         <div style={backWrap}>
           <button
@@ -1189,14 +1221,7 @@ export default function NavLive() {
         <button style={overlayBtn} onClick={zoomOut} aria-label="Zoom out" title="Zoom -">
           −
         </button>
-
-        {/* ✅ Recentrer + repasser en mode GPS */}
-        <button
-          style={{ ...overlayBtn, fontSize: 18 }}
-          onClick={recenter}
-          aria-label="Recentrer"
-          title="Recentrer"
-        >
+        <button style={{ ...overlayBtn, fontSize: 18 }} onClick={recenter} aria-label="Recentrer" title="Recentrer">
           ⤾
         </button>
       </div>
@@ -1269,7 +1294,7 @@ export default function NavLive() {
           );
         })()}
 
-      {/* BOTTOM PANEL: prochain arrêt */}
+      {/* BOTTOM PANEL */}
       <div style={bottomPanel}>
         <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>
           Prochain arrêt : {Math.min(targetIdx + 1, points.length)} / {points.length}
