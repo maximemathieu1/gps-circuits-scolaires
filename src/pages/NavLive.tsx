@@ -281,6 +281,31 @@ function lerpAngleDeg(from: number, to: number, t: number) {
 }
 
 /* =========================
+   Follow offset helper (presque en bas)
+========================= */
+
+function computeFollowOffsetY(map: mapboxgl.Map, kmh: number) {
+  const h = map.getCanvas().clientHeight || window.innerHeight;
+
+  // Approx UI overlays (top bar + banner + bottom panel + bouton)
+  const topUi = 110;
+  const bottomUi = 230;
+
+  const usable = Math.max(280, h - topUi - bottomUi);
+
+  // ✅ presque en bas : plus le ratio est haut, plus le curseur descend
+  // 0.62~0.72 => très bas. Ici 0.68.
+  const base = Math.round(usable * 0.68);
+
+  // Un peu plus bas quand tu roules vite (look-ahead plus long)
+  const extra = Math.round(clamp(kmh * 1.8, 0, 170));
+
+  // Clamp final pour éviter des cas extrêmes
+  const y = base + extra;
+  return clamp(y, Math.round(h * 0.30), Math.round(h * 0.55));
+}
+
+/* =========================
    Main
 ========================= */
 
@@ -472,9 +497,7 @@ export default function NavLive() {
 
     meArrowElRef.current = arrow;
 
-    const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" })
-      .setLngLat([-73.0, 46.8])
-      .addTo(m);
+    const mk = new mapboxgl.Marker({ element: wrap, anchor: "center" }).setLngLat([-73.0, 46.8]).addTo(m);
 
     meMarkerRef.current = mk;
     return mk;
@@ -571,7 +594,7 @@ export default function NavLive() {
       }
     }
 
-    // ✅ ACTIVE SEGMENT (au-dessus de la trace restante) — VERT navigation
+    // ✅ ACTIVE SEGMENT (au-dessus de la trace restante) — ROSE (pour éviter routes vertes)
     if (active && active.length >= 2) {
       const geojsonA = buildLineGeoJSON(active);
       try {
@@ -713,18 +736,15 @@ export default function NavLive() {
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
-    // ✅ Offset vertical (curseur plus bas, plus de route devant)
-    const h = m.getCanvas().clientHeight || window.innerHeight;
-    const base = Math.round(h * 0.28); // ajuste 0.24 - 0.34 au besoin
-    const extra = Math.round(clamp(kmh * 2.0, 0, 180));
-    const yOff = base + extra;
+    // ✅ Offset vertical très bas (presque en bas)
+    const yOff = computeFollowOffsetY(m, kmh);
 
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
       pitch: 55,
       bearing: wrap360((headingRef.current ?? lastBearingRef.current) || 0),
-      offset: [0, -yOff],
+      offset: [0, -yOff], // ✅ NEGATIF => curseur plus BAS
       duration: 550,
       easing: (t: number) => t,
       essential: true,
@@ -939,7 +959,7 @@ export default function NavLive() {
 
   /* =========================
      Active segment (arrêt courant -> prochain arrêt)
-     ✅ segment vert seulement entre arrêts consécutifs
+     ✅ segment ROSE seulement entre arrêts consécutifs
   ========================= */
 
   useEffect(() => {
@@ -976,7 +996,7 @@ export default function NavLive() {
      Map updates (curseur + caméra lissée + follow)
      ✅ + flèche orientée
      ✅ + trace restante bleue (live)
-     ✅ + follow abaissé (offset)
+     ✅ + follow presque en bas (offset)
   ========================= */
 
   useEffect(() => {
@@ -1032,18 +1052,15 @@ export default function NavLive() {
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
-    // ✅ Offset vertical pour avoir plus de route/arrêts devant (curseur plus bas à l’écran)
-    const h = m.getCanvas().clientHeight || window.innerHeight;
-    const base = Math.round(h * 0.28); // ajuste 0.24-0.34 au besoin
-    const extra = Math.round(clamp(kmh * 2.0, 0, 180));
-    const yOff = base + extra;
+    // ✅ Offset vertical très bas (presque en bas)
+    const yOff = computeFollowOffsetY(m, kmh);
 
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
       pitch: 55,
       bearing: camBearRef.current,
-      offset: [0, -yOff], // ✅ NEGATIF => curseur plus BAS
+      offset: [0, -yOff],
       duration: 650,
       easing: (t: number) => t,
       essential: true,
@@ -1266,8 +1283,7 @@ export default function NavLive() {
             fontSize: 14,
           }}
         >
-          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"}{" "}
-          {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}
+          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}
         </div>
       </div>
 
@@ -1331,9 +1347,7 @@ export default function NavLive() {
 
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                  <div style={{ fontSize: 13, opacity: 0.9 }}>
-                    {stopBanner.label ?? "Zone d’embarquement / débarquement"}
-                  </div>
+                  <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                 </div>
               </div>
 
@@ -1357,9 +1371,7 @@ export default function NavLive() {
         <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>
           Prochain arrêt : {Math.min(targetIdx + 1, points.length)} / {points.length}
         </div>
-        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>
-          {target?.label ? target.label : "—"}
-        </div>
+        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>{target?.label ? target.label : "—"}</div>
         {acc != null && (
           <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>
             GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
