@@ -280,6 +280,21 @@ function lerpAngleDeg(from: number, to: number, t: number) {
   return wrap360(a + diff * t);
 }
 
+// ✅ Bearing par déplacement (quand heading est null)
+function bearingBetween(a: LatLng, b: LatLng) {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const dLon = toRad(b.lng - a.lng);
+
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  const brng = toDeg(Math.atan2(y, x));
+  return wrap360(brng);
+}
+
 /* =========================
    Main
 ========================= */
@@ -351,8 +366,6 @@ export default function NavLive() {
 
   // Camera smoothing refs
   const camBearRef = useRef(0);
-  const lastCamMoveAtRef = useRef(0);
-  const lastCamMeRef = useRef<LatLng | null>(null);
 
   // Follow mode (centré GPS)
   const followRef = useRef(true);
@@ -669,7 +682,7 @@ export default function NavLive() {
     } catch {}
   }
 
-  // ✅ recenter propre (pas de code stray)
+  // ✅ recenter propre
   function recenter() {
     followRef.current = true;
     tryEnterFullscreen();
@@ -685,11 +698,10 @@ export default function NavLive() {
     const usable = Math.max(280, h - 170);
 
     // 🔥 Ajuste ici si tu veux remonter/descendre le point:
-    // 0.48 = plus haut à l'écran
-    // 0.52 = bon milieu
+    // 0.42 = plus haut
+    // 0.52 = milieu
     // 0.56 = plus bas
     const base = Math.round(usable * 0.42);
-
     const extra = Math.round(clamp(kmh * 1.2, 0, 90));
     const yOff = base + extra;
 
@@ -698,7 +710,7 @@ export default function NavLive() {
       zoom: targetZoom,
       pitch: 55,
       bearing: wrap360((headingRef.current ?? lastBearingRef.current) || 0),
-      offset: [0, yOff], // ✅ POSITIF = curseur plus bas
+      offset: [0, yOff],
       duration: 420,
       easing: (t: number) => t,
       essential: true,
@@ -854,7 +866,9 @@ export default function NavLive() {
         const v = p.speed ?? null;
         const alpha = v != null ? clamp(0.18 + v * 0.02, 0.18, 0.38) : 0.22;
 
-        const sm = smoothPos(meSmoothRef.current, raw, alpha);
+        const prev = meSmoothRef.current;
+        const sm = smoothPos(prev, raw, alpha);
+
         meSmoothRef.current = sm;
         setMe(sm);
 
@@ -868,10 +882,18 @@ export default function NavLive() {
         if (hd != null && Number.isFinite(hd)) {
           setHeading(hd);
           headingRef.current = hd;
-          lastBearingRef.current = hd;
+          lastBearingRef.current = wrap360(hd);
         } else {
           setHeading(null);
           headingRef.current = null;
+
+          // ✅ heading absent => bearing par déplacement
+          if (prev) {
+            const d = haversineMeters(prev, sm);
+            if (d >= 1.5) {
+              lastBearingRef.current = bearingBetween(prev, sm);
+            }
+          }
         }
       },
       (m) => setErr(m)
@@ -932,13 +954,21 @@ export default function NavLive() {
       return;
     }
 
-    const from = Math.min(aIdx, bIdx);
-    const to = Math.max(aIdx, bIdx);
+    // ✅ si 2 arrêts "snap" au même point sur la trace => force un mini segment
+    let a = aIdx;
+    let b = bIdx;
+    if (a === b) {
+      if (b < officialLine.length - 1) b = b + 1;
+      else if (a > 0) a = a - 1;
+    }
+
+    const from = Math.min(a, b);
+    const to = Math.max(a, b);
 
     let seg = officialLine.slice(from, to + 1);
 
     // ✅ garder direction "courant -> prochain"
-    if (aIdx > bIdx) seg = seg.slice().reverse();
+    if (a > b) seg = seg.slice().reverse();
 
     if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
     else upsertActiveSegmentOnMap([]);
@@ -948,7 +978,7 @@ export default function NavLive() {
   /* =========================
      Map updates (curseur + caméra lissée + follow)
      ✅ trace restante bleue (live)
-     ✅ follow moins saccadé (throttle + deadzone)
+     ✅ follow STANDARD + rotation + moins saccadé
   ========================= */
 
   useEffect(() => {
@@ -983,42 +1013,34 @@ export default function NavLive() {
 
     if (!followRef.current) return;
 
-    // ✅ anti-saccade: throttle + deadzone
-    const now = Date.now();
-    const MIN_INTERVAL_MS = 200;
-    if (now - lastCamMoveAtRef.current < MIN_INTERVAL_MS) return;
-
-    const lastMe = lastCamMeRef.current;
-    if (lastMe) {
-      const d = haversineMeters(lastMe, me);
-      if (d < 1.2) return;
-    }
-    lastCamMoveAtRef.current = now;
-    lastCamMeRef.current = me;
-
-    // bearing cible + lissé
+    // bearing cible (heading OU lastBearingRef calculé par déplacement)
     const targetBearing = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
-    camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.12);
+
+    // ✅ lissage standard
+    camBearRef.current = lerpAngleDeg(camBearRef.current, targetBearing, 0.22);
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
     const targetZoom = kmh >= 60 ? 17.3 : kmh >= 25 ? 16.7 : 16.2;
 
-    // ✅ Offset stable (même logique que recenter)
+    // Offset stable (même logique que recenter)
     const h = m.getCanvas().clientHeight || window.innerHeight;
     const usable = Math.max(280, h - 170);
-    const base = Math.round(usable * 0.52);
+
+    // 🔥 Ajuste ici si tu veux remonter/descendre le point
+    const base = Math.round(usable * 0.42);
     const extra = Math.round(clamp(kmh * 1.2, 0, 90));
     const yOff = base + extra;
 
-    const duration = kmh < 5 ? 260 : 380;
+    // ✅ Animation longue pour lisser les updates GPS (~1/sec)
+    const duration = 900;
 
     m.easeTo({
       center: [me.lng, me.lat],
       zoom: targetZoom,
       pitch: 55,
       bearing: camBearRef.current,
-      offset: [0, yOff], // ✅ POSITIF
+      offset: [0, yOff],
       duration,
       easing: (t: number) => t,
       essential: true,
