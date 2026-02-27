@@ -688,7 +688,7 @@ export default function NavLive() {
     // 0.48 = plus haut à l'écran
     // 0.52 = bon milieu
     // 0.56 = plus bas
-    const base = Math.round(usable * 0.45);
+    const base = Math.round(usable * 0.42);
 
     const extra = Math.round(clamp(kmh * 1.2, 0, 90));
     const yOff = base + extra;
