@@ -11,6 +11,52 @@ type TCode = "B" | "C" | "S";
 const LABEL: Record<TCode, string> = { B: "Breton", C: "Champagne", S: "Sécuritaire" };
 type Circuit = { id: string; nom: string };
 
+// ✅ iPhone/iOS audio unlock helper (inline, simple)
+async function unlockIOSAudioOnce() {
+  // 1) Unlock AudioContext (ding)
+  try {
+    const AC: any = window.AudioContext || (window as any).webkitAudioContext;
+    if (AC) {
+      const ctx = new AC();
+      if (ctx.state === "suspended") await ctx.resume();
+
+      // tiny beep (very low volume) to "prime" iOS audio
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      g.gain.value = 0.001;
+      o.frequency.value = 880;
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+
+      setTimeout(() => {
+        try {
+          o.stop();
+          ctx.close?.();
+        } catch {}
+      }, 40);
+    }
+  } catch {}
+
+  // 2) Prime speechSynthesis (voice)
+  try {
+    const synth = window.speechSynthesis;
+    synth?.getVoices?.();
+
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 1.0;
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    window.speechSynthesis.speak(u);
+
+    setTimeout(() => {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }, 80);
+  } catch {}
+}
+
 export default function Portal() {
   const nav = useNavigate();
   const { ready, isAuthed } = useAuth();
@@ -43,7 +89,7 @@ export default function Portal() {
   useEffect(() => {
     if (!ready) return;
     if (view !== "gps") return;
-    load().catch((e) => alert(e.message));
+    load().catch((e: any) => alert(e?.message || "Erreur chargement."));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transporteur, isAuthed, ready, view]);
 
@@ -51,9 +97,14 @@ export default function Portal() {
     nav("/login", { state: { redirectTo } });
   }
 
-  function goNav() {
+  // ✅ GPS Naviguer = unlock iPhone audio + go nav
+  async function goNav() {
     if (!isAuthed) return goLogin("/");
     if (!circuitId) return;
+
+    // iOS: must happen on user tap
+    await unlockIOSAudioOnce();
+
     nav(`/nav?circuit=${encodeURIComponent(circuitId)}&t=${transporteur}`);
   }
 
@@ -112,11 +163,9 @@ export default function Portal() {
         {view === "home" ? (
           <>
             <div style={card}>
-  <h1 style={h1}>Espace Conducteur</h1>
-  <div style={{ ...muted, marginTop: 4 }}>
-    Navigation & gestion des circuits scolaires
-  </div>
-</div>
+              <h1 style={h1}>Espace Conducteur</h1>
+              <div style={{ ...muted, marginTop: 4 }}>Navigation & gestion des circuits scolaires</div>
+            </div>
 
             {!ready ? null : !isAuthed ? (
               <div style={card}>
@@ -127,35 +176,35 @@ export default function Portal() {
             ) : null}
 
             <div style={card}>
-  <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
-    <button style={circlePrimary} onClick={() => setView("gps")} title="Navigation guidée">
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NAVIGATION</div>
-        <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8, opacity: 0.95 }}>GUIDÉE · GPS</div>
-      </div>
-    </button>
+              <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
+                <button style={circlePrimary} onClick={() => setView("gps")} title="Navigation guidée">
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NAVIGATION</div>
+                    <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8, opacity: 0.95 }}>GUIDÉE · GPS</div>
+                  </div>
+                </button>
 
-    <button style={circleWarn} onClick={goRecord} title="Nouveau / Mettre à jour">
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NOUVEAU</div>
-        <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8 }}>MISE À JOUR</div>
-      </div>
-    </button>
-  </div>
+                <button style={circleWarn} onClick={goRecord} title="Nouveau / Mettre à jour">
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NOUVEAU</div>
+                    <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8 }}>MISE À JOUR</div>
+                  </div>
+                </button>
+              </div>
 
-  {/* Ligne valorisante */}
-  <div
-    style={{
-      textAlign: "center",
-      marginTop: 24,
-      fontWeight: 600,
-      fontSize: 15,
-      color: "#374151",
-    }}
-  >
-    Vous transportez plus que des élèves. Vous transportez l’avenir.
-  </div>
-</div>
+              {/* Ligne valorisante */}
+              <div
+                style={{
+                  textAlign: "center",
+                  marginTop: 24,
+                  fontWeight: 600,
+                  fontSize: 15,
+                  color: "#374151",
+                }}
+              >
+                Vous transportez plus que des élèves. Vous transportez l’avenir.
+              </div>
+            </div>
           </>
         ) : (
           /* GPS: écran remplaçant (transporteur + circuit + bouton rond) */
@@ -181,12 +230,7 @@ export default function Portal() {
 
                 <div>
                   <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
-                  <select
-                    style={select}
-                    value={circuitId}
-                    onChange={(e) => setCircuitId(e.target.value)}
-                    disabled={!canUse}
-                  >
+                  <select style={select} value={circuitId} onChange={(e) => setCircuitId(e.target.value)} disabled={!canUse}>
                     {!canUse ? (
                       <option value="">(connexion requise)</option>
                     ) : circuits.length ? (
