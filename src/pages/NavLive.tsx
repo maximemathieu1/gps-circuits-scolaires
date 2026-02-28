@@ -116,6 +116,27 @@ function nearestLineIndex(me: LatLng, line: [number, number][]) {
   return { idx: bestIdx, dist: best };
 }
 
+/** ✅ index le plus proche mais CONTRAINT (pour éviter de "snapper" sur un autre croisement après stop 2, 3...) */
+function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: number, end: number) {
+  if (!line || line.length === 0) return null;
+  const s = clamp(Math.floor(start), 0, line.length - 1);
+  const e = clamp(Math.floor(end), 0, line.length - 1);
+  const a = Math.min(s, e);
+  const b = Math.max(s, e);
+
+  let best = Infinity;
+  let bestIdx = a;
+
+  for (let i = a; i <= b; i++) {
+    const d = haversineMeters(me, { lat: line[i][0], lng: line[i][1] });
+    if (d < best) {
+      best = d;
+      bestIdx = i;
+    }
+  }
+  return { idx: bestIdx, dist: best };
+}
+
 /** Arrondi “style GPS” */
 function roundMetersForDisplay(m: number) {
   const mm = Math.max(0, Math.round(m));
@@ -135,7 +156,7 @@ function fmtDist(m: number) {
 }
 
 /* =========================
-   Ding + voix (iOS: nécessite un tap)
+   Ding + voix (arrêts seulement)
 ========================= */
 
 function useDing() {
@@ -264,7 +285,7 @@ function wrap360(deg: number) {
   return d;
 }
 
-/** bearing à partir du mouvement (fallback quand heading GPS est null) */
+/** ✅ bearing à partir du mouvement (fallback quand heading GPS est null) */
 function bearingDeg(a: LatLng, b: LatLng) {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const toDeg = (r: number) => (r * 180) / Math.PI;
@@ -282,6 +303,7 @@ function bearingDeg(a: LatLng, b: LatLng) {
 }
 
 function smoothAngle(prev: number, next: number) {
+  // évite les sauts 359 -> 0
   const delta = ((next - prev + 540) % 360) - 180;
   return prev + delta;
 }
@@ -293,13 +315,44 @@ function smoothAngle(prev: number, next: number) {
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
-  const { speak, stopAll } = useSpeaker();
+
+  const speaker = useSpeaker();
   const ding = useDing();
 
   const circuitId = q.get("circuit") || "";
 
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
+
+  // ✅ Audio ON/OFF
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const audioEnabledRef = useRef(false);
+
+  const speak = (text: string, opts?: { cooldownMs?: number; interrupt?: boolean; dedupe?: boolean }) => {
+    if (!audioEnabledRef.current) return;
+    speaker.speak(text, opts);
+  };
+  const stopAll = () => speaker.stopAll();
+
+  async function toggleAudio() {
+    const next = !audioEnabledRef.current;
+    audioEnabledRef.current = next;
+    setAudioEnabled(next);
+
+    if (next) {
+      // iOS: unlock audio context via user gesture
+      try {
+        await ding.unlock();
+      } catch {}
+      // confirmation courte
+      try {
+        ding.play();
+      } catch {}
+      speak("Audio activé.", { cooldownMs: 0, interrupt: true, dedupe: false });
+    } else {
+      stopAll();
+    }
+  }
 
   // GPS (état affichage)
   const [me, setMe] = useState<LatLng | null>(null);
@@ -308,13 +361,9 @@ export default function NavLive() {
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Audio (iOS exige un tap)
-  const [audioOn, setAudioOn] = useState(false);
-  const audioOnRef = useRef(false);
-
   // GPS refs (animation fluide)
-  const targetPosRef = useRef<LatLng | null>(null);
-  const animPosRef = useRef<LatLng | null>(null);
+  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
+  const animPosRef = useRef<LatLng | null>(null); // position animée (60fps)
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
@@ -339,19 +388,16 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
-    show: false,
-    meters: 0,
-    label: null,
-    max: 150,
-  });
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
+    { show: false, meters: 0, label: null, max: 150 }
+  );
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (index du point le + proche)
+  // Progression sur trace (idx nearest)
   const traceIdxRef = useRef<number>(0);
 
   // Anti-finish si arrêts trop proches
@@ -363,7 +409,6 @@ export default function NavLive() {
 
   // Follow mode
   const followRef = useRef(true);
-  const followResumeTimerRef = useRef<number | null>(null);
 
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
@@ -387,25 +432,20 @@ export default function NavLive() {
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
+
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // refs data (source of truth pour Mapbox)
+  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
-  // Sources/Layers
-  const MAP_ROUTE_REMAIN_SRC = "route-remain-src";
-  const MAP_ROUTE_REMAIN_LINE = "route-remain-line";
-  const MAP_ROUTE_REMAIN_HALO = "route-remain-halo";
-
-  const MAP_ROUTE_DONE_SRC = "route-done-src";
-  const MAP_ROUTE_DONE_LINE = "route-done-line"; // on va le rendre invisible => “disparaît”
-
-  const MAP_ARROWS_LAYER = "route-arrows";
+  const MAP_REMAIN_SRC = "remain-src";
+  const MAP_REMAIN_LAYER = "remain-layer";
+  const MAP_REMAIN_HALO = "remain-halo";
 
   const MAP_STOPS_SRC = "stops-src";
-  const MAP_STOPS_CIRCLE = "stops-circle";
-  const MAP_STOPS_LABEL = "stops-label";
+  const MAP_STOPS_LAYER = "stops-layer";
+  const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
   function ensureMapToken() {
     const token = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
@@ -446,176 +486,147 @@ export default function NavLive() {
     return mk;
   }
 
+  function safeRemoveLayer(m: mapboxgl.Map, id: string) {
+    try {
+      if (m.getLayer(id)) m.removeLayer(id);
+    } catch {}
+  }
+  function safeRemoveSource(m: mapboxgl.Map, id: string) {
+    try {
+      if (m.getSource(id)) m.removeSource(id);
+    } catch {}
+  }
+
   function buildLineGeoJSON(line: [number, number][]) {
-    const coords: [number, number][] = (line ?? []).map(([lat, lng]) => [lng, lat]);
+    const coords: [number, number][] = line.map(([lat, lng]) => [lng, lat]);
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[]) {
+  // ✅ stops: "active" + "num"
+  function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
     return {
       type: "FeatureCollection" as const,
-      features: (pts ?? []).map((p, i) => ({
+      features: pts.map((p, i) => ({
         type: "Feature" as const,
-        properties: { idx: i, n: String(i + 1), label: p.label ?? "" },
+        properties: {
+          idx: i,
+          num: String(i + 1),
+          label: p.label ?? "",
+          active: i === activeIdx ? 1 : 0,
+        },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
   }
 
-  // Crée/garantit overlays UNE FOIS (stable mobile/reload)
-  function ensureOverlays() {
+  function applyOverlays() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
 
-    // Route remaining (bleu)
-    if (!m.getSource(MAP_ROUTE_REMAIN_SRC)) {
-      const dummy = buildLineGeoJSON([
-        [0, 0],
-        [0, 0],
-      ]) as any;
-      m.addSource(MAP_ROUTE_REMAIN_SRC, { type: "geojson", data: dummy });
-    }
-    if (!m.getLayer(MAP_ROUTE_REMAIN_HALO)) {
-      m.addLayer({
-        id: MAP_ROUTE_REMAIN_HALO,
-        type: "line",
-        source: MAP_ROUTE_REMAIN_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#93c5fd", "line-width": 14, "line-opacity": 0.35 },
-      });
-    }
-    if (!m.getLayer(MAP_ROUTE_REMAIN_LINE)) {
-      m.addLayer({
-        id: MAP_ROUTE_REMAIN_LINE,
-        type: "line",
-        source: MAP_ROUTE_REMAIN_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#2563eb", "line-width": 8, "line-opacity": 0.95 },
-      });
+    const fullLine = lineRef.current;
+    const pts = stopsRef.current;
+
+    // Clean
+    safeRemoveLayer(m, MAP_REMAIN_LAYER);
+    safeRemoveLayer(m, MAP_REMAIN_HALO);
+    safeRemoveSource(m, MAP_REMAIN_SRC);
+
+    safeRemoveLayer(m, MAP_STOPS_NUM_LAYER);
+    safeRemoveLayer(m, MAP_STOPS_LAYER);
+    safeRemoveSource(m, MAP_STOPS_SRC);
+
+    // ✅ TRACE ACTIVE PLUS ÉPAISSE + HALO
+    if (fullLine && fullLine.length >= 2) {
+      const geojson = buildLineGeoJSON(fullLine);
+      try {
+        m.addSource(MAP_REMAIN_SRC, { type: "geojson", data: geojson as any });
+
+        m.addLayer({
+          id: MAP_REMAIN_HALO,
+          type: "line",
+          source: MAP_REMAIN_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#93c5fd", "line-width": 18, "line-opacity": 0.26 },
+        });
+
+        m.addLayer({
+          id: MAP_REMAIN_LAYER,
+          type: "line",
+          source: MAP_REMAIN_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#2563eb", "line-width": 10, "line-opacity": 0.98 },
+        });
+      } catch (e) {
+        console.error("Mapbox apply remain failed:", e);
+      }
     }
 
-    // Route done (consommée) => DISPARAÎT (opacity 0)
-    if (!m.getSource(MAP_ROUTE_DONE_SRC)) {
-      const dummy = buildLineGeoJSON([
-        [0, 0],
-        [0, 0],
-      ]) as any;
-      m.addSource(MAP_ROUTE_DONE_SRC, { type: "geojson", data: dummy });
-    }
-    if (!m.getLayer(MAP_ROUTE_DONE_LINE)) {
-      m.addLayer({
-        id: MAP_ROUTE_DONE_LINE,
-        type: "line",
-        source: MAP_ROUTE_DONE_SRC,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#2563eb",
-          "line-width": 10,
-          "line-opacity": 0.0, // <- disparaît
-        },
-      });
-    }
+    // ✅ STOPS: TOUS GROS ET VISIBLES (comme l'actif) + NUMÉROS
+    if (pts && pts.length > 0) {
+      const fc = buildStopsGeoJSON(pts, targetIdx);
+      try {
+        m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
-    // Flèches directionnelles sur la route remaining
-    // (navigation-day-v1 inclut en général l’icône "oneway-white-small")
-    if (!m.getLayer(MAP_ARROWS_LAYER)) {
-      m.addLayer({
-        id: MAP_ARROWS_LAYER,
-        type: "symbol",
-        source: MAP_ROUTE_REMAIN_SRC,
-        layout: {
-          "symbol-placement": "line",
-          "symbol-spacing": 80,
-          "icon-image": "oneway-white-small",
-          "icon-size": 0.9,
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
-          "icon-rotation-alignment": "map",
-        },
-        paint: {
-          "icon-opacity": 0.9,
-        },
-      });
-    }
+        // Cercles (tous gros)
+        m.addLayer({
+          id: MAP_STOPS_LAYER,
+          type: "circle",
+          source: MAP_STOPS_SRC,
+          paint: {
+            // tous gros + actif un peu plus
+            "circle-radius": ["case", ["==", ["get", "active"], 1], 18, 16],
+            // actif rouge vif, autres foncés mais ultra visibles
+            "circle-color": ["case", ["==", ["get", "active"], 1], "#ff0000", "#111827"],
+            // stroke épais partout
+            "circle-stroke-width": ["case", ["==", ["get", "active"], 1], 7, 7],
+            "circle-stroke-color": ["case", ["==", ["get", "active"], 1], "#ffffff", "#ffffff"],
+            "circle-opacity": 0.98,
+          },
+        });
 
-    // Stops (tous gros pareil)
-    if (!m.getSource(MAP_STOPS_SRC)) {
-      m.addSource(MAP_STOPS_SRC, { type: "geojson", data: buildStopsGeoJSON([]) as any });
-    }
-
-    if (!m.getLayer(MAP_STOPS_CIRCLE)) {
-      m.addLayer({
-        id: MAP_STOPS_CIRCLE,
-        type: "circle",
-        source: MAP_STOPS_SRC,
-        paint: {
-          "circle-radius": 16,
-          "circle-color": "#dc2626",
-          "circle-stroke-width": 4,
-          "circle-stroke-color": "#ffffff",
-          "circle-opacity": 0.98,
-        },
-      });
-    }
-
-    if (!m.getLayer(MAP_STOPS_LABEL)) {
-      m.addLayer({
-        id: MAP_STOPS_LABEL,
-        type: "symbol",
-        source: MAP_STOPS_SRC,
-        layout: {
-          "text-field": ["get", "n"],
-          "text-size": 16,
-          "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
-          "text-allow-overlap": true,
-          "text-ignore-placement": true,
-        },
-        paint: {
-          "text-color": "#ffffff",
-        },
-      });
+        // Numéros (tous grands)
+        m.addLayer({
+          id: MAP_STOPS_NUM_LAYER,
+          type: "symbol",
+          source: MAP_STOPS_SRC,
+          layout: {
+            "text-field": ["get", "num"],
+            "text-size": ["case", ["==", ["get", "active"], 1], 18, 16],
+            "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+            "text-allow-overlap": true,
+            "text-ignore-placement": true,
+            "text-anchor": "center",
+          },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(0,0,0,0.65)",
+            "text-halo-width": 1.8,
+          },
+        });
+      } catch (e) {
+        console.error("Mapbox apply stops failed:", e);
+      }
     }
   }
 
-  function setRouteRemain(line: [number, number][]) {
+  function upsertStopsOnMap() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
-    ensureOverlays();
-    const src = m.getSource(MAP_ROUTE_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
-    src?.setData(buildLineGeoJSON(line) as any);
-  }
 
-  function setRouteDone(line: [number, number][]) {
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
-    ensureOverlays();
-    const src = m.getSource(MAP_ROUTE_DONE_SRC) as mapboxgl.GeoJSONSource | undefined;
-    src?.setData(buildLineGeoJSON(line) as any);
-  }
+    try {
+      const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
+      const data = buildStopsGeoJSON(stopsRef.current, targetIdx) as any;
 
-  function setStopsData(pts: { lat: number; lng: number; label?: string | null }[]) {
-    const m = mapRef.current;
-    if (!m || !m.isStyleLoaded()) return;
-    ensureOverlays();
-    const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
-    src?.setData(buildStopsGeoJSON(pts) as any);
-  }
-
-  function syncMapNow() {
-    // route consommée = 0..traceIdxRef
-    const full = lineRef.current;
-    const cut = clamp(traceIdxRef.current, 0, Math.max(0, full.length - 1));
-
-    const done = full.slice(0, Math.max(2, cut + 1));
-    const remain = full.slice(Math.max(0, cut), full.length);
-
-    // safe: certains moteurs aiment pas une LineString vide
-    const safeDone = done.length >= 2 ? done : full.slice(0, 2);
-    const safeRemain = remain.length >= 2 ? remain : full.slice(Math.max(0, full.length - 2));
-
-    setRouteDone(safeDone);
-    setRouteRemain(safeRemain);
-    setStopsData(stopsRef.current);
+      if (src) {
+        src.setData(data);
+        if (!m.getLayer(MAP_STOPS_LAYER) || !m.getLayer(MAP_STOPS_NUM_LAYER)) applyOverlays();
+      } else {
+        applyOverlays();
+      }
+    } catch (e) {
+      console.error("upsertStopsOnMap failed:", e);
+      applyOverlays();
+    }
   }
 
   function ensureMap() {
@@ -647,32 +658,25 @@ export default function NavLive() {
     m.on("zoomstart", (e: any) => e?.originalEvent && (followRef.current = false));
 
     m.on("load", () => {
-      ensureOverlays();
-      syncMapNow();
+      applyOverlays();
       try {
         m.resize();
       } catch {}
     });
 
-    m.on("style.load", () => {
-      ensureOverlays();
-      syncMapNow();
-    });
+    m.on("style.load", () => applyOverlays());
 
     return m;
   }
 
-  // Zoom (mobile: éviter le double-tap)
-  function zoomIn(e?: any) {
+  function zoomIn() {
     try {
-      e?.preventDefault?.();
-      mapRef.current?.zoomIn({ duration: 220 });
+      mapRef.current?.zoomIn({ duration: 200 });
     } catch {}
   }
-  function zoomOut(e?: any) {
+  function zoomOut() {
     try {
-      e?.preventDefault?.();
-      mapRef.current?.zoomOut({ duration: 220 });
+      mapRef.current?.zoomOut({ duration: 200 });
     } catch {}
   }
 
@@ -711,45 +715,53 @@ export default function NavLive() {
       pitch: 55,
       bearing: b,
       offset: [0, yOff],
-      duration: 650,
+      duration: 450,
       easing: (t: number) => t,
       essential: true,
     });
   }
 
-  function viewNextStop() {
-    const m = mapRef.current;
-    if (!m || !target) return;
+  /* =========================
+     ✅ Stop index sur trace (monotone forward)
+  ========================= */
 
-    // pause follow 4s puis reprise auto
-    followRef.current = false;
-    if (followResumeTimerRef.current) window.clearTimeout(followResumeTimerRef.current);
-    followResumeTimerRef.current = window.setTimeout(() => {
-      followRef.current = true;
-    }, 4000);
+  const stopIdxOnTrace = useMemo(() => {
+    if (!hasOfficial || officialLine.length < 2) return [];
+    if (!points.length) return [];
 
-    m.easeTo({
-      center: [target.lng, target.lat],
-      zoom: 17.2,
-      pitch: 45,
-      bearing: wrap360(lastBearingRef.current || 0),
-      duration: 700,
-      essential: true,
-    });
-  }
+    const line = officialLine;
+    const out: number[] = [];
 
-  async function unlockAudioIOS() {
-    // iOS: ça doit venir d’un tap. On active "audioOn" + déverrouille AudioContext + Speech.
-    try {
-      await ding.unlock();
-    } catch {}
-    audioOnRef.current = true;
-    setAudioOn(true);
-    try {
-      // petite phrase pour valider (tu peux enlever si tu veux)
-      speak("Audio activé.", { cooldownMs: 0, interrupt: true, dedupe: false });
-    } catch {}
-  }
+    const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
+
+    // stop 0: nearest global
+    const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
+    let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
+    out.push(prevIdx);
+
+    for (let i = 1; i < points.length; i++) {
+      const p = points[i];
+
+      // recherche seulement vers l'avant
+      const near = nearestLineIndexWindow(
+        { lat: p.lat, lng: p.lng },
+        line,
+        prevIdx,
+        Math.min(line.length - 1, prevIdx + AHEAD_WINDOW)
+      );
+
+      const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
+      let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
+
+      // forcer strictement croissant
+      if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
+
+      out.push(idx);
+      prevIdx = idx;
+    }
+
+    return out;
+  }, [hasOfficial, officialLine, points]);
 
   /* =========================
      Load circuit
@@ -787,17 +799,13 @@ export default function NavLive() {
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
-    // ✅ Map refs
     lineRef.current = line;
     stopsRef.current = pts;
 
     const m = ensureMap();
     if (m) {
+      applyOverlays();
       ensureMeMarker();
-      if (m.isStyleLoaded()) {
-        ensureOverlays();
-        syncMapNow();
-      }
     }
   }
 
@@ -830,6 +838,7 @@ export default function NavLive() {
 
     const initial = { lat: got.lat, lng: got.lng };
 
+    // init animation refs
     targetPosRef.current = initial;
     animPosRef.current = initial;
 
@@ -869,7 +878,9 @@ export default function NavLive() {
     initialDistToTargetRef.current = null;
 
     stopAll();
-    nav("/");
+    try {
+      nav("/");
+    } catch {}
   }
 
   useEffect(() => {
@@ -884,7 +895,7 @@ export default function NavLive() {
   }, [circuitId]);
 
   /* =========================
-     GPS tracking (update targetPosRef)
+     GPS tracking (on met à jour targetPosRef)
   ========================= */
 
   useEffect(() => {
@@ -938,14 +949,16 @@ export default function NavLive() {
       if (targetP) {
         const cur = animPosRef.current ?? targetP;
 
+        // interpolation stable
         const k = 1 - Math.pow(0.001, dt);
         const next = {
           lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
           lng: cur.lng + (targetP.lng - cur.lng) * clamp(k * 6.0, 0.05, 0.9),
         };
 
+        // rotation fallback
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -964,14 +977,25 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
+          // refresh line — FIXE
           if (hasOfficial && lineRef.current.length >= 2) {
             const near = nearestLineIndex(next, lineRef.current);
             if (near) traceIdxRef.current = near.idx;
 
-            // met à jour route remaining/done en continu
-            if (m.isStyleLoaded()) syncMapNow();
+            try {
+              const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
+              const data = buildLineGeoJSON(lineRef.current) as any;
+              if (src) src.setData(data);
+            } catch {}
           }
 
+          // layers can disappear on style reload => re-apply
+          if (m.isStyleLoaded()) {
+            if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
+            if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
+          }
+
+          // follow "au volant"
           if (followRef.current) {
             const v = speedRef.current ?? null;
             const kmh = v != null ? v * 3.6 : 0;
@@ -980,17 +1004,13 @@ export default function NavLive() {
             const yOff = computeFollowOffsetPx(m);
             const b = wrap360(lastBearingRef.current || 0);
 
-            // (tu avais demandé possiblement 5 sec: trop long devient “mou” et bug parfois iOS,
-            // on met une valeur stable. Si tu veux, change FOLLOW_MS à 5000.)
-            const FOLLOW_MS = 850;
-
             m.easeTo({
               center: [next.lng, next.lat],
               zoom: targetZoom,
               pitch: 55,
               bearing: b,
               offset: [0, yOff],
-              duration: FOLLOW_MS,
+              duration: 260,
               easing: (x: number) => x,
               essential: true,
             });
@@ -1005,6 +1025,15 @@ export default function NavLive() {
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, hasOfficial]);
+
+  /* =========================
+     ✅ Quand le targetIdx change: maj visuelle
+  ========================= */
+  useEffect(() => {
+    if (!running) return;
+    upsertStopsOnMap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetIdx, running]);
 
   /* =========================
      Distance à la trace (info)
@@ -1044,24 +1073,40 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // “Arrêt manqué”
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
 
       if (rawStopM < stopMinDistRef.current) stopMinDistRef.current = rawStopM;
       if (stopMinDistRef.current <= STOP_TOUCH_M) stopTouchedRef.current = true;
 
-      const stopTraceIdx = traceIdxRef.current; // déjà “sur la trace”
+      const stopTraceIdx = stopIdxOnTrace[targetIdx] ?? 0;
+
       const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
+      const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
       const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
 
-      // si on s’éloigne clairement après avoir “touché”
-      if (movingOk && clearlyMovingAway && stopTraceIdx >= traceIdxRef.current + STOP_SKIP_TRACE_AHEAD_PTS) {
-        // noop (on garde simple ici)
+      if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
+        const next = targetIdx + 1;
+        if (next < points.length) {
+          speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
+          setTargetIdx(next);
+
+          travelSinceTargetSetRef.current = 0;
+          initialDistToTargetRef.current = null;
+
+          stopTouchedRef.current = false;
+          stopMinDistRef.current = Infinity;
+
+          stopWarnRef.current = null;
+          stopWarnMaxRef.current = null;
+          stopDingRef.current = null;
+          stopBannerLastMRef.current = null;
+          setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+          return;
+        }
       }
     }
 
-    // Bandeau stop
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
@@ -1077,24 +1122,21 @@ export default function NavLive() {
 
       if (stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        if (audioOnRef.current) speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
+        speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
       }
     }
 
     if (rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        if (audioOnRef.current) ding.play();
+        if (audioEnabledRef.current) ding.play();
       }
     }
 
     const initD = initialDistToTargetRef.current;
     const allowArrive =
-      initD == null ||
-      initD > ARRIVE_STOP_M + ARRIVE_EPS_M ||
-      travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+      initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
 
-    // Arrivée
     if (dStop <= ARRIVE_STOP_M && allowArrive) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
@@ -1106,7 +1148,7 @@ export default function NavLive() {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
-        if (audioOnRef.current) speak(`Arrêt atteint. Prochain dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
+        speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
 
         stopWarnRef.current = null;
@@ -1120,7 +1162,7 @@ export default function NavLive() {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = null;
 
-        if (audioOnRef.current) speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
+        speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
         setFinished(true);
 
         stopWarnRef.current = null;
@@ -1132,7 +1174,7 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, ding]);
 
   /* =========================
      UI
@@ -1148,11 +1190,10 @@ export default function NavLive() {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
-    touchAction: "manipulation",
   };
 
   const topBar: React.CSSProperties = {
@@ -1168,7 +1209,7 @@ export default function NavLive() {
     pointerEvents: "none",
   };
 
-  const backWrap: React.CSSProperties = { pointerEvents: "auto" };
+  const leftWrap: React.CSSProperties = { pointerEvents: "auto" };
 
   const zoomCol: React.CSSProperties = {
     position: "absolute",
@@ -1180,106 +1221,79 @@ export default function NavLive() {
     pointerEvents: "auto",
   };
 
-  const bottomPanel: React.CSSProperties = {
-    position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 12,
-    zIndex: 9000,
-    background: "rgba(255,255,255,.92)",
-    border: "1px solid rgba(0,0,0,.10)",
-    borderRadius: 18,
-    boxShadow: "0 12px 28px rgba(0,0,0,.18)",
-    padding: "12px 14px",
-    display: "grid",
-    gap: 6,
-    pointerEvents: "none",
-  };
-
-  const btnWide: React.CSSProperties = {
-    ...overlayBtn,
-    width: 140,
-    height: 44,
-    borderRadius: 16,
-    fontSize: 14,
-    fontWeight: 950,
-    padding: "0 12px",
-  };
-
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       {/* MAP FULLSCREEN */}
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* TOP LEFT: Terminer (remplace la flèche inutile) */}
+      {/* TOP BAR */}
       <div style={topBar}>
-        <div style={backWrap}>
+        {/* ✅ bouton Terminer à la place de la flèche */}
+        <div style={leftWrap}>
           <button
-            style={btnWide}
+            style={{
+              ...overlayBtn,
+              width: 120,
+              height: 44,
+              borderRadius: 16,
+              fontSize: 14,
+              fontWeight: 950,
+              background: "#ef4444",
+              color: "white",
+              border: "1px solid rgba(0,0,0,.10)",
+            }}
             onClick={stop}
             title="Terminer"
-            onTouchStart={(e) => e.preventDefault()}
           >
-            Terminer
+            TERMINER
           </button>
         </div>
-        <div />
+
+        <div
+          style={{
+            pointerEvents: "none",
+            background: "rgba(17,24,39,.78)",
+            color: "white",
+            border: "1px solid rgba(255,255,255,.10)",
+            borderRadius: 14,
+            padding: "10px 12px",
+            fontWeight: 900,
+            fontSize: 14,
+          }}
+        >
+          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}{" "}
+          {heading != null ? "• cap GPS" : "• cap calculé"} {audioEnabled ? "• 🔊" : "• 🔇"}
+        </div>
       </div>
 
-      {/* ZOOM + / - + Voir prochain arrêt + Recentrer + Audio */}
+      {/* ZOOM + / - + RECENTER + AUDIO */}
       <div style={zoomCol}>
-        <button
-          style={overlayBtn}
-          onClick={(e) => zoomIn(e)}
-          onTouchStart={(e) => e.preventDefault()}
-          aria-label="Zoom in"
-          title="Zoom +"
-        >
+        <button style={overlayBtn} onClick={zoomIn} aria-label="Zoom in" title="Zoom +">
           +
         </button>
-        <button
-          style={overlayBtn}
-          onClick={(e) => zoomOut(e)}
-          onTouchStart={(e) => e.preventDefault()}
-          aria-label="Zoom out"
-          title="Zoom -"
-        >
+        <button style={overlayBtn} onClick={zoomOut} aria-label="Zoom out" title="Zoom -">
           −
         </button>
 
-        <button
-          style={{ ...overlayBtn, width: 170, justifyContent: "center", gap: 10, fontSize: 14, fontWeight: 950 }}
-          onClick={viewNextStop}
-          onTouchStart={(e) => e.preventDefault()}
-          title="Voir prochain arrêt"
-        >
-          🛑 Voir prochain arrêt
+        {/* ✅ Recentrer: icône cible */}
+        <button style={{ ...overlayBtn, fontSize: 20 }} onClick={recenter} aria-label="Recentrer" title="Recentrer">
+          🎯
         </button>
 
+        {/* ✅ Audio toggle sous recentrer */}
         <button
-          style={{ ...overlayBtn, fontSize: 20 }}
-          onClick={recenter}
-          onTouchStart={(e) => e.preventDefault()}
-          aria-label="Recentrer"
-          title="Recentrer"
+          style={{
+            ...overlayBtn,
+            fontSize: 16,
+            background: audioEnabled ? "#10b981" : "#111827",
+            color: "white",
+            border: "1px solid rgba(255,255,255,.10)",
+          }}
+          onClick={toggleAudio}
+          title={audioEnabled ? "Audio ON" : "Activer audio"}
         >
-          📍
+          {audioEnabled ? "🔊" : "🔇"}
         </button>
-
-        <button
-          style={{ ...overlayBtn, fontSize: 18 }}
-          onClick={unlockAudioIOS}
-          onTouchStart={(e) => e.preventDefault()}
-          title={audioOn ? "Audio actif" : "Activer audio (iOS)"}
-        >
-          {audioOn ? "🔊" : "🔇"}
-        </button>
-
-        {wlSupported ? (
-          <div style={{ fontSize: 11, textAlign: "center", opacity: 0.85, color: "#111827", background: "rgba(255,255,255,.88)", borderRadius: 10, padding: "6px 8px" }}>
-            Écran: {wlActive ? "ON" : "OFF"}
-          </div>
-        ) : null}
       </div>
 
       {/* BANDEAU STOP (jaune) */}
@@ -1295,8 +1309,8 @@ export default function NavLive() {
               style={{
                 position: "absolute",
                 top: 12,
-                left: 12 + 160,
-                right: 12 + 80,
+                left: 148, // laisse la place au bouton TERMINER
+                right: 76,
                 zIndex: 9999,
                 background: "#FBBF24",
                 color: "#111827",
@@ -1348,20 +1362,10 @@ export default function NavLive() {
           );
         })()}
 
-      {/* BOTTOM PANEL */}
-      <div style={bottomPanel}>
-        <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>
-          Prochain arrêt : {Math.min(targetIdx + 1, points.length)} / {points.length}
-        </div>
-        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>{target?.label ? target.label : "—"}</div>
-        {acc != null && (
-          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>
-            GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
-          </div>
-        )}
-        {offRouteM != null && <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>}
-        {err && <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
-      </div>
+      {/* ✅ (1) Bandeau du bas supprimé */}
+      {/* ✅ (2) Bouton Terminer déplacé en haut à gauche */}
+      {/* ✅ (3) Bouton audio sous recentrer */}
+      {/* ✅ (4) Icône cible pour recentrer */}
     </div>
   );
 }
