@@ -211,6 +211,7 @@ function useSpeaker() {
 
   useEffect(() => {
     try {
+      // ✅ iOS: les voix arrivent parfois après coup
       window.speechSynthesis.getVoices();
       window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
     } catch {}
@@ -220,6 +221,11 @@ function useSpeaker() {
     try {
       const t = (text ?? "").trim();
       if (!t) return;
+
+      // ✅ iOS: parfois speech reste "paused" tant qu'on n'a pas resume()
+      try {
+        window.speechSynthesis.resume?.();
+      } catch {}
 
       const now = Date.now();
       const cooldownMs = opts?.cooldownMs ?? 900;
@@ -253,13 +259,34 @@ function useSpeaker() {
     } catch {}
   }
 
+  // ✅ iOS: “prime” speech (utterance silencieuse) pour débloquer après un tap
+  function primeIOS() {
+    try {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume?.();
+
+      const u = new SpeechSynthesisUtterance(" ");
+      u.lang = "fr-CA";
+      u.volume = 0; // silencieux
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      window.speechSynthesis.speak(u);
+
+      setTimeout(() => {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {}
+      }, 120);
+    } catch {}
+  }
+
   function stopAll() {
     try {
       window.speechSynthesis.cancel();
     } catch {}
   }
 
-  return { speak, stopAll };
+  return { speak, stopAll, primeIOS };
 }
 
 /* =========================
@@ -315,7 +342,7 @@ function smoothAngle(prev: number, next: number) {
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
-  const { speak, stopAll } = useSpeaker();
+  const { speak, stopAll, primeIOS } = useSpeaker();
   const ding = useDing();
 
   const circuitId = q.get("circuit") || "";
@@ -394,6 +421,37 @@ export default function NavLive() {
   const STOP_SKIP_CONFIRM_M = 90;
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
+
+  /* =========================
+     ✅ iOS: unlock audio (speech + ding) sur le 1er tap
+  ========================= */
+  const audioUnlockedRef = useRef(false);
+
+  async function unlockAudioIOS() {
+    if (audioUnlockedRef.current) return;
+    audioUnlockedRef.current = true;
+
+    try {
+      await ding.unlock();
+    } catch {}
+
+    try {
+      primeIOS(); // utterance silencieuse (débloque speech iOS)
+    } catch {}
+  }
+
+  // capter le 1er geste user même si Mapbox “mange” les events
+  useEffect(() => {
+    const handler = () => unlockAudioIOS();
+    window.addEventListener("pointerdown", handler, { passive: true, capture: true } as any);
+    window.addEventListener("touchstart", handler, { passive: true, capture: true } as any);
+
+    return () => {
+      window.removeEventListener("pointerdown", handler as any, true as any);
+      window.removeEventListener("touchstart", handler as any, true as any);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* =========================
      Mapbox
@@ -854,6 +912,7 @@ export default function NavLive() {
       return;
     }
 
+    // ✅ iOS: on tente unlock ici, mais le vrai déblocage se fait au 1er tap (listeners capture)
     try {
       await ding.unlock();
     } catch {}
@@ -1276,7 +1335,12 @@ export default function NavLive() {
   };
 
   return (
-    <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
+    <div
+      style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}
+      // ✅ iOS: un tap direct sur la page aide aussi (sans changer ta logique)
+      onPointerDown={() => unlockAudioIOS()}
+      onTouchStart={() => unlockAudioIOS()}
+    >
       {/* MAP FULLSCREEN */}
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
