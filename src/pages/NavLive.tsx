@@ -357,9 +357,12 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
-    { show: false, meters: 0, label: null, max: 150 }
-  );
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
+    show: false,
+    meters: 0,
+    label: null,
+    max: 150,
+  });
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
@@ -507,7 +510,7 @@ export default function NavLive() {
 
     // TRACE BLEUE (FIXE — ne s'efface plus)
     if (fullLine && fullLine.length >= 2) {
-      const remain = fullLine; // ✅ FIX: plus de slice(traceIdx)
+      const remain = fullLine;
 
       if (remain.length >= 2) {
         const geojson = buildLineGeoJSON(remain);
@@ -603,6 +606,32 @@ export default function NavLive() {
       console.error("upsertActiveSegmentOnMap failed:", e);
       applyOverlays();
     }
+  }
+
+  // ✅ NOUVEAU: force la mise à jour du segment rose immédiatement (sans attendre setTargetIdx/useEffect)
+  function forcePinkForTarget(nextTargetIdx: number) {
+    if (!hasOfficial || officialLine.length < 2) return;
+    if (!points.length) return;
+
+    // si on est au dernier arrêt, plus de segment
+    if (nextTargetIdx >= points.length - 1) {
+      upsertActiveSegmentOnMap([]);
+      return;
+    }
+
+    const aIdx = stopIdxOnTrace[nextTargetIdx] ?? null;
+    const bIdx = stopIdxOnTrace[nextTargetIdx + 1] ?? null;
+    if (aIdx == null || bIdx == null) return;
+
+    const from = clamp(Math.min(aIdx, bIdx), 0, officialLine.length - 1);
+    const to = clamp(Math.max(aIdx, bIdx), 0, officialLine.length - 1);
+
+    let seg = officialLine.slice(from, to + 1);
+    // si jamais indices inversés, on garde le sens "vers l'avant"
+    if (aIdx > bIdx) seg = seg.slice().reverse();
+
+    if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
+    else upsertActiveSegmentOnMap([]);
   }
 
   function ensureMap() {
@@ -963,7 +992,7 @@ export default function NavLive() {
             // refresh remain (bleu) — FIXE
             try {
               const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
-              const data = buildLineGeoJSON(lineRef.current) as any; // ✅ FIX: plus de slice(start)
+              const data = buildLineGeoJSON(lineRef.current) as any;
               if (src) src.setData(data);
             } catch {}
           }
@@ -1020,6 +1049,7 @@ export default function NavLive() {
 
   /* =========================
      Active segment (ROSE) = arrêt courant -> prochain
+     (useEffect = filet de sécurité; le "switch instantané" se fait via forcePinkForTarget())
   ========================= */
 
   useEffect(() => {
@@ -1039,16 +1069,11 @@ export default function NavLive() {
       return;
     }
 
-    const from = clamp(aIdx, 0, officialLine.length - 1);
-    const to = clamp(bIdx <= aIdx ? Math.min(aIdx + 2, officialLine.length - 1) : bIdx, 0, officialLine.length - 1);
+    const from = clamp(Math.min(aIdx, bIdx), 0, officialLine.length - 1);
+    const to = clamp(Math.max(aIdx, bIdx), 0, officialLine.length - 1);
 
     let seg = officialLine.slice(from, to + 1);
-
-    if (seg.length < 2) {
-      const lo = clamp(from - 5, 0, officialLine.length - 1);
-      const hi = clamp(to + 5, 0, officialLine.length - 1);
-      seg = officialLine.slice(lo, hi + 1);
-    }
+    if (aIdx > bIdx) seg = seg.slice().reverse();
 
     if (seg.length >= 2) upsertActiveSegmentOnMap(seg);
     else upsertActiveSegmentOnMap([]);
@@ -1096,6 +1121,10 @@ export default function NavLive() {
         const next = targetIdx + 1;
         if (next < points.length) {
           speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
+
+          // ✅ Switch visuel immédiat du segment rose (next -> next+1)
+          forcePinkForTarget(next);
+
           setTargetIdx(next);
 
           travelSinceTargetSetRef.current = 0;
@@ -1156,6 +1185,10 @@ export default function NavLive() {
         initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
         speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
+
+        // ✅ IMPORTANT: Switch visuel immédiat du segment rose (next -> next+1)
+        forcePinkForTarget(next);
+
         setTargetIdx(next);
 
         stopWarnRef.current = null;
@@ -1171,6 +1204,9 @@ export default function NavLive() {
 
         speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
         setFinished(true);
+
+        // fin => plus de segment rose
+        upsertActiveSegmentOnMap([]);
 
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
@@ -1364,7 +1400,9 @@ export default function NavLive() {
             GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
           </div>
         )}
-        {offRouteM != null && <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>}
+        {offRouteM != null && (
+          <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>Écart trace: {Math.round(offRouteM)} m</div>
+        )}
         {err && <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
       </div>
 
