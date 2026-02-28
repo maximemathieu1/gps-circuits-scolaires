@@ -315,8 +315,7 @@ function smoothAngle(prev: number, next: number) {
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
-
-  const speaker = useSpeaker();
+  const { speak, stopAll } = useSpeaker();
   const ding = useDing();
 
   const circuitId = q.get("circuit") || "";
@@ -324,42 +323,15 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
-  // ✅ Audio ON/OFF
-  const [audioEnabled, setAudioEnabled] = useState(false);
-  const audioEnabledRef = useRef(false);
-
-  const speak = (text: string, opts?: { cooldownMs?: number; interrupt?: boolean; dedupe?: boolean }) => {
-    if (!audioEnabledRef.current) return;
-    speaker.speak(text, opts);
-  };
-  const stopAll = () => speaker.stopAll();
-
-  async function toggleAudio() {
-    const next = !audioEnabledRef.current;
-    audioEnabledRef.current = next;
-    setAudioEnabled(next);
-
-    if (next) {
-      // iOS: unlock audio context via user gesture
-      try {
-        await ding.unlock();
-      } catch {}
-      // confirmation courte
-      try {
-        ding.play();
-      } catch {}
-      speak("Audio activé.", { cooldownMs: 0, interrupt: true, dedupe: false });
-    } else {
-      stopAll();
-    }
-  }
-
   // GPS (état affichage)
   const [me, setMe] = useState<LatLng | null>(null);
   const [acc, setAcc] = useState<number | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Audio UI
+  const [audioReady, setAudioReady] = useState(false);
 
   // GPS refs (animation fluide)
   const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
@@ -502,7 +474,7 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  // ✅ stops: "active" + "num"
+  // ✅ stops: on ajoute "active" + "num"
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
     return {
       type: "FeatureCollection" as const,
@@ -535,7 +507,7 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // ✅ TRACE ACTIVE PLUS ÉPAISSE + HALO
+    // TRACE BLEUE (FIXE)
     if (fullLine && fullLine.length >= 2) {
       const geojson = buildLineGeoJSON(fullLine);
       try {
@@ -546,7 +518,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_REMAIN_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#93c5fd", "line-width": 18, "line-opacity": 0.26 },
+          paint: { "line-color": "#93c5fd", "line-width": 16, "line-opacity": 0.28 },
         });
 
         m.addLayer({
@@ -554,44 +526,39 @@ export default function NavLive() {
           type: "line",
           source: MAP_REMAIN_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#2563eb", "line-width": 10, "line-opacity": 0.98 },
+          paint: { "line-color": "#2563eb", "line-width": 9, "line-opacity": 0.98 },
         });
       } catch (e) {
         console.error("Mapbox apply remain failed:", e);
       }
     }
 
-    // ✅ STOPS: TOUS GROS ET VISIBLES (comme l'actif) + NUMÉROS
+    // STOPS (inchangé ici — tu peux garder ta version actuelle)
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
-        // Cercles (tous gros)
         m.addLayer({
           id: MAP_STOPS_LAYER,
           type: "circle",
           source: MAP_STOPS_SRC,
           paint: {
-            // tous gros + actif un peu plus
-            "circle-radius": ["case", ["==", ["get", "active"], 1], 18, 16],
-            // actif rouge vif, autres foncés mais ultra visibles
-            "circle-color": ["case", ["==", ["get", "active"], 1], "#ff0000", "#111827"],
-            // stroke épais partout
-            "circle-stroke-width": ["case", ["==", ["get", "active"], 1], 7, 7],
-            "circle-stroke-color": ["case", ["==", ["get", "active"], 1], "#ffffff", "#ffffff"],
+            "circle-radius": 18,
+            "circle-color": "#ff0000",
+            "circle-stroke-width": 7,
+            "circle-stroke-color": "#ffffff",
             "circle-opacity": 0.98,
           },
         });
 
-        // Numéros (tous grands)
         m.addLayer({
           id: MAP_STOPS_NUM_LAYER,
           type: "symbol",
           source: MAP_STOPS_SRC,
           layout: {
             "text-field": ["get", "num"],
-            "text-size": ["case", ["==", ["get", "active"], 1], 18, 16],
+            "text-size": 18,
             "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
             "text-allow-overlap": true,
             "text-ignore-placement": true,
@@ -721,6 +688,17 @@ export default function NavLive() {
     });
   }
 
+  async function enableAudio() {
+    try {
+      await ding.unlock();
+      setAudioReady(true);
+      // petit feedback rapide
+      ding.play();
+    } catch {
+      setAudioReady(false);
+    }
+  }
+
   /* =========================
      ✅ Stop index sur trace (monotone forward)
   ========================= */
@@ -734,7 +712,6 @@ export default function NavLive() {
 
     const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
 
-    // stop 0: nearest global
     const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
     let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
     out.push(prevIdx);
@@ -742,7 +719,6 @@ export default function NavLive() {
     for (let i = 1; i < points.length; i++) {
       const p = points[i];
 
-      // recherche seulement vers l'avant
       const near = nearestLineIndexWindow(
         { lat: p.lat, lng: p.lng },
         line,
@@ -753,7 +729,6 @@ export default function NavLive() {
       const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
       let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
 
-      // forcer strictement croissant
       if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
 
       out.push(idx);
@@ -838,7 +813,6 @@ export default function NavLive() {
 
     const initial = { lat: got.lat, lng: got.lng };
 
-    // init animation refs
     targetPosRef.current = initial;
     animPosRef.current = initial;
 
@@ -878,9 +852,7 @@ export default function NavLive() {
     initialDistToTargetRef.current = null;
 
     stopAll();
-    try {
-      nav("/");
-    } catch {}
+    nav("/");
   }
 
   useEffect(() => {
@@ -949,16 +921,14 @@ export default function NavLive() {
       if (targetP) {
         const cur = animPosRef.current ?? targetP;
 
-        // interpolation stable
         const k = 1 - Math.pow(0.001, dt);
         const next = {
           lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
           lng: cur.lng + (targetP.lng - cur.lng) * clamp(k * 6.0, 0.05, 0.9),
         };
 
-        // rotation fallback
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
+        const movingEnough = sp == null ? true : sp >= 0.6;
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -977,7 +947,6 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // refresh line — FIXE
           if (hasOfficial && lineRef.current.length >= 2) {
             const near = nearestLineIndex(next, lineRef.current);
             if (near) traceIdxRef.current = near.idx;
@@ -989,13 +958,11 @@ export default function NavLive() {
             } catch {}
           }
 
-          // layers can disappear on style reload => re-apply
           if (m.isStyleLoaded()) {
             if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
             if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
           }
 
-          // follow "au volant"
           if (followRef.current) {
             const v = speedRef.current ?? null;
             const kmh = v != null ? v * 3.6 : 0;
@@ -1027,7 +994,7 @@ export default function NavLive() {
   }, [running, hasOfficial]);
 
   /* =========================
-     ✅ Quand le targetIdx change: maj visuelle
+     ✅ Quand le targetIdx change: maj visuelle (gros stop rouge + numéro)
   ========================= */
   useEffect(() => {
     if (!running) return;
@@ -1129,7 +1096,7 @@ export default function NavLive() {
     if (rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        if (audioEnabledRef.current) ding.play();
+        if (audioReady) ding.play();
       }
     }
 
@@ -1174,7 +1141,7 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, ding]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, speak, ding, audioReady]);
 
   /* =========================
      UI
@@ -1196,26 +1163,33 @@ export default function NavLive() {
     userSelect: "none",
   };
 
-  const topBar: React.CSSProperties = {
+  // ✅ X rouge — toujours au premier plan
+  const terminateBtn: React.CSSProperties = {
     position: "absolute",
     top: 12,
     left: 12,
-    right: 12,
-    zIndex: 9000,
+    zIndex: 20000,
+    width: 58,
+    height: 44,
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,.12)",
+    background: "#ef4444",
+    color: "#fff",
+    boxShadow: "0 14px 30px rgba(0,0,0,.22)",
     display: "flex",
-    justifyContent: "space-between",
     alignItems: "center",
-    gap: 10,
-    pointerEvents: "none",
+    justifyContent: "center",
+    fontSize: 22,
+    fontWeight: 1000,
+    cursor: "pointer",
+    userSelect: "none",
   };
-
-  const leftWrap: React.CSSProperties = { pointerEvents: "auto" };
 
   const zoomCol: React.CSSProperties = {
     position: "absolute",
     right: 12,
     top: 74,
-    zIndex: 9000,
+    zIndex: 12000,
     display: "grid",
     gap: 10,
     pointerEvents: "auto",
@@ -1226,45 +1200,10 @@ export default function NavLive() {
       {/* MAP FULLSCREEN */}
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* TOP BAR */}
-      <div style={topBar}>
-        {/* ✅ bouton Terminer à la place de la flèche */}
-        <div style={leftWrap}>
-          <button
-            style={{
-              ...overlayBtn,
-              width: 120,
-              height: 44,
-              borderRadius: 16,
-              fontSize: 14,
-              fontWeight: 950,
-              background: "#ef4444",
-              color: "white",
-              border: "1px solid rgba(0,0,0,.10)",
-            }}
-            onClick={stop}
-            title="Terminer"
-          >
-            TERMINER
-          </button>
-        </div>
-
-        <div
-          style={{
-            pointerEvents: "none",
-            background: "rgba(17,24,39,.78)",
-            color: "white",
-            border: "1px solid rgba(255,255,255,.10)",
-            borderRadius: 14,
-            padding: "10px 12px",
-            fontWeight: 900,
-            fontSize: 14,
-          }}
-        >
-          {finished ? "✅ Terminé" : "Suivi (trace + arrêts)"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}{" "}
-          {heading != null ? "• cap GPS" : "• cap calculé"} {audioEnabled ? "• 🔊" : "• 🔇"}
-        </div>
-      </div>
+      {/* ✅ TERMINER = X ROUGE (toujours on-top) */}
+      <button style={terminateBtn} onClick={stop} title="Terminer" aria-label="Terminer">
+        ✕
+      </button>
 
       {/* ZOOM + / - + RECENTER + AUDIO */}
       <div style={zoomCol}>
@@ -1275,28 +1214,30 @@ export default function NavLive() {
           −
         </button>
 
-        {/* ✅ Recentrer: icône cible */}
+        {/* ✅ Recentrer = cible */}
         <button style={{ ...overlayBtn, fontSize: 20 }} onClick={recenter} aria-label="Recentrer" title="Recentrer">
           🎯
         </button>
 
-        {/* ✅ Audio toggle sous recentrer */}
+        {/* ✅ Audio sous recentrer */}
         <button
           style={{
             ...overlayBtn,
-            fontSize: 16,
-            background: audioEnabled ? "#10b981" : "#111827",
-            color: "white",
-            border: "1px solid rgba(255,255,255,.10)",
+            width: 52,
+            height: 52,
+            borderRadius: 16,
+            background: audioReady ? "#22c55e" : "#ffffff",
+            color: audioReady ? "#0b1220" : "#111827",
           }}
-          onClick={toggleAudio}
-          title={audioEnabled ? "Audio ON" : "Activer audio"}
+          onClick={enableAudio}
+          aria-label="Activer audio"
+          title={audioReady ? "Audio actif" : "Activer l’audio"}
         >
-          {audioEnabled ? "🔊" : "🔇"}
+          🔊
         </button>
       </div>
 
-      {/* BANDEAU STOP (jaune) */}
+      {/* ✅ BANDEAU STOP (plein largeur -> plus de gris derrière) */}
       {stopBanner.show &&
         (() => {
           const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
@@ -1309,15 +1250,15 @@ export default function NavLive() {
               style={{
                 position: "absolute",
                 top: 12,
-                left: 148, // laisse la place au bouton TERMINER
-                right: 76,
-                zIndex: 9999,
+                left: 84, // laisse de l’air à droite du X, mais couvre le reste
+                right: 12,
+                zIndex: 15000,
                 background: "#FBBF24",
                 color: "#111827",
                 border: "1px solid rgba(0,0,0,.12)",
-                borderRadius: 18,
+                borderRadius: 22,
                 padding: "12px 14px",
-                boxShadow: "0 10px 26px rgba(0,0,0,.18)",
+                boxShadow: "0 14px 30px rgba(0,0,0,.22)",
                 display: "grid",
                 gap: 10,
               }}
@@ -1325,8 +1266,8 @@ export default function NavLive() {
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div
                   style={{
-                    width: 38,
-                    height: 38,
+                    width: 42,
+                    height: 42,
                     borderRadius: 14,
                     background: "#111827",
                     color: "#FBBF24",
@@ -1335,15 +1276,18 @@ export default function NavLive() {
                     justifyContent: "center",
                     fontSize: 20,
                     fontWeight: 900,
+                    flex: "0 0 auto",
                   }}
                   aria-hidden
                 >
                   🧒
                 </div>
 
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
-                  <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 950, fontSize: 20, lineHeight: 1.1 }}>Arrêt scolaire dans {m} m</div>
+                  <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {stopBanner.label ?? "Zone d’embarquement / débarquement"}
+                  </div>
                 </div>
               </div>
 
@@ -1362,10 +1306,31 @@ export default function NavLive() {
           );
         })()}
 
-      {/* ✅ (1) Bandeau du bas supprimé */}
-      {/* ✅ (2) Bouton Terminer déplacé en haut à gauche */}
-      {/* ✅ (3) Bouton audio sous recentrer */}
-      {/* ✅ (4) Icône cible pour recentrer */}
+      {/* ✅ Bandeau du bas supprimé (rien ici) */}
+      {/* ✅ Le pill gris supprimé (rien ici) */}
+
+      {/* debug erreur si tu veux garder */}
+      {err && (
+        <div
+          style={{
+            position: "absolute",
+            left: 12,
+            right: 12,
+            bottom: 12,
+            zIndex: 16000,
+            background: "rgba(255,255,255,.92)",
+            border: "1px solid rgba(0,0,0,.10)",
+            borderRadius: 16,
+            boxShadow: "0 12px 28px rgba(0,0,0,.18)",
+            padding: "10px 12px",
+            color: "#b91c1c",
+            fontWeight: 900,
+            fontSize: 12,
+          }}
+        >
+          {err}
+        </div>
+      )}
     </div>
   );
 }
