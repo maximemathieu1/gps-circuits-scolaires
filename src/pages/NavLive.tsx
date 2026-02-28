@@ -116,7 +116,7 @@ function nearestLineIndex(me: LatLng, line: [number, number][]) {
   return { idx: bestIdx, dist: best };
 }
 
-/** ✅ index le plus proche mais CONTRAINT */
+/** ✅ index le plus proche mais CONTRAINT (pour éviter de "snapper" sur un autre croisement après stop 2, 3...) */
 function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: number, end: number) {
   if (!line || line.length === 0) return null;
   const s = clamp(Math.floor(start), 0, line.length - 1);
@@ -303,6 +303,7 @@ function bearingDeg(a: LatLng, b: LatLng) {
 }
 
 function smoothAngle(prev: number, next: number) {
+  // évite les sauts 359 -> 0
   const delta = ((next - prev + 540) % 360) - 180;
   return prev + delta;
 }
@@ -330,8 +331,8 @@ export default function NavLive() {
   const [err, setErr] = useState<string | null>(null);
 
   // GPS refs (animation fluide)
-  const targetPosRef = useRef<LatLng | null>(null);
-  const animPosRef = useRef<LatLng | null>(null);
+  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
+  const animPosRef = useRef<LatLng | null>(null); // position animée (60fps)
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
@@ -378,10 +379,6 @@ export default function NavLive() {
   // Follow mode
   const followRef = useRef(true);
 
-  // Camera helper mode (auto “voir arrêt”)
-  const autoPeekRef = useRef(true);
-  const lastFitAtRef = useRef<number>(0);
-
   // ====== Tuning ======
   const ARRIVE_STOP_M = 45;
   const DING_AT_M = 10;
@@ -398,25 +395,28 @@ export default function NavLive() {
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
-  // ✅ Camera tuning
-  const PEEK_FAR_M = 450; // si l’arrêt est loin, on fitBounds
-  const PEEK_BACK_M = 250; // quand on se rapproche, on revient “au volant”
-  const FIT_COOLDOWN_MS = 1800;
-
   /* =========================
      Mapbox
   ========================= */
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
+
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
+  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
+  // ✅ Sources/Layers
   const MAP_REMAIN_SRC = "remain-src";
   const MAP_REMAIN_LAYER = "remain-layer";
   const MAP_REMAIN_HALO = "remain-halo";
+
+  // ✅ Active trace (segment "déjà parcouru"): plus épais + halo
+  const MAP_ACTIVE_SRC = "active-src";
+  const MAP_ACTIVE_LAYER = "active-layer";
+  const MAP_ACTIVE_HALO = "active-halo";
 
   const MAP_STOPS_SRC = "stops-src";
   const MAP_STOPS_LAYER = "stops-layer";
@@ -477,6 +477,13 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
+  function buildPartialLineGeoJSON(line: [number, number][], endExclusive: number) {
+    const n = Math.max(0, Math.min(line.length, Math.floor(endExclusive)));
+    const sub = line.slice(0, Math.max(2, n)); // min 2 points for a line
+    const coords: [number, number][] = sub.map(([lat, lng]) => [lng, lat]);
+    return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
+  }
+
   // ✅ stops: on ajoute "active" + "num"
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
     return {
@@ -501,9 +508,14 @@ export default function NavLive() {
     const fullLine = lineRef.current;
     const pts = stopsRef.current;
 
+    // Clean
     safeRemoveLayer(m, MAP_REMAIN_LAYER);
     safeRemoveLayer(m, MAP_REMAIN_HALO);
     safeRemoveSource(m, MAP_REMAIN_SRC);
+
+    safeRemoveLayer(m, MAP_ACTIVE_LAYER);
+    safeRemoveLayer(m, MAP_ACTIVE_HALO);
+    safeRemoveSource(m, MAP_ACTIVE_SRC);
 
     safeRemoveLayer(m, MAP_STOPS_NUM_LAYER);
     safeRemoveLayer(m, MAP_STOPS_LAYER);
@@ -535,31 +547,61 @@ export default function NavLive() {
       }
     }
 
-    // STOPS + prochain arrêt GROS rouge + numéros
+    // ✅ TRACE ACTIVE (segment parcouru) — plus épais + halo (comme tu aimais)
+    if (fullLine && fullLine.length >= 2) {
+      try {
+        const end = Math.max(2, Math.min(fullLine.length, (traceIdxRef.current ?? 0) + 1));
+        const activeGeo = buildPartialLineGeoJSON(fullLine, end);
+
+        m.addSource(MAP_ACTIVE_SRC, { type: "geojson", data: activeGeo as any });
+
+        m.addLayer({
+          id: MAP_ACTIVE_HALO,
+          type: "line",
+          source: MAP_ACTIVE_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#ffffff", "line-width": 18, "line-opacity": 0.38 },
+        });
+
+        m.addLayer({
+          id: MAP_ACTIVE_LAYER,
+          type: "line",
+          source: MAP_ACTIVE_SRC,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#2563eb", "line-width": 11, "line-opacity": 1.0 },
+        });
+      } catch (e) {
+        console.error("Mapbox apply active failed:", e);
+      }
+    }
+
+    // STOPS: ✅ TOUS GROS comme l'actif + ✅ numéros
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
+        // Cercles (tous gros et visibles comme l'arrêt actif)
         m.addLayer({
           id: MAP_STOPS_LAYER,
           type: "circle",
           source: MAP_STOPS_SRC,
           paint: {
-            "circle-radius": ["case", ["==", ["get", "active"], 1], 18, 6],
-            "circle-color": ["case", ["==", ["get", "active"], 1], "#ff0000", "#111827"],
-            "circle-stroke-width": ["case", ["==", ["get", "active"], 1], 7, 3],
-            "circle-stroke-color": ["case", ["==", ["get", "active"], 1], "#ffffff", "#FBBF24"],
+            "circle-radius": 16,
+            "circle-color": "#ff0000",
+            "circle-stroke-width": 6,
+            "circle-stroke-color": "#ffffff",
           },
         });
 
+        // Numéros
         m.addLayer({
           id: MAP_STOPS_NUM_LAYER,
           type: "symbol",
           source: MAP_STOPS_SRC,
           layout: {
             "text-field": ["get", "num"],
-            "text-size": ["case", ["==", ["get", "active"], 1], 17, 12],
+            "text-size": 16,
             "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
             "text-allow-overlap": true,
             "text-ignore-placement": true,
@@ -592,6 +634,30 @@ export default function NavLive() {
       }
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
+      applyOverlays();
+    }
+  }
+
+  function upsertActiveOnMap() {
+    const m = mapRef.current;
+    if (!m || !m.isStyleLoaded()) return;
+
+    const fullLine = lineRef.current;
+    if (!fullLine || fullLine.length < 2) return;
+
+    try {
+      const end = Math.max(2, Math.min(fullLine.length, (traceIdxRef.current ?? 0) + 1));
+      const data = buildPartialLineGeoJSON(fullLine, end) as any;
+
+      const src = m.getSource(MAP_ACTIVE_SRC) as mapboxgl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData(data);
+        if (!m.getLayer(MAP_ACTIVE_LAYER) || !m.getLayer(MAP_ACTIVE_HALO)) applyOverlays();
+      } else {
+        applyOverlays();
+      }
+    } catch {
+      // si ça plante, on retombe sur re-apply
       applyOverlays();
     }
   }
@@ -688,53 +754,6 @@ export default function NavLive() {
     });
   }
 
-  // ✅ Fit bounds: voir moi + prochain arrêt
-  function fitMeAndTarget() {
-    const m = mapRef.current;
-    const p = animPosRef.current ?? me;
-    const t = target;
-    if (!m || !p || !t) return;
-
-    try {
-      const pad = { top: 90, bottom: 260, left: 60, right: 60 };
-      const bounds = new mapboxgl.LngLatBounds();
-      bounds.extend([p.lng, p.lat]);
-      bounds.extend([t.lng, t.lat]);
-
-      m.fitBounds(bounds, {
-        padding: pad as any,
-        duration: 650,
-        maxZoom: 16.8,
-        bearing: 0, // option: garder le nord en haut quand on “peek”
-        pitch: 35,
-        essential: true,
-      });
-
-      lastFitAtRef.current = Date.now();
-    } catch {}
-  }
-
-  function isTargetVisibleInViewport() {
-    const m = mapRef.current;
-    const t = target;
-    if (!m || !t) return true;
-
-    try {
-      const pt = m.project([t.lng, t.lat]);
-      const w = m.getCanvas().clientWidth;
-      const h = m.getCanvas().clientHeight;
-
-      // marges: si ça se rapproche du bord, on considère “pas visible”
-      const mx = 60;
-      const myTop = 90;
-      const myBot = 240;
-
-      return pt.x >= mx && pt.x <= w - mx && pt.y >= myTop && pt.y <= h - myBot;
-    } catch {
-      return true;
-    }
-  }
-
   /* =========================
      ✅ Stop index sur trace (monotone forward)
   ========================= */
@@ -748,6 +767,7 @@ export default function NavLive() {
 
     const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
 
+    // stop 0: nearest global
     const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
     let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
     out.push(prevIdx);
@@ -755,6 +775,7 @@ export default function NavLive() {
     for (let i = 1; i < points.length; i++) {
       const p = points[i];
 
+      // recherche seulement vers l'avant
       const near = nearestLineIndexWindow(
         { lat: p.lat, lng: p.lng },
         line,
@@ -765,6 +786,7 @@ export default function NavLive() {
       const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
       let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
 
+      // forcer strictement croissant
       if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
 
       out.push(idx);
@@ -832,11 +854,6 @@ export default function NavLive() {
       return;
     }
 
-    // ✅ iPhone: on “prime” speech (best-effort)
-    try {
-      window.speechSynthesis?.getVoices?.();
-    } catch {}
-    // ✅ ding.unlock (si déjà unlock via Portal, ça fait rien de mauvais)
     try {
       await ding.unlock();
     } catch {}
@@ -858,6 +875,7 @@ export default function NavLive() {
 
     const initial = { lat: got.lat, lng: got.lng };
 
+    // init animation refs
     targetPosRef.current = initial;
     animPosRef.current = initial;
 
@@ -965,6 +983,7 @@ export default function NavLive() {
       if (targetP) {
         const cur = animPosRef.current ?? targetP;
 
+        // interpolation stable
         const k = 1 - Math.pow(0.001, dt);
         const next = {
           lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
@@ -973,7 +992,7 @@ export default function NavLive() {
 
         // rotation fallback
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -992,11 +1011,14 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // refresh line
           if (hasOfficial && lineRef.current.length >= 2) {
             const near = nearestLineIndex(next, lineRef.current);
             if (near) traceIdxRef.current = near.idx;
 
+            // ✅ MAJ trace active (épaisse + halo)
+            upsertActiveOnMap();
+
+            // assure remain data
             try {
               const src = m.getSource(MAP_REMAIN_SRC) as mapboxgl.GeoJSONSource | undefined;
               const data = buildLineGeoJSON(lineRef.current) as any;
@@ -1004,30 +1026,11 @@ export default function NavLive() {
             } catch {}
           }
 
+          // layers can disappear on style reload => re-apply
           if (m.isStyleLoaded()) {
             if (!m.getLayer(MAP_REMAIN_LAYER) && lineRef.current.length >= 2) applyOverlays();
+            if (!m.getLayer(MAP_ACTIVE_LAYER) && lineRef.current.length >= 2) applyOverlays();
             if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
-          }
-
-          // ✅ AUTO “voir arrêt” si nécessaire
-          if (autoPeekRef.current && target) {
-            const dToTarget = haversineMeters(next, target);
-            const now = Date.now();
-            const cooldownOk = now - lastFitAtRef.current > FIT_COOLDOWN_MS;
-
-            if (dToTarget > PEEK_FAR_M && cooldownOk) {
-              if (!isTargetVisibleInViewport()) {
-                fitMeAndTarget();
-                // pendant qu’on “peek”, on évite le follow automatique
-                followRef.current = false;
-              }
-            }
-
-            // quand on est proche, on revient “au volant” si follow est ON
-            if (dToTarget < PEEK_BACK_M) {
-              // on ne force pas follow=true (sinon ça combat l’utilisateur)
-              // mais si follow était déjà actif, on recentre naturellement
-            }
           }
 
           // follow "au volant"
@@ -1059,26 +1062,14 @@ export default function NavLive() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, hasOfficial, target]);
+  }, [running, hasOfficial]);
 
   /* =========================
-     ✅ Quand le targetIdx change: maj visuelle (gros stop rouge + numéro)
+     ✅ Quand le targetIdx change: maj visuelle (stops)
   ========================= */
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
-
-    // ✅ suggestion: au changement d’arrêt, “peek” une fois si loin
-    try {
-      const p = animPosRef.current ?? me;
-      if (p && target) {
-        const d = haversineMeters(p, target);
-        if (d > PEEK_FAR_M) {
-          fitMeAndTarget();
-        }
-      }
-    } catch {}
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1314,7 +1305,7 @@ export default function NavLive() {
         </div>
       </div>
 
-      {/* ZOOM + / - + RECENTER + 👁 */}
+      {/* ZOOM + / - + RECENTER */}
       <div style={zoomCol}>
         <button style={overlayBtn} onClick={zoomIn} aria-label="Zoom in" title="Zoom +">
           +
@@ -1322,21 +1313,8 @@ export default function NavLive() {
         <button style={overlayBtn} onClick={zoomOut} aria-label="Zoom out" title="Zoom -">
           −
         </button>
-
         <button style={{ ...overlayBtn, fontSize: 18 }} onClick={recenter} aria-label="Recentrer" title="Recentrer">
           ⤾
-        </button>
-
-        <button
-          style={{ ...overlayBtn, fontSize: 18 }}
-          onClick={() => {
-            tryEnterFullscreen();
-            fitMeAndTarget();
-          }}
-          aria-label="Voir arrêt"
-          title="Voir prochain arrêt"
-        >
-          👁️
         </button>
       </div>
 
@@ -1411,9 +1389,7 @@ export default function NavLive() {
         <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>
           Prochain arrêt : {Math.min(targetIdx + 1, points.length)} / {points.length}
         </div>
-        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>
-          {target?.label ? `#${targetIdx + 1} — ${target.label}` : `#${targetIdx + 1} —`}
-        </div>
+        <div style={{ fontSize: 14, color: "rgba(17,24,39,.82)", fontWeight: 700 }}>{target?.label ? target.label : "—"}</div>
         {acc != null && (
           <div style={{ fontSize: 12, color: "rgba(17,24,39,.72)" }}>
             GPS ~{Math.round(acc)} m • Vitesse ~{Math.round((speed ?? 0) * 3.6)} km/h
