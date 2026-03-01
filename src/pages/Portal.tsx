@@ -35,6 +35,7 @@ async function unlockIOSAudioOnce() {
 
   try {
     const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 1.0;
     window.speechSynthesis.speak(u);
     setTimeout(() => {
       try {
@@ -77,6 +78,7 @@ export default function Portal() {
     if (!ready) return;
     if (view !== "gps") return;
     load().catch((e: any) => alert(e?.message || "Erreur chargement."));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transporteur, isAuthed, ready, view]);
 
   function goLogin(redirectTo: string = "/") {
@@ -95,153 +97,443 @@ export default function Portal() {
     nav("/record");
   }
 
-  // ===== Layout FULL APP =====
+  /* =========================
+     Styles (visuel + responsive)
+  ========================= */
+
   const page: React.CSSProperties = {
+    minHeight: "100vh",
     minHeight: "100dvh",
-    background: "#f3f4f6",
-    padding: "20px",
+    width: "100%",
     boxSizing: "border-box",
+
+    display: "flex",
+    justifyContent: "flex-start",
+    alignItems: "stretch",
+
+    paddingTop: "calc(env(safe-area-inset-top) + 14px)",
+    paddingRight: "calc(env(safe-area-inset-right) + 14px)",
+    paddingBottom: "calc(env(safe-area-inset-bottom) + 24px)",
+    paddingLeft: "calc(env(safe-area-inset-left) + 14px)",
+
     fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    background:
+      "radial-gradient(circle at 1px 1px, rgba(59,130,246,.10) 1px, rgba(0,0,0,0) 1px) 0 0 / 14px 14px," +
+      "radial-gradient(120% 70% at 50% 30%, rgba(59,130,246,.18) 0%, rgba(59,130,246,0) 60%)," +
+      "linear-gradient(180deg, #f8fbff 0%, #eef3fb 55%, #f7fafc 100%)",
+    overflowX: "hidden",
   };
 
-  const section: React.CSSProperties = {
-    background: "#ffffff",
-    borderRadius: 18,
-    padding: "18px",
-    marginBottom: 16,
-    boxShadow: "0 2px 10px rgba(0,0,0,.04)",
+  const wrap: React.CSSProperties = {
+    width: "100%",
+    maxWidth: 620,
+    margin: "0 auto",
+    boxSizing: "border-box",
   };
 
-  const primaryCard: React.CSSProperties = {
-    ...section,
-    background: "linear-gradient(135deg, #1e40af, #2563eb)",
+  const rootReset: React.CSSProperties = { boxSizing: "border-box" };
+
+  const card: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 34,
+    background: "rgba(255,255,255,.90)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 26px 80px rgba(2,6,23,.16)",
+    backdropFilter: "blur(10px)",
+    padding: "clamp(16px, 2.8vw, 22px)",
+    overflow: "hidden",
+    position: "relative",
+  };
+
+  const cardGlow: React.CSSProperties = {
+    position: "absolute",
+    inset: -1,
+    pointerEvents: "none",
+    background:
+      "radial-gradient(120% 120% at 15% 10%, rgba(59,130,246,.14) 0%, rgba(59,130,246,0) 55%)," +
+      "radial-gradient(120% 120% at 95% 30%, rgba(255,179,0,.10) 0%, rgba(255,179,0,0) 50%)",
+    filter: "blur(10px)",
+    opacity: 0.9,
+  };
+
+  const topRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 14,
+    position: "relative",
+    zIndex: 1,
+  };
+
+  const brand: React.CSSProperties = { minWidth: 0 };
+
+  const brandName: React.CSSProperties = {
+    margin: 0,
+    fontWeight: 980,
+    fontSize: 18,
+    letterSpacing: -0.35,
+    color: "#0f172a",
+    lineHeight: 1.1,
+  };
+
+  const brandSub: React.CSSProperties = {
+    marginTop: 5,
+    fontSize: 12.5,
+    fontWeight: 900,
+    color: "rgba(15,23,42,.62)",
+    letterSpacing: -0.15,
+  };
+
+  const tinyBadge: React.CSSProperties = {
+    flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 12px",
+    borderRadius: 999,
+    background: "rgba(15,23,42,.04)",
+    border: "1px solid rgba(2,6,23,.06)",
+    color: "rgba(15,23,42,.68)",
+    fontWeight: 900,
+    fontSize: 12.5,
+    whiteSpace: "nowrap",
+    userSelect: "none",
+  };
+
+  const dot: React.CSSProperties = {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    background: ready ? (isAuthed ? "#22c55e" : "#f59e0b") : "rgba(15,23,42,.25)",
+    boxShadow: ready ? (isAuthed ? "0 0 0 4px rgba(34,197,94,.12)" : "0 0 0 4px rgba(245,158,11,.12)") : "none",
+  };
+
+  // --- Primary Action (GPS) ---
+  const actionBlue: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    background: "linear-gradient(135deg, #1e40af 0%, #2f6fdb 50%, #1d4ed8 100%)",
+    border: "1px solid rgba(255,255,255,.18)",
+    boxShadow: "0 20px 60px rgba(2,6,23,.18)",
     color: "#fff",
     cursor: "pointer",
+    position: "relative",
+    overflow: "hidden",
+    minHeight: 104,
+
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    touchAction: "manipulation",
   };
 
-  const rowBetween: React.CSSProperties = {
-    display: "flex",
-    justifyContent: "space-between",
+  const overlayBlue: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(130% 140% at 88% 20%, rgba(255,255,255,.22) 0%, rgba(255,255,255,0) 55%)," +
+      "radial-gradient(140% 140% at 25% 95%, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 62%)," +
+      "linear-gradient(180deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,0) 50%)",
+    pointerEvents: "none",
+  };
+
+  const navLeft: React.CSSProperties = {
+    minWidth: 0,
+    flex: "1 1 auto",
+    position: "relative",
+    zIndex: 1,
+  };
+
+  const navTitle: React.CSSProperties = {
+    fontWeight: 1000,
+    fontSize: 22,
+    letterSpacing: -0.25,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+
+  const navSub: React.CSSProperties = {
+    marginTop: 7,
+    fontWeight: 850,
+    opacity: 0.88,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+
+  const pill: React.CSSProperties = {
+    flex: "0 0 auto",
+    position: "relative",
+    zIndex: 1,
+    display: "inline-flex",
     alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 14px",
+    borderRadius: 999,
+    fontWeight: 1000,
+    whiteSpace: "nowrap",
+    userSelect: "none",
+  };
+
+  const pillBlue: React.CSSProperties = {
+    ...pill,
+    background: "rgba(255,255,255,.14)",
+    border: "1px solid rgba(255,255,255,.18)",
+    boxShadow: "0 10px 28px rgba(2,6,23,.14)",
+  };
+
+  // --- Secondary Action (Nouveau Circuit) -> ORANGE/JAUNE demandé ---
+  const actionOrange: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    marginTop: 14,
+    background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 45%, #ffffff 100%)",
+    border: "1px solid rgba(234,88,12,.16)",
+    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    cursor: "pointer",
+    minHeight: 92,
+    position: "relative",
+    overflow: "hidden",
+    touchAction: "manipulation",
+  };
+
+  const overlayOrange: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    pointerEvents: "none",
+    background:
+      "radial-gradient(120% 140% at 92% 30%, rgba(251,191,36,.30) 0%, rgba(251,191,36,0) 58%)," +
+      "radial-gradient(140% 140% at 20% 100%, rgba(234,88,12,.14) 0%, rgba(234,88,12,0) 60%)," +
+      "linear-gradient(180deg, rgba(255,255,255,.70) 0%, rgba(255,255,255,0) 60%)",
+  };
+
+  const newLeft: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    minWidth: 0,
+    flex: "1 1 auto",
+    position: "relative",
+    zIndex: 1,
+  };
+
+  const newTitle: React.CSSProperties = {
+    fontWeight: 1000,
+    fontSize: 18,
+    color: "#b45309",
+    letterSpacing: -0.25,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+
+  const newSub: React.CSSProperties = {
+    marginTop: 7,
+    fontWeight: 850,
+    color: "rgba(180,83,9,.72)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+
+  const pillOrange: React.CSSProperties = {
+    ...pill,
+    background: "linear-gradient(135deg, rgba(251,191,36,.20) 0%, rgba(234,88,12,.16) 100%)",
+    border: "1px solid rgba(180,83,9,.22)",
+    color: "rgba(146,64,14,.95)",
+    boxShadow: "0 10px 26px rgba(2,6,23,.10)",
+  };
+
+  const quote: React.CSSProperties = {
+    textAlign: "center",
+    marginTop: 18,
+    fontWeight: 950,
+    fontSize: "clamp(18px, 2.2vw, 22px)",
+    color: "rgba(15,23,42,.68)",
+    letterSpacing: -0.35,
+    lineHeight: 1.25,
+    position: "relative",
+    zIndex: 1,
+  };
+
+  // ✅ bus en bas, plus propre (sans “flottant”)
+  const busImg: React.CSSProperties = {
+    width: "min(380px, 82%)",
+    margin: "14px auto 0",
+    display: "block",
+    opacity: 0.36,
+    filter: "blur(.18px)",
+    transform: "translateY(8px)",
+    pointerEvents: "none",
+    userSelect: "none",
   };
 
   return (
     <div style={page}>
-      {/* HEADER */}
-      <div style={{ marginBottom: 24 }}>
-        <h2 style={{ margin: 0, fontWeight: 900 }}>Groupe Breton</h2>
-        <div style={{ opacity: 0.6, fontWeight: 600 }}>Espace conducteur</div>
+      <div style={wrap}>
+        <div style={{ ...rootReset }}>
+          <div style={card}>
+            <div style={cardGlow} />
+
+            {/* Header */}
+            <div style={topRow}>
+              <div style={brand}>
+                <p style={brandName}>Groupe Breton</p>
+                <div style={brandSub}>Espace conducteur</div>
+              </div>
+
+              <div style={tinyBadge} title={ready ? (isAuthed ? "Connecté" : "Déconnecté") : "Chargement..."}>
+                <span style={dot} />
+                {ready ? (isAuthed ? "Connecté" : "Déconnecté") : "…"}
+              </div>
+            </div>
+
+            {view === "home" ? (
+              <>
+                {!ready ? null : !isAuthed ? (
+                  <button
+                    type="button"
+                    style={{ ...btn("primary"), width: "100%", boxSizing: "border-box" }}
+                    onClick={() => goLogin("/")}
+                  >
+                    Se connecter
+                  </button>
+                ) : null}
+
+                {/* NAVIGATION */}
+                <div style={actionBlue} onClick={() => setView("gps")} title="Navigation guidée">
+                  <div style={overlayBlue} />
+                  <div style={navLeft}>
+                    <div style={navTitle}>NAVIGATION GPS</div>
+                    <div style={navSub}>Navigation guidée en temps réel</div>
+                  </div>
+                  <div style={pillBlue}>Ouvrir ›</div>
+                </div>
+
+                {/* NOUVEAU CIRCUIT (jaune/orange) */}
+                <div style={actionOrange} onClick={goRecord} title="Nouveau / Mettre à jour">
+                  <div style={overlayOrange} />
+
+                  <div style={newLeft}>
+                    <div
+                      style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 14,
+                        display: "grid",
+                        placeItems: "center",
+                        background: "linear-gradient(135deg, rgba(251,191,36,.22) 0%, rgba(234,88,12,.18) 100%)",
+                        border: "1px solid rgba(180,83,9,.18)",
+                        boxShadow: "0 12px 26px rgba(2,6,23,.10)",
+                        flex: "0 0 auto",
+                      }}
+                      aria-hidden="true"
+                    >
+                      <RefreshCw size={22} color="rgba(180,83,9,.92)" />
+                    </div>
+
+                    <div style={{ minWidth: 0 }}>
+                      <div style={newTitle}>NOUVEAU CIRCUIT</div>
+                      <div style={newSub}>Mettre à jour circuit existant</div>
+                    </div>
+                  </div>
+
+                  <div style={pillOrange}>Ouvrir ›</div>
+                </div>
+
+                <div style={quote}>
+                  Vous transportez plus que des élèves. <br />
+                  Vous transportez l’avenir.
+                </div>
+
+                {/* ✅ Remis bus.png en bas */}
+                <img src="/bus.png" alt="" aria-hidden="true" style={busImg} />
+              </>
+            ) : (
+              <>
+                {/* GPS selection */}
+                <div style={{ display: "grid", gap: 12, position: "relative", zIndex: 1 }}>
+                  <button type="button" style={btn("ghost")} onClick={() => setView("home")}>
+                    Retour
+                  </button>
+
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 950, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
+                      Transporteur
+                    </div>
+                    <select style={select} value={transporteur} onChange={(e) => setTransporteur(e.target.value as TCode)}>
+                      <option value="B">{LABEL.B}</option>
+                      <option value="C">{LABEL.C}</option>
+                      <option value="S">{LABEL.S}</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 950, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
+                      Circuit
+                    </div>
+                    <select
+                      style={select}
+                      value={circuitId}
+                      onChange={(e) => setCircuitId(e.target.value)}
+                      disabled={!canUse}
+                    >
+                      {!canUse ? (
+                        <option value="">(connexion requise)</option>
+                      ) : circuits.length ? (
+                        circuits.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nom}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">(aucun circuit)</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    style={{
+                      ...btn("primary"),
+                      width: "100%",
+                      opacity: canUse && hasCircuit ? 1 : 0.55,
+                      boxSizing: "border-box",
+                    }}
+                    onClick={goNav}
+                    disabled={!canUse || !hasCircuit}
+                  >
+                    Ouvrir la navigation
+                  </button>
+
+                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.70)", fontWeight: 950, fontSize: 13.5 }}>
+                    {selected ? selected.nom : ""}
+                  </div>
+
+                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.55)", fontWeight: 850, fontSize: 12.5 }}>
+                    Transporteur: {LABEL[transporteur]}
+                  </div>
+
+                  {/* petit rappel visuel bus en mode GPS aussi (discret) */}
+                  <img src="/bus.png" alt="" aria-hidden="true" style={{ ...busImg, opacity: 0.20, marginTop: 8 }} />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
-
-      {view === "home" ? (
-        <>
-          {!ready ? null : !isAuthed ? (
-            <button
-              type="button"
-              style={{ ...btn("primary"), width: "100%", marginBottom: 16 }}
-              onClick={() => goLogin("/")}
-            >
-              Se connecter
-            </button>
-          ) : null}
-
-          {/* NAVIGATION */}
-          <div style={primaryCard} onClick={() => setView("gps")}>
-            <div style={rowBetween}>
-              <div>
-                <div style={{ fontSize: 20, fontWeight: 900 }}>NAVIGATION GPS</div>
-                <div style={{ opacity: 0.9, marginTop: 4 }}>
-                  Navigation guidée en temps réel
-                </div>
-              </div>
-              <div style={{ fontWeight: 800 }}>Ouvrir ›</div>
-            </div>
-          </div>
-
-          {/* NOUVEAU */}
-          <div style={{ ...section, cursor: "pointer" }} onClick={goRecord}>
-            <div style={rowBetween}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <RefreshCw size={22} />
-                <div>
-                  <div style={{ fontWeight: 800 }}>NOUVEAU CIRCUIT</div>
-                  <div style={{ opacity: 0.6 }}>Mettre à jour circuit existant</div>
-                </div>
-              </div>
-              <div style={{ fontWeight: 700 }}>Ouvrir ›</div>
-            </div>
-          </div>
-
-          {/* MESSAGE */}
-          <div style={{ textAlign: "center", marginTop: 30, opacity: 0.7 }}>
-            <strong>
-              Vous transportez plus que des élèves.
-              <br />
-              Vous transportez l’avenir.
-            </strong>
-          </div>
-        </>
-      ) : (
-        <>
-          <button style={{ ...btn("ghost"), marginBottom: 16 }} onClick={() => setView("home")}>
-            Retour
-          </button>
-
-          <div style={section}>
-            <div style={{ marginBottom: 8, fontWeight: 700 }}>Transporteur</div>
-            <select
-              style={select}
-              value={transporteur}
-              onChange={(e) => setTransporteur(e.target.value as TCode)}
-            >
-              <option value="B">{LABEL.B}</option>
-              <option value="C">{LABEL.C}</option>
-              <option value="S">{LABEL.S}</option>
-            </select>
-          </div>
-
-          <div style={section}>
-            <div style={{ marginBottom: 8, fontWeight: 700 }}>Circuit</div>
-            <select
-              style={select}
-              value={circuitId}
-              onChange={(e) => setCircuitId(e.target.value)}
-              disabled={!canUse}
-            >
-              {!canUse ? (
-                <option value="">(connexion requise)</option>
-              ) : circuits.length ? (
-                circuits.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.nom}
-                  </option>
-                ))
-              ) : (
-                <option value="">(aucun circuit)</option>
-              )}
-            </select>
-          </div>
-
-          <button
-            type="button"
-            style={{
-              ...btn("primary"),
-              width: "100%",
-              opacity: canUse && hasCircuit ? 1 : 0.55,
-            }}
-            onClick={goNav}
-            disabled={!canUse || !hasCircuit}
-          >
-            Ouvrir la navigation
-          </button>
-
-          {selected && (
-            <div style={{ textAlign: "center", marginTop: 14, opacity: 0.6 }}>
-              {selected.nom}
-            </div>
-          )}
-        </>
-      )}
     </div>
   );
 }
