@@ -329,6 +329,20 @@ function smoothAngle(prev: number, next: number) {
 }
 
 /* =========================
+   iOS tap helper (évite le “double tap”)
+========================= */
+
+function tapHandler(fn: () => void) {
+  return (e: any) => {
+    try {
+      e.preventDefault?.();
+      e.stopPropagation?.();
+    } catch {}
+    fn();
+  };
+}
+
+/* =========================
    Main
 ========================= */
 
@@ -856,38 +870,38 @@ export default function NavLive() {
   }
 
   // ✅ Recentrer = jump immédiat + reprise follow “instant”
-function recenter() {
-  followRef.current = true;
+  function recenter() {
+    followRef.current = true;
 
-  const m = mapRef.current;
-  const p = animPosRef.current ?? me;
-  if (!m || !p) return;
+    const m = mapRef.current;
+    const p = animPosRef.current ?? me;
+    if (!m || !p) return;
 
-  try {
-    m.stop();
-  } catch {}
+    try {
+      m.stop();
+    } catch {}
 
-  // quand on recentre, on “redonne” la main à l’auto-zoom
-  manualZoomRef.current = null;
-  manualZoomUntilRef.current = 0;
+    // quand on recentre, on “redonne” la main à l’auto-zoom
+    manualZoomRef.current = null;
+    manualZoomUntilRef.current = 0;
 
-  const v = speedRef.current ?? null;
-  const kmh = v != null ? v * 3.6 : 0;
-  const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+    const v = speedRef.current ?? null;
+    const kmh = v != null ? v * 3.6 : 0;
+    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
 
-  const yOff = computeFollowOffsetPx(m);
-  const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
+    const yOff = computeFollowOffsetPx(m);
+    const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
-  try {
-    (m as any).jumpTo({
-      center: [p.lng, p.lat],
-      zoom: targetZoom,
-      pitch: 55,
-      bearing: b,
-      offset: [0, yOff],
-    });
-  } catch {}
-}
+    try {
+      (m as any).jumpTo({
+        center: [p.lng, p.lat],
+        zoom: targetZoom,
+        pitch: 55,
+        bearing: b,
+        offset: [0, yOff],
+      });
+    } catch {}
+  }
 
   async function enableAudio() {
     try {
@@ -958,6 +972,21 @@ function recenter() {
 
     return out;
   }, [hasOfficial, officialLine, points]);
+
+  // ✅ Fenêtre autorisée sur la trace active, basée sur l’ordre croissant des arrêts
+  function getActiveBounds(lineLen: number) {
+    const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
+
+    const curStop = stopIdxOnTrace[targetIdx] ?? 0;
+    const prevStop = targetIdx > 0 ? stopIdxOnTrace[targetIdx - 1] ?? 0 : 0;
+    const nextStop =
+      targetIdx + 1 < stopIdxOnTrace.length ? stopIdxOnTrace[targetIdx + 1] ?? curStop : curStop + SNAP_AHEAD_PTS;
+
+    const minIdx = clampIdx(Math.min(prevStop, curStop));
+    const maxIdx = clampIdx(Math.max(curStop, nextStop) + 80); // petit buffer après le prochain arrêt
+
+    return { minIdx, maxIdx };
+  }
 
   /* =========================
      Load circuit
@@ -1066,7 +1095,7 @@ function recenter() {
       if (m) {
         followRef.current = true;
         const yOff = computeFollowOffsetPx(m);
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] } as any);
+        (m as any).jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] });
       }
     } catch {}
   }
@@ -1163,45 +1192,46 @@ function recenter() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // ✅ Trace idx = commence au début, puis “rejoint” la trace et suit monotone forward
+          // ✅ Trace idx = commence au début (sans exception), puis rejoint et suit ta position courante,
+          //    MAIS dans une fenêtre autorisée par l'ordre croissant des arrêts (anti-croisements).
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
+            const { minIdx, maxIdx } = getActiveBounds(line.length);
 
-            // 1) tant qu’on n’a pas rejoint la trace: idx=0 (fenêtre active au début)
             if (!joinedTraceRef.current) {
+              // ✅ sans exception: fenêtre active au début de la trace
+              traceIdxRef.current = 0;
+
               const d = minDistanceToPolylineMeters(next, line);
               if (d != null && d <= JOIN_DIST_M) {
                 joinedTraceRef.current = true;
 
-                // au moment du join: on snap dans une fenêtre depuis le début (mais toujours sur le bon chemin)
+                // ✅ au join: snap sur ta position courante, mais uniquement dans les bornes des arrêts
                 const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
+                  nearestLineIndexWindow(next, line, minIdx, maxIdx) ??
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
+                  nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                  traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
+                  const floorIdx = Math.max(minIdx, traceIdxRef.current);
+                  traceIdxRef.current = clamp(pick.idx, floorIdx, maxIdx);
                 } else {
                   traceIdxRef.current = 0;
                 }
-              } else {
-                traceIdxRef.current = 0;
               }
             } else {
-              // 2) une fois rejoint: on snap UNIQUEMENT dans une fenêtre autour de l’idx courant
-              const curIdx = traceIdxRef.current;
-              const start = Math.max(0, curIdx - SNAP_BACK_PTS);
-              const end = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
+              // ✅ déjà rejoint: on suit ta position courante, monotone forward, borné par les arrêts
+              const floorIdx = Math.max(minIdx, traceIdxRef.current);
+              const ceilIdx = Math.max(floorIdx, maxIdx);
 
               const pick =
-                nearestLineIndexWindow(next, line, start, end) ??
-                nearestLineIndexWindow(next, line, curIdx, Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS));
+                nearestLineIndexWindow(next, line, floorIdx, ceilIdx) ??
+                nearestLineIndexWindow(next, line, floorIdx, Math.min(line.length - 1, floorIdx + SNAP_AHEAD_PTS));
 
               if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                // monotone forward (avec mini-retour toléré)
-                const minAllowed = Math.max(0, curIdx - 3);
-                const maxAllowed = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
-                traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
+                traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
               } else {
-                // trop loin -> on ne change pas (évite de sauter sur un croisement)
+                // trop loin -> on garde l'idx courant
               }
             }
 
@@ -1232,16 +1262,16 @@ function recenter() {
 
             // follow fluide mais rapide
             try {
-              m.easeTo({
-  center: [next.lng, next.lat],
-  zoom: targetZoom,
-  pitch: 55,
-  bearing: b,
-  offset: [0, yOff],
-  duration: 260,
-  easing: (x: number) => x,
-  essential: true,
-} as any);
+              (m as any).easeTo({
+                center: [next.lng, next.lat],
+                zoom: targetZoom,
+                pitch: 55,
+                bearing: b,
+                offset: [0, yOff],
+                duration: 260,
+                easing: (x: number) => x,
+                essential: true,
+              });
             } catch {}
           }
         }
@@ -1253,7 +1283,7 @@ function recenter() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, hasOfficial]);
+  }, [running, hasOfficial, stopIdxOnTrace, targetIdx]);
 
   /* =========================
      Quand le targetIdx change: maj visuelle stops
@@ -1437,7 +1467,11 @@ function recenter() {
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
-    touchAction: "manipulation",
+
+    // ✅ iOS: empêcher Safari de “voler” le tap / double-tap zoom
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+    WebkitTouchCallout: "none",
   };
 
   const dangerBtn: React.CSSProperties = {
@@ -1543,18 +1577,46 @@ function recenter() {
           })()}
 
         <div style={topButtonsRow}>
-          <button style={dangerBtn} onClick={stop} title="Terminer" aria-label="Terminer">
+          <button
+            style={dangerBtn}
+            onPointerDown={tapHandler(stop)}
+            onTouchStart={tapHandler(stop)}
+            onClick={tapHandler(stop)}
+            title="Terminer"
+            aria-label="Terminer"
+          >
             ✕
           </button>
 
           <div style={zoomCol}>
-            <button style={overlayBtn} onClick={zoomIn} aria-label="Zoom in" title="Zoom +">
+            <button
+              style={overlayBtn}
+              onPointerDown={tapHandler(zoomIn)}
+              onTouchStart={tapHandler(zoomIn)}
+              onClick={tapHandler(zoomIn)}
+              aria-label="Zoom in"
+              title="Zoom +"
+            >
               +
             </button>
-            <button style={overlayBtn} onClick={zoomOut} aria-label="Zoom out" title="Zoom -">
+            <button
+              style={overlayBtn}
+              onPointerDown={tapHandler(zoomOut)}
+              onTouchStart={tapHandler(zoomOut)}
+              onClick={tapHandler(zoomOut)}
+              aria-label="Zoom out"
+              title="Zoom -"
+            >
               −
             </button>
-            <button style={{ ...overlayBtn, fontSize: 20 }} onClick={recenter} aria-label="Recentrer" title="Recentrer">
+            <button
+              style={{ ...overlayBtn, fontSize: 20 }}
+              onPointerDown={tapHandler(recenter)}
+              onTouchStart={tapHandler(recenter)}
+              onClick={tapHandler(recenter)}
+              aria-label="Recentrer"
+              title="Recentrer"
+            >
               🎯
             </button>
 
@@ -1567,7 +1629,15 @@ function recenter() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
-              onClick={enableAudio}
+              onPointerDown={tapHandler(() => {
+                enableAudio();
+              })}
+              onTouchStart={tapHandler(() => {
+                enableAudio();
+              })}
+              onClick={tapHandler(() => {
+                enableAudio();
+              })}
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
