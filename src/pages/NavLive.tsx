@@ -856,38 +856,38 @@ export default function NavLive() {
   }
 
   // ✅ Recentrer = jump immédiat + reprise follow “instant”
-  function recenter() {
-    followRef.current = true;
+function recenter() {
+  followRef.current = true;
 
-    const m = mapRef.current;
-    const p = animPosRef.current ?? me;
-    if (!m || !p) return;
+  const m = mapRef.current;
+  const p = animPosRef.current ?? me;
+  if (!m || !p) return;
 
-    try {
-      m.stop();
-    } catch {}
+  try {
+    m.stop();
+  } catch {}
 
-    // quand on recentre, on “redonne” la main à l’auto-zoom
-    manualZoomRef.current = null;
-    manualZoomUntilRef.current = 0;
+  // quand on recentre, on “redonne” la main à l’auto-zoom
+  manualZoomRef.current = null;
+  manualZoomUntilRef.current = 0;
 
-    const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+  const v = speedRef.current ?? null;
+  const kmh = v != null ? v * 3.6 : 0;
+  const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
 
-    const yOff = computeFollowOffsetPx(m);
-    const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
+  const yOff = computeFollowOffsetPx(m);
+  const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
-    try {
-      m.jumpTo({
-        center: [p.lng, p.lat],
-        zoom: targetZoom,
-        pitch: 55,
-        bearing: b,
-        offset: [0, yOff],
-      });
-    } catch {}
-  }
+  try {
+    (m as any).jumpTo({
+      center: [p.lng, p.lat],
+      zoom: targetZoom,
+      pitch: 55,
+      bearing: b,
+      offset: [0, yOff],
+    });
+  } catch {}
+}
 
   async function enableAudio() {
     try {
@@ -1066,7 +1066,7 @@ export default function NavLive() {
       if (m) {
         followRef.current = true;
         const yOff = computeFollowOffsetPx(m);
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] });
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] } as any);
       }
     } catch {}
   }
@@ -1233,15 +1233,15 @@ export default function NavLive() {
             // follow fluide mais rapide
             try {
               m.easeTo({
-                center: [next.lng, next.lat],
-                zoom: targetZoom,
-                pitch: 55,
-                bearing: b,
-                offset: [0, yOff],
-                duration: 140,
-                easing: (x: number) => x,
-                essential: true,
-              });
+  center: [next.lng, next.lat],
+  zoom: targetZoom,
+  pitch: 55,
+  bearing: b,
+  offset: [0, yOff],
+  duration: 260,
+  easing: (x: number) => x,
+  essential: true,
+} as any);
             } catch {}
           }
         }
