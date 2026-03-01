@@ -116,7 +116,7 @@ function nearestLineIndex(me: LatLng, line: [number, number][]) {
   return { idx: bestIdx, dist: best };
 }
 
-/** ✅ index le plus proche mais CONTRAINT (pour éviter de "snapper" sur un autre croisement après stop 2, 3...) */
+/** ✅ index le plus proche mais CONTRAINT (fenêtre) */
 function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: number, end: number) {
   if (!line || line.length === 0) return null;
   const s = clamp(Math.floor(start), 0, line.length - 1);
@@ -275,6 +275,26 @@ async function tryEnterFullscreen() {
   } catch {}
 }
 
+function installAutoFullscreenOnce() {
+  let done = false;
+
+  const handler = async () => {
+    if (done) return;
+    done = true;
+    try {
+      await tryEnterFullscreen();
+    } catch {}
+    try {
+      window.removeEventListener("pointerdown", handler, { capture: true } as any);
+      window.removeEventListener("touchstart", handler, { capture: true } as any);
+    } catch {}
+  };
+
+  // capture=true pour passer avant Mapbox
+  window.addEventListener("pointerdown", handler, { capture: true });
+  window.addEventListener("touchstart", handler, { capture: true });
+}
+
 /* =========================
    Bearing helpers
 ========================= */
@@ -303,6 +323,7 @@ function bearingDeg(a: LatLng, b: LatLng) {
 }
 
 function smoothAngle(prev: number, next: number) {
+  // évite les sauts 359 -> 0
   const delta = ((next - prev + 540) % 360) - 180;
   return prev + delta;
 }
@@ -333,8 +354,8 @@ export default function NavLive() {
   const [err, setErr] = useState<string | null>(null);
 
   // GPS refs (animation fluide)
-  const targetPosRef = useRef<LatLng | null>(null);
-  const animPosRef = useRef<LatLng | null>(null);
+  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
+  const animPosRef = useRef<LatLng | null>(null); // position animée (60fps)
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
@@ -345,13 +366,14 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Trace officielle
+  // Trace officielle (recorded)
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
   // Distance à la polyline (info)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
 
+  // Wake lock
   const { supported: wlSupported, active: wlActive } = useWakeLock(running);
 
   // Bandeau stop + ding
@@ -368,8 +390,11 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx nearest)
+  // Progression sur trace (idx)
   const traceIdxRef = useRef<number>(0);
+
+  // 🔒 “join” logique : au début on reste sur idx=0, puis on “rejoint” la trace quand on est proche
+  const joinedTraceRef = useRef<boolean>(false);
 
   // Anti-finish si arrêts trop proches
   const lastMeRef = useRef<LatLng | null>(null);
@@ -394,7 +419,7 @@ export default function NavLive() {
   // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
-  const STOP_SKIP_MIN_SPEED = 1.2;
+  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
@@ -406,6 +431,7 @@ export default function NavLive() {
 
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
+  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
@@ -414,7 +440,7 @@ export default function NavLive() {
   const MAP_LINE_LAYER = "line-layer";
   const MAP_LINE_HALO = "line-halo";
 
-  // Active trace (épaisse + halo)
+  // Active trace (fenêtre + halo)
   const MAP_ACTIVE_SRC = "active-src";
   const MAP_ACTIVE_LAYER = "active-layer";
   const MAP_ACTIVE_HALO = "active-halo";
@@ -423,6 +449,26 @@ export default function NavLive() {
   const MAP_STOPS_SRC = "stops-src";
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
+
+  // Fenêtre active (distance vers l’avant)
+  const ACTIVE_AHEAD_METERS = 520;
+  const ACTIVE_MAX_POINTS = 140;
+  const ACTIVE_MIN_POINTS = 12;
+
+  // Join / snapping (anti-croisements)
+  const JOIN_DIST_M = 35; // quand on est à <= 35m, on “rejoint” la trace
+  const SNAP_MAX_DIST_M = 55; // si on “snap” plus loin que ça, on refuse (évite les croisements)
+  const SNAP_AHEAD_PTS = 240; // fenêtre de recherche vers l’avant (points)
+  const SNAP_BACK_PTS = 12; // un petit retour autorisé
+
+  // Manual zoom lock (pour que +/− ne “revienne” pas)
+  const manualZoomRef = useRef<number | null>(null);
+  const manualZoomUntilRef = useRef<number>(0);
+
+  function lockManualZoom(z: number, ms = 2500) {
+    manualZoomRef.current = z;
+    manualZoomUntilRef.current = Date.now() + ms;
+  }
 
   function ensureMapToken() {
     const token = (import.meta as any).env?.VITE_MAPBOX_TOKEN || "";
@@ -479,12 +525,38 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  function buildLineGeoJSONFrom(line: [number, number][], startIdx: number) {
+  // Fenêtre active seulement vers l’avant, basée sur meters
+  function buildActiveForwardGeoJSON(line: [number, number][], idx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
-    const s = clamp(Math.floor(startIdx), 0, Math.max(0, line.length - 1));
-    const sliced = line.slice(s);
-    if (sliced.length < 2) return buildLineGeoJSON(line.slice(-2));
-    return buildLineGeoJSON(sliced);
+
+    const s = clamp(Math.floor(idx), 0, Math.max(0, line.length - 2));
+    let coords: [number, number][] = [];
+
+    let total = 0;
+    let count = 0;
+
+    const start = line[s];
+    coords.push([start[0], start[1]]);
+    count++;
+
+    for (let i = s; i < line.length - 1; i++) {
+      const a = { lat: line[i][0], lng: line[i][1] };
+      const b = { lat: line[i + 1][0], lng: line[i + 1][1] };
+      const seg = haversineMeters(a, b);
+
+      total += seg;
+      coords.push([line[i + 1][0], line[i + 1][1]]);
+      count++;
+
+      if (count >= ACTIVE_MAX_POINTS) break;
+      if (total >= ACTIVE_AHEAD_METERS && count >= ACTIVE_MIN_POINTS) break;
+    }
+
+    if (coords.length < 2) {
+      const tail = line.slice(Math.max(0, line.length - 2));
+      return buildLineGeoJSON(tail);
+    }
+    return buildLineGeoJSON(coords);
   }
 
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
@@ -492,11 +564,24 @@ export default function NavLive() {
       type: "FeatureCollection" as const,
       features: pts.map((p, i) => ({
         type: "Feature" as const,
-        properties: { idx: i, num: String(i + 1), label: p.label ?? "", active: i === activeIdx ? 1 : 0 },
+        properties: {
+          idx: i,
+          num: String(i + 1),
+          label: p.label ?? "",
+          active: i === activeIdx ? 1 : 0,
+        },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
   }
+
+  // FULL = visible, mais moins “dominant” que l’active
+  const FULL_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 3.8, 15, 5.0, 17, 6.3, 19, 7.4];
+  const FULL_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 7.4, 15, 9.8, 17, 12.4, 19, 14.8];
+
+  // ACTIVE = nettement plus large
+  const ACTIVE_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 7.2, 15, 9.8, 17, 12.8, 19, 15.8];
+  const ACTIVE_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 12.2, 15, 16.8, 17, 22.6, 19, 28.2];
 
   function applyOverlays() {
     const m = mapRef.current;
@@ -517,6 +602,7 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
+    // TRACE COMPLETE
     if (fullLine && fullLine.length >= 2) {
       try {
         const geo = buildLineGeoJSON(fullLine);
@@ -527,7 +613,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#93c5fd", "line-width": 10, "line-opacity": 0.18 },
+          paint: {
+            "line-color": "#FFFFFF",
+            "line-width": FULL_HALO_WIDTH,
+            "line-opacity": 0.55,
+            "line-blur": 0.25,
+          },
         });
 
         m.addLayer({
@@ -535,16 +626,22 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#2563eb", "line-width": 6, "line-opacity": 0.55 },
+          paint: {
+            "line-color": "#2563eb",
+            "line-width": FULL_LINE_WIDTH,
+            "line-opacity": 0.58,
+            "line-blur": 0.06,
+          },
         });
       } catch (e) {
         console.error("Mapbox apply full line failed:", e);
       }
     }
 
+    // TRACE ACTIVE
     if (fullLine && fullLine.length >= 2) {
       try {
-        const activeGeo = buildLineGeoJSONFrom(fullLine, traceIdxRef.current);
+        const activeGeo = buildActiveForwardGeoJSON(fullLine, traceIdxRef.current);
         m.addSource(MAP_ACTIVE_SRC, { type: "geojson", data: activeGeo as any });
 
         m.addLayer({
@@ -552,7 +649,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#93c5fd", "line-width": 18, "line-opacity": 0.35 },
+          paint: {
+            "line-color": "#93c5fd",
+            "line-width": ACTIVE_HALO_WIDTH,
+            "line-opacity": 0.28,
+            "line-blur": 1.15,
+          },
         });
 
         m.addLayer({
@@ -560,13 +662,19 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#1d4ed8", "line-width": 12, "line-opacity": 0.98 },
+          paint: {
+            "line-color": "#1d4ed8",
+            "line-width": ACTIVE_LINE_WIDTH,
+            "line-opacity": 1.0,
+            "line-blur": 0.02,
+          },
         });
       } catch (e) {
         console.error("Mapbox apply active line failed:", e);
       }
     }
 
+    // STOPS
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
@@ -595,7 +703,11 @@ export default function NavLive() {
             "text-allow-overlap": true,
             "text-ignore-placement": true,
           },
-          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(0,0,0,0.55)",
+            "text-halo-width": 1.6,
+          },
         });
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
@@ -606,33 +718,54 @@ export default function NavLive() {
   function upsertStopsOnMap() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
+
     try {
       const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
       const data = buildStopsGeoJSON(stopsRef.current, targetIdx) as any;
+
       if (src) {
         src.setData(data);
         if (!m.getLayer(MAP_STOPS_LAYER) || !m.getLayer(MAP_STOPS_NUM_LAYER)) applyOverlays();
-      } else applyOverlays();
+      } else {
+        applyOverlays();
+      }
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
       applyOverlays();
     }
   }
 
+  // throttle: update active seulement si idx change ou si >250ms
+  const lastActiveUpdateRef = useRef<{ idx: number; t: number }>({ idx: -1, t: 0 });
+
   function upsertActiveLineOnMap() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
+
     try {
       const full = lineRef.current;
       if (!full || full.length < 2) return;
 
+      const now = performance.now();
+      const idx = traceIdxRef.current;
+
+      const last = lastActiveUpdateRef.current;
+      const idxChanged = idx !== last.idx;
+      const timeOk = now - last.t >= 250;
+
+      if (!idxChanged && !timeOk) return;
+
+      lastActiveUpdateRef.current = { idx, t: now };
+
       const src = m.getSource(MAP_ACTIVE_SRC) as mapboxgl.GeoJSONSource | undefined;
-      const data = buildLineGeoJSONFrom(full, traceIdxRef.current) as any;
+      const data = buildActiveForwardGeoJSON(full, idx) as any;
 
       if (src) {
         src.setData(data);
         if (!m.getLayer(MAP_ACTIVE_LAYER) || !m.getLayer(MAP_ACTIVE_HALO)) applyOverlays();
-      } else applyOverlays();
+      } else {
+        applyOverlays();
+      }
     } catch (e) {
       console.error("upsertActiveLineOnMap failed:", e);
       applyOverlays();
@@ -651,7 +784,7 @@ export default function NavLive() {
 
     const m = new mapboxgl.Map({
       container: mapElRef.current,
-      style: "mapbox://styles/mapbox/navigation-day-v1",
+      style: "mapbox://styles/mapbox/streets-v12",
       center: [-73.0, 46.8],
       zoom: 16.0,
       pitch: 55,
@@ -672,19 +805,39 @@ export default function NavLive() {
         m.resize();
       } catch {}
     });
+
     m.on("style.load", () => applyOverlays());
 
     return m;
   }
 
   function zoomIn() {
+    const m = mapRef.current;
+    if (!m) return;
     try {
-      mapRef.current?.zoomIn({ duration: 200 });
+      m.stop();
+    } catch {}
+
+    const z = clamp(m.getZoom() + 0.9, 2, 20);
+    lockManualZoom(z);
+
+    try {
+      m.easeTo({ zoom: z, duration: 140, easing: (t) => t, essential: true });
     } catch {}
   }
+
   function zoomOut() {
+    const m = mapRef.current;
+    if (!m) return;
     try {
-      mapRef.current?.zoomOut({ duration: 200 });
+      m.stop();
+    } catch {}
+
+    const z = clamp(m.getZoom() - 0.9, 2, 20);
+    lockManualZoom(z);
+
+    try {
+      m.easeTo({ zoom: z, duration: 140, easing: (t) => t, essential: true });
     } catch {}
   }
 
@@ -702,13 +855,21 @@ export default function NavLive() {
     return yOff;
   }
 
+  // ✅ Recentrer = jump immédiat + reprise follow “instant”
   function recenter() {
     followRef.current = true;
-    tryEnterFullscreen();
 
     const m = mapRef.current;
     const p = animPosRef.current ?? me;
     if (!m || !p) return;
+
+    try {
+      m.stop();
+    } catch {}
+
+    // quand on recentre, on “redonne” la main à l’auto-zoom
+    manualZoomRef.current = null;
+    manualZoomUntilRef.current = 0;
 
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
@@ -717,16 +878,15 @@ export default function NavLive() {
     const yOff = computeFollowOffsetPx(m);
     const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
-    m.easeTo({
-      center: [p.lng, p.lat],
-      zoom: targetZoom,
-      pitch: 55,
-      bearing: b,
-      offset: [0, yOff],
-      duration: 450,
-      easing: (t: number) => t,
-      essential: true,
-    });
+    try {
+      m.jumpTo({
+        center: [p.lng, p.lat],
+        zoom: targetZoom,
+        pitch: 55,
+        bearing: b,
+        offset: [0, yOff],
+      });
+    } catch {}
   }
 
   async function enableAudio() {
@@ -753,12 +913,15 @@ export default function NavLive() {
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
+    joinedTraceRef.current = false;
+    traceIdxRef.current = 0;
+
     stopAll();
     nav("/");
   }
 
   /* =========================
-     Stop index on trace
+     Stop index sur trace (monotone forward)
   ========================= */
 
   const stopIdxOnTrace = useMemo(() => {
@@ -786,6 +949,7 @@ export default function NavLive() {
 
       const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
       let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
+
       if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
 
       out.push(idx);
@@ -817,7 +981,11 @@ export default function NavLive() {
     setHasOfficial(true);
 
     setFinished(false);
+
+    // ✅ IMPORTANT: au chargement, on démarre TOUJOURS au début de la trace
     traceIdxRef.current = 0;
+    joinedTraceRef.current = false;
+    lastActiveUpdateRef.current = { idx: -1, t: 0 };
 
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
@@ -855,6 +1023,10 @@ export default function NavLive() {
 
     setRunning(true);
 
+    // ✅ tente fullscreen tout de suite + fallback au 1er tap
+    tryEnterFullscreen();
+    installAutoFullscreenOnce();
+
     const got = await new Promise<{ lat: number; lng: number; acc?: number | null }>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
         (p) =>
@@ -888,11 +1060,13 @@ export default function NavLive() {
 
     await loadCircuit();
 
+    // ✅ jump instant au démarrage (pas de easing long)
     try {
       const m = mapRef.current;
       if (m) {
         followRef.current = true;
-        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55 });
+        const yOff = computeFollowOffsetPx(m);
+        m.jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] });
       }
     } catch {}
   }
@@ -970,7 +1144,7 @@ export default function NavLive() {
         };
 
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -989,9 +1163,48 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
+          // ✅ Trace idx = commence au début, puis “rejoint” la trace et suit monotone forward
           if (hasOfficial && lineRef.current.length >= 2) {
-            const near = nearestLineIndex(next, lineRef.current);
-            if (near) traceIdxRef.current = near.idx;
+            const line = lineRef.current;
+
+            // 1) tant qu’on n’a pas rejoint la trace: idx=0 (fenêtre active au début)
+            if (!joinedTraceRef.current) {
+              const d = minDistanceToPolylineMeters(next, line);
+              if (d != null && d <= JOIN_DIST_M) {
+                joinedTraceRef.current = true;
+
+                // au moment du join: on snap dans une fenêtre depuis le début (mais toujours sur le bon chemin)
+                const pick =
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
+
+                if (pick && pick.dist <= SNAP_MAX_DIST_M) {
+                  traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
+                } else {
+                  traceIdxRef.current = 0;
+                }
+              } else {
+                traceIdxRef.current = 0;
+              }
+            } else {
+              // 2) une fois rejoint: on snap UNIQUEMENT dans une fenêtre autour de l’idx courant
+              const curIdx = traceIdxRef.current;
+              const start = Math.max(0, curIdx - SNAP_BACK_PTS);
+              const end = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
+
+              const pick =
+                nearestLineIndexWindow(next, line, start, end) ??
+                nearestLineIndexWindow(next, line, curIdx, Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS));
+
+              if (pick && pick.dist <= SNAP_MAX_DIST_M) {
+                // monotone forward (avec mini-retour toléré)
+                const minAllowed = Math.max(0, curIdx - 3);
+                const maxAllowed = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
+                traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
+              } else {
+                // trop loin -> on ne change pas (évite de sauter sur un croisement)
+              }
+            }
+
             upsertActiveLineOnMap();
           }
 
@@ -1004,21 +1217,32 @@ export default function NavLive() {
           if (followRef.current) {
             const v = speedRef.current ?? null;
             const kmh = v != null ? v * 3.6 : 0;
-            const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+            const computedZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+
+            const zoomLocked = Date.now() < manualZoomUntilRef.current && manualZoomRef.current != null;
+            const targetZoom = zoomLocked ? (manualZoomRef.current as number) : computedZoom;
 
             const yOff = computeFollowOffsetPx(m);
             const b = wrap360(lastBearingRef.current || 0);
 
-            m.easeTo({
-              center: [next.lng, next.lat],
-              zoom: targetZoom,
-              pitch: 55,
-              bearing: b,
-              offset: [0, yOff],
-              duration: 260,
-              easing: (x: number) => x,
-              essential: true,
-            });
+            // ✅ stop l’animation en cours pour éviter la “reprise lente”
+            try {
+              m.stop();
+            } catch {}
+
+            // follow fluide mais rapide
+            try {
+              m.easeTo({
+                center: [next.lng, next.lat],
+                zoom: targetZoom,
+                pitch: 55,
+                bearing: b,
+                offset: [0, yOff],
+                duration: 140,
+                easing: (x: number) => x,
+                essential: true,
+              });
+            } catch {}
           }
         }
       }
@@ -1031,11 +1255,18 @@ export default function NavLive() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, hasOfficial]);
 
+  /* =========================
+     Quand le targetIdx change: maj visuelle stops
+  ========================= */
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
+
+  /* =========================
+     Distance à la trace (info)
+  ========================= */
 
   useEffect(() => {
     if (!running) return;
@@ -1046,6 +1277,10 @@ export default function NavLive() {
     const dLine = minDistanceToPolylineMeters(p, officialLine);
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine]);
+
+  /* =========================
+     Stops + bandeau + ding + skip
+  ========================= */
 
   useEffect(() => {
     if (!running) return;
@@ -1080,10 +1315,10 @@ export default function NavLive() {
       const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
 
       if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
-        const next = targetIdx + 1;
-        if (next < points.length) {
+        const nextIdx = targetIdx + 1;
+        if (nextIdx < points.length) {
           if (audioOn) speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
-          setTargetIdx(next);
+          setTargetIdx(nextIdx);
 
           travelSinceTargetSetRef.current = 0;
           initialDistToTargetRef.current = null;
@@ -1134,16 +1369,16 @@ export default function NavLive() {
     if (dStop <= ARRIVE_STOP_M && allowArrive) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
-      const next = targetIdx + 1;
-      if (next < points.length) {
-        const nextTarget = points[next] ?? null;
+      const nextIdx = targetIdx + 1;
+      if (nextIdx < points.length) {
+        const nextTarget = points[nextIdx] ?? null;
         const distNext = nextTarget ? Math.round(haversineMeters(p, nextTarget)) : 0;
 
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
         if (audioOn) speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
-        setTargetIdx(next);
+        setTargetIdx(nextIdx);
 
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
@@ -1168,7 +1403,21 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, speak, ding, audioOn]);
+  }, [
+    running,
+    me,
+    target,
+    targetIdx,
+    points,
+    finished,
+    stopBanner.show,
+    hasOfficial,
+    officialLine,
+    stopIdxOnTrace,
+    speak,
+    ding,
+    audioOn,
+  ]);
 
   /* =========================
      UI
@@ -1188,6 +1437,7 @@ export default function NavLive() {
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
+    touchAction: "manipulation",
   };
 
   const dangerBtn: React.CSSProperties = {
@@ -1211,11 +1461,10 @@ export default function NavLive() {
     gap: hasBanner ? 10 : 0,
   };
 
-  // ✅ FIX ALIGNEMENT: on aligne en HAUT (X = même hauteur que le "+")
   const topButtonsRow: React.CSSProperties = {
     pointerEvents: "auto",
     display: "flex",
-    alignItems: "flex-start", // <-- IMPORTANT
+    alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 10,
   };
@@ -1228,12 +1477,9 @@ export default function NavLive() {
 
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
-      {/* MAP FULLSCREEN */}
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* TOP STACK */}
       <div style={topStack}>
-        {/* BANDEAU STOP (jaune) */}
         {stopBanner.show &&
           (() => {
             const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
@@ -1296,14 +1542,11 @@ export default function NavLive() {
             );
           })()}
 
-        {/* BUTTONS ROW */}
         <div style={topButtonsRow}>
-          {/* Terminer */}
           <button style={dangerBtn} onClick={stop} title="Terminer" aria-label="Terminer">
             ✕
           </button>
 
-          {/* Colonne droite: zoom/target/audio */}
           <div style={zoomCol}>
             <button style={overlayBtn} onClick={zoomIn} aria-label="Zoom in" title="Zoom +">
               +
@@ -1319,13 +1562,14 @@ export default function NavLive() {
               style={{
                 ...overlayBtn,
                 fontSize: 18,
-                background: audioOn ? "#16a34a" : "#10b981",
-                color: "#fff",
-                border: "1px solid rgba(0,0,0,.08)",
+                background: audioOn ? "#16a34a" : "#ffffff",
+                color: audioOn ? "#fff" : "#111827",
+                border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
+                boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
               onClick={enableAudio}
-              aria-label="Activer l'audio"
-              title="Activer l'audio"
+              aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
+              title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
               🔊
             </button>
@@ -1333,7 +1577,6 @@ export default function NavLive() {
         </div>
       </div>
 
-      {/* Erreur en bas à droite discret */}
       {err ? (
         <div
           style={{
