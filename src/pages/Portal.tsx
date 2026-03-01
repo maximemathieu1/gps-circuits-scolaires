@@ -102,7 +102,6 @@ export default function Portal() {
   ========================= */
 
   const page: React.CSSProperties = {
-    minHeight: "100vh",
     minHeight: "100dvh",
     width: "100%",
     boxSizing: "border-box",
