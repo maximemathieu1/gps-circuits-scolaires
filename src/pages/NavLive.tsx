@@ -303,7 +303,6 @@ function bearingDeg(a: LatLng, b: LatLng) {
 }
 
 function smoothAngle(prev: number, next: number) {
-  // évite les sauts 359 -> 0
   const delta = ((next - prev + 540) % 360) - 180;
   return prev + delta;
 }
@@ -334,8 +333,8 @@ export default function NavLive() {
   const [err, setErr] = useState<string | null>(null);
 
   // GPS refs (animation fluide)
-  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
-  const animPosRef = useRef<LatLng | null>(null); // position animée (60fps)
+  const targetPosRef = useRef<LatLng | null>(null);
+  const animPosRef = useRef<LatLng | null>(null);
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
@@ -395,7 +394,7 @@ export default function NavLive() {
   // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
-  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
+  const STOP_SKIP_MIN_SPEED = 1.2;
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
@@ -407,7 +406,6 @@ export default function NavLive() {
 
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
@@ -489,18 +487,12 @@ export default function NavLive() {
     return buildLineGeoJSON(sliced);
   }
 
-  // ✅ stops: "num" + "active" (active = target)
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
     return {
       type: "FeatureCollection" as const,
       features: pts.map((p, i) => ({
         type: "Feature" as const,
-        properties: {
-          idx: i,
-          num: String(i + 1),
-          label: p.label ?? "",
-          active: i === activeIdx ? 1 : 0,
-        },
+        properties: { idx: i, num: String(i + 1), label: p.label ?? "", active: i === activeIdx ? 1 : 0 },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
@@ -513,7 +505,6 @@ export default function NavLive() {
     const fullLine = lineRef.current;
     const pts = stopsRef.current;
 
-    // Clean
     safeRemoveLayer(m, MAP_LINE_LAYER);
     safeRemoveLayer(m, MAP_LINE_HALO);
     safeRemoveSource(m, MAP_LINE_SRC);
@@ -526,7 +517,6 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // TRACE COMPLETE (discrète)
     if (fullLine && fullLine.length >= 2) {
       try {
         const geo = buildLineGeoJSON(fullLine);
@@ -552,7 +542,6 @@ export default function NavLive() {
       }
     }
 
-    // TRACE ACTIVE (épaisse + halo)
     if (fullLine && fullLine.length >= 2) {
       try {
         const activeGeo = buildLineGeoJSONFrom(fullLine, traceIdxRef.current);
@@ -578,13 +567,11 @@ export default function NavLive() {
       }
     }
 
-    // STOPS: ✅ tous gros + rouges + numéros (comme l’actif)
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
-        // Cercles (TOUS identiques au “actif”)
         m.addLayer({
           id: MAP_STOPS_LAYER,
           type: "circle",
@@ -597,7 +584,6 @@ export default function NavLive() {
           },
         });
 
-        // Numéros
         m.addLayer({
           id: MAP_STOPS_NUM_LAYER,
           type: "symbol",
@@ -609,11 +595,7 @@ export default function NavLive() {
             "text-allow-overlap": true,
             "text-ignore-placement": true,
           },
-          paint: {
-            "text-color": "#ffffff",
-            "text-halo-color": "rgba(0,0,0,0.55)",
-            "text-halo-width": 1.6,
-          },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
         });
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
@@ -624,17 +606,13 @@ export default function NavLive() {
   function upsertStopsOnMap() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
-
     try {
       const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
       const data = buildStopsGeoJSON(stopsRef.current, targetIdx) as any;
-
       if (src) {
         src.setData(data);
         if (!m.getLayer(MAP_STOPS_LAYER) || !m.getLayer(MAP_STOPS_NUM_LAYER)) applyOverlays();
-      } else {
-        applyOverlays();
-      }
+      } else applyOverlays();
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
       applyOverlays();
@@ -644,7 +622,6 @@ export default function NavLive() {
   function upsertActiveLineOnMap() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
-
     try {
       const full = lineRef.current;
       if (!full || full.length < 2) return;
@@ -655,9 +632,7 @@ export default function NavLive() {
       if (src) {
         src.setData(data);
         if (!m.getLayer(MAP_ACTIVE_LAYER) || !m.getLayer(MAP_ACTIVE_HALO)) applyOverlays();
-      } else {
-        applyOverlays();
-      }
+      } else applyOverlays();
     } catch (e) {
       console.error("upsertActiveLineOnMap failed:", e);
       applyOverlays();
@@ -686,7 +661,6 @@ export default function NavLive() {
 
     mapRef.current = m;
 
-    // follow OFF uniquement sur geste utilisateur
     m.on("dragstart", (e: any) => e?.originalEvent && (followRef.current = false));
     m.on("pitchstart", (e: any) => e?.originalEvent && (followRef.current = false));
     m.on("rotatestart", (e: any) => e?.originalEvent && (followRef.current = false));
@@ -698,7 +672,6 @@ export default function NavLive() {
         m.resize();
       } catch {}
     });
-
     m.on("style.load", () => applyOverlays());
 
     return m;
@@ -761,7 +734,6 @@ export default function NavLive() {
       await ding.unlock();
     } catch {}
     try {
-      // test immédiat (iOS aime ça après un geste)
       ding.play();
       speak("Audio activé.", { cooldownMs: 0, interrupt: true, dedupe: false });
       setAudioOn(true);
@@ -786,7 +758,7 @@ export default function NavLive() {
   }
 
   /* =========================
-     ✅ Stop index sur trace (monotone forward)
+     Stop index on trace
   ========================= */
 
   const stopIdxOnTrace = useMemo(() => {
@@ -798,7 +770,6 @@ export default function NavLive() {
 
     const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
 
-    // stop 0: nearest global
     const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
     let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
     out.push(prevIdx);
@@ -815,7 +786,6 @@ export default function NavLive() {
 
       const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
       let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
-
       if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
 
       out.push(idx);
@@ -1000,7 +970,7 @@ export default function NavLive() {
         };
 
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
+        const movingEnough = sp == null ? true : sp >= 0.6;
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -1019,23 +989,18 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // trace progression
           if (hasOfficial && lineRef.current.length >= 2) {
             const near = nearestLineIndex(next, lineRef.current);
             if (near) traceIdxRef.current = near.idx;
-
-            // update active line (épaisse)
             upsertActiveLineOnMap();
           }
 
-          // layers can disappear on style reload => re-apply
           if (m.isStyleLoaded()) {
             if (!m.getLayer(MAP_LINE_LAYER) && lineRef.current.length >= 2) applyOverlays();
             if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
             if (!m.getLayer(MAP_ACTIVE_LAYER) && lineRef.current.length >= 2) applyOverlays();
           }
 
-          // follow "au volant"
           if (followRef.current) {
             const v = speedRef.current ?? null;
             const kmh = v != null ? v * 3.6 : 0;
@@ -1066,18 +1031,11 @@ export default function NavLive() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, hasOfficial]);
 
-  /* =========================
-     ✅ Quand le targetIdx change: maj visuelle stops
-  ========================= */
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
-
-  /* =========================
-     Distance à la trace (info)
-  ========================= */
 
   useEffect(() => {
     if (!running) return;
@@ -1088,10 +1046,6 @@ export default function NavLive() {
     const dLine = minDistanceToPolylineMeters(p, officialLine);
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine]);
-
-  /* =========================
-     Stops + bandeau + ding + skip
-  ========================= */
 
   useEffect(() => {
     if (!running) return;
@@ -1188,8 +1142,7 @@ export default function NavLive() {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
-        if (audioOn)
-          speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
+        if (audioOn) speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
         setTargetIdx(next);
 
         stopWarnRef.current = null;
@@ -1215,21 +1168,7 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
       }
     }
-  }, [
-    running,
-    me,
-    target,
-    targetIdx,
-    points,
-    finished,
-    stopBanner.show,
-    hasOfficial,
-    officialLine,
-    stopIdxOnTrace,
-    speak,
-    ding,
-    audioOn,
-  ]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, speak, ding, audioOn]);
 
   /* =========================
      UI
@@ -1261,7 +1200,6 @@ export default function NavLive() {
 
   const hasBanner = !!stopBanner.show;
 
-  // ✅ stack haut (bandeau + boutons en dessous) — et si pas de bandeau, pas d’espace
   const topStack: React.CSSProperties = {
     position: "absolute",
     top: "calc(env(safe-area-inset-top) + 10px)",
@@ -1273,10 +1211,11 @@ export default function NavLive() {
     gap: hasBanner ? 10 : 0,
   };
 
+  // ✅ FIX ALIGNEMENT: on aligne en HAUT (X = même hauteur que le "+")
   const topButtonsRow: React.CSSProperties = {
     pointerEvents: "auto",
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start", // <-- IMPORTANT
     justifyContent: "space-between",
     gap: 10,
   };
@@ -1357,9 +1296,9 @@ export default function NavLive() {
             );
           })()}
 
-        {/* BUTTONS ROW (sous le bandeau) */}
+        {/* BUTTONS ROW */}
         <div style={topButtonsRow}>
-          {/* Terminer (toujours premier plan) */}
+          {/* Terminer */}
           <button style={dangerBtn} onClick={stop} title="Terminer" aria-label="Terminer">
             ✕
           </button>
@@ -1376,7 +1315,6 @@ export default function NavLive() {
               🎯
             </button>
 
-            {/* Audio toggle */}
             <button
               style={{
                 ...overlayBtn,
@@ -1395,7 +1333,7 @@ export default function NavLive() {
         </div>
       </div>
 
-      {/* (Optionnel) Debug erreur en bas à droite discret */}
+      {/* Erreur en bas à droite discret */}
       {err ? (
         <div
           style={{
@@ -1417,27 +1355,6 @@ export default function NavLive() {
           {err}
         </div>
       ) : null}
-
-      {/* Petit indicateur discret */}
-      <div
-        style={{
-          position: "absolute",
-          left: 12,
-          bottom: "calc(env(safe-area-inset-bottom) + 12px)",
-          zIndex: 12000,
-          background: "rgba(17,24,39,.78)",
-          color: "white",
-          border: "1px solid rgba(255,255,255,.10)",
-          borderRadius: 14,
-          padding: "8px 10px",
-          fontWeight: 900,
-          fontSize: 12,
-          pointerEvents: "none",
-        }}
-      >
-        {finished ? "✅ Terminé" : "Navigation"} {wlSupported ? (wlActive ? "• Écran: ON" : "• Écran: OFF") : ""}{" "}
-        {audioOn ? "• Audio: ON" : "• Audio: OFF"} {offRouteM != null ? `• Écart: ${Math.round(offRouteM)} m` : ""}
-      </div>
     </div>
   );
 }
