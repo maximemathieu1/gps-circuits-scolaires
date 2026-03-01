@@ -1,26 +1,22 @@
 // src/pages/Portal.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
 import { callFn } from "@/lib/api";
 import { useAuth } from "@/lib/useAuth";
-
-import { page, container, card, h1, muted, btn, select } from "@/ui";
+import { btn, select } from "@/ui";
+import { RefreshCw } from "lucide-react";
 
 type TCode = "B" | "C" | "S";
 const LABEL: Record<TCode, string> = { B: "Breton", C: "Champagne", S: "Sécuritaire" };
 type Circuit = { id: string; nom: string };
 
-// ✅ iPhone/iOS audio unlock helper (inline, simple)
+// iOS audio unlock
 async function unlockIOSAudioOnce() {
-  // 1) Unlock AudioContext (ding)
   try {
-    const AC: any = window.AudioContext || (window as any).webkitAudioContext;
+    const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
     if (AC) {
       const ctx = new AC();
       if (ctx.state === "suspended") await ctx.resume();
-
-      // tiny beep (very low volume) to "prime" iOS audio
       const o = ctx.createOscillator();
       const g = ctx.createGain();
       g.gain.value = 0.001;
@@ -28,7 +24,6 @@ async function unlockIOSAudioOnce() {
       o.connect(g);
       g.connect(ctx.destination);
       o.start();
-
       setTimeout(() => {
         try {
           o.stop();
@@ -38,17 +33,10 @@ async function unlockIOSAudioOnce() {
     }
   } catch {}
 
-  // 2) Prime speechSynthesis (voice)
   try {
-    const synth = window.speechSynthesis;
-    synth?.getVoices?.();
-
     const u = new SpeechSynthesisUtterance(" ");
     u.volume = 1.0;
-    u.rate = 1.0;
-    u.pitch = 1.0;
     window.speechSynthesis.speak(u);
-
     setTimeout(() => {
       try {
         window.speechSynthesis.cancel();
@@ -62,12 +50,17 @@ export default function Portal() {
   const { ready, isAuthed } = useAuth();
 
   const [view, setView] = useState<"home" | "gps">("home");
-
   const [transporteur, setTransporteur] = useState<TCode>("B");
   const [circuits, setCircuits] = useState<Circuit[]>([]);
-  const [circuitId, setCircuitId] = useState<string>("");
+  const [circuitId, setCircuitId] = useState("");
 
-  const selected = useMemo(() => circuits.find((c) => c.id === circuitId) ?? null, [circuits, circuitId]);
+  const selected = useMemo(
+    () => circuits.find((c) => c.id === circuitId) ?? null,
+    [circuits, circuitId]
+  );
+
+  const canUse = ready && isAuthed;
+  const hasCircuit = Boolean(circuitId);
 
   async function load() {
     if (!isAuthed) {
@@ -75,12 +68,10 @@ export default function Portal() {
       setCircuitId("");
       return;
     }
-
     const r = await callFn<{ circuits: Circuit[] }>("circuits-api", {
       action: "list_circuits",
       transporteur_code: transporteur,
     });
-
     const list = r.circuits || [];
     setCircuits(list);
     setCircuitId((prev) => (prev && list.some((x) => x.id === prev) ? prev : list?.[0]?.id ?? ""));
@@ -97,14 +88,10 @@ export default function Portal() {
     nav("/login", { state: { redirectTo } });
   }
 
-  // ✅ GPS Naviguer = unlock iPhone audio + go nav
   async function goNav() {
     if (!isAuthed) return goLogin("/");
     if (!circuitId) return;
-
-    // iOS: must happen on user tap
     await unlockIOSAudioOnce();
-
     nav(`/nav?circuit=${encodeURIComponent(circuitId)}&t=${transporteur}`);
   }
 
@@ -113,157 +100,361 @@ export default function Portal() {
     nav("/record");
   }
 
-  // --- UI styles (identiques vibe)
-  const softShadow = "0 10px 30px rgba(17,24,39,.08)";
-  const ring = "0 0 0 6px rgba(59,130,246,.10)";
-
-  const circleBase: React.CSSProperties = {
-    borderRadius: 999,
+  // =========================
+  // Responsive layout (iOS + tablette)
+  // =========================
+  const page: React.CSSProperties = {
+    minHeight: "100vh",
+    width: "100%",
+    padding: "clamp(14px, 3.5vw, 28px)",
+    fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    background:
+      "radial-gradient(circle at 1px 1px, rgba(59,130,246,.10) 1px, rgba(0,0,0,0) 1px) 0 0 / 14px 14px," +
+      "radial-gradient(130% 70% at 50% 35%, rgba(59,130,246,.18) 0%, rgba(59,130,246,0) 60%)," +
+      "linear-gradient(180deg, #f7fafc 0%, #eef2f7 62%, #f7fafc 100%)",
     display: "grid",
     placeItems: "center",
-    border: "1px solid #e5e7eb",
-    background: "#fff",
+  };
+
+  const wrap: React.CSSProperties = {
+    width: "min(620px, 100%)",
+  };
+
+  // ✅ mini reset box-sizing (évite le débordement même si ton CSS global ne le fait pas)
+  const rootReset: React.CSSProperties = {
+    boxSizing: "border-box",
+  };
+
+  const card: React.CSSProperties = {
+    boxSizing: "border-box",
+    borderRadius: 34,
+    background: "rgba(255,255,255,.90)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 26px 80px rgba(2,6,23,.16)",
+    backdropFilter: "blur(10px)",
+    padding: "clamp(16px, 2.8vw, 22px)",
+    overflow: "hidden",
+    position: "relative",
+  };
+
+  const topRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 14,
+  };
+
+  const brand: React.CSSProperties = { minWidth: 0 };
+
+  const brandName: React.CSSProperties = {
+    margin: 0,
+    fontWeight: 950,
+    fontSize: 18,
+    letterSpacing: -0.3,
+    color: "#0f172a",
+    lineHeight: 1.1,
+  };
+
+  const brandSub: React.CSSProperties = {
+    marginTop: 4,
+    fontSize: 12.5,
+    fontWeight: 800,
+    color: "rgba(15,23,42,.62)",
+  };
+
+  // --- Navigation card (fix overflow + align CTA) ---
+  const actionBlue: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    background: "linear-gradient(135deg, #1e40af 0%, #2f6fdb 50%, #1d4ed8 100%)",
+    border: "1px solid rgba(255,255,255,.18)",
+    boxShadow: "0 20px 60px rgba(2,6,23,.18)",
+    color: "#fff",
     cursor: "pointer",
-    boxShadow: softShadow,
+    position: "relative",
+    overflow: "hidden",
+    minHeight: 98,
+
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+  };
+
+  const overlay: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(140% 140% at 88% 20%, rgba(255,255,255,.20) 0%, rgba(255,255,255,0) 55%)," +
+      "radial-gradient(140% 140% at 25% 95%, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 62%)," +
+      "radial-gradient(130% 150% at 92% 92%, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 62%)",
+    pointerEvents: "none",
+  };
+
+  const navLeft: React.CSSProperties = {
+    minWidth: 0,
+    flex: "1 1 auto",
+    position: "relative",
+    zIndex: 1,
+  };
+
+  const navRight: React.CSSProperties = {
+    flex: "0 0 auto",
+    position: "relative",
+    zIndex: 1,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 14px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,.14)",
+    border: "1px solid rgba(255,255,255,.18)",
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  };
+
+  // --- Secondary card ---
+  const actionLight: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    marginTop: 14,
+    background: "linear-gradient(180deg, rgba(255,255,255,.94) 0%, rgba(255,255,255,.78) 100%)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    cursor: "pointer",
+    minHeight: 86,
+  };
+
+  const newLeft: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    minWidth: 0,
+    flex: "1 1 auto",
+  };
+
+  // ✅ NOUVEAU: pill "Ouvrir" comme Navigation (mais teinte brun)
+  const newRightPill: React.CSSProperties = {
+    flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 14px",
+    borderRadius: 999,
+    background: "rgba(124,45,18,.12)",
+    border: "1px solid rgba(124,45,18,.18)",
+    fontWeight: 950,
+    color: "rgba(124,45,18,.88)",
+    whiteSpace: "nowrap",
+  };
+
+  const quote: React.CSSProperties = {
+    textAlign: "center",
+    marginTop: 18,
+    fontWeight: 900,
+    fontSize: "clamp(18px, 2.2vw, 22px)",
+    color: "rgba(15,23,42,.68)",
+    letterSpacing: -0.35,
+    lineHeight: 1.25,
+  };
+
+  const busImg: React.CSSProperties = {
+    width: "min(360px, 78%)",
+    margin: "12px auto 0",
+    display: "block",
+    opacity: 0.32,
+    filter: "blur(.2px)",
+    transform: "translateY(6px)",
+    pointerEvents: "none",
     userSelect: "none",
   };
 
-  const circlePrimary: React.CSSProperties = {
-    ...circleBase,
-    width: 150,
-    height: 150,
-    border: "1px solid rgba(37,99,235,.25)",
-    background: "linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)",
-    color: "#fff",
-    boxShadow: `${softShadow}, ${ring}`,
-  };
-
-  const circleWarn: React.CSSProperties = {
-    ...circleBase,
-    width: 150,
-    height: 150,
-    border: "1px solid rgba(245,158,11,.25)",
-    background: "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)",
-    color: "#7c2d12",
-  };
-
-  const disabledStyle: React.CSSProperties = {
-    opacity: 0.45,
-    cursor: "not-allowed",
-    boxShadow: "none",
-  };
-
-  const canUse = ready && isAuthed;
-  const hasCircuit = Boolean(circuitId);
-
   return (
     <div style={page}>
-      <div style={container}>
-        {/* HOME: 2 gros boutons */}
-        {view === "home" ? (
-          <>
-            <div style={card}>
-              <h1 style={h1}>Espace Conducteur</h1>
-              <div style={{ ...muted, marginTop: 4 }}>Navigation & gestion des circuits scolaires</div>
-            </div>
-
-            {!ready ? null : !isAuthed ? (
-              <div style={card}>
-                <button style={btn("primary")} onClick={() => goLogin("/")}>
-                  Se connecter
-                </button>
-              </div>
-            ) : null}
-
-            <div style={card}>
-              <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
-                <button style={circlePrimary} onClick={() => setView("gps")} title="Navigation guidée">
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NAVIGATION</div>
-                    <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8, opacity: 0.95 }}>GUIDÉE · GPS</div>
-                  </div>
-                </button>
-
-                <button style={circleWarn} onClick={goRecord} title="Nouveau / Mettre à jour">
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NOUVEAU</div>
-                    <div style={{ fontWeight: 950, fontSize: 13, marginTop: 8 }}>MISE À JOUR</div>
-                  </div>
-                </button>
-              </div>
-
-              {/* Ligne valorisante */}
-              <div
-                style={{
-                  textAlign: "center",
-                  marginTop: 24,
-                  fontWeight: 600,
-                  fontSize: 15,
-                  color: "#374151",
-                }}
-              >
-                Vous transportez plus que des élèves. Vous transportez l’avenir.
-              </div>
-            </div>
-          </>
-        ) : (
-          /* GPS: écran remplaçant (transporteur + circuit + bouton rond) */
-          <>
-            <div style={card}>
-              <div style={{ display: "flex", justifyContent: "flex-start" }}>
-                <button style={btn("ghost")} onClick={() => setView("home")}>
-                  Retour
-                </button>
+      <div style={wrap}>
+        <div style={{ ...rootReset }}>
+          <div style={card}>
+            {/* Header text only */}
+            <div style={topRow}>
+              <div style={brand}>
+                <p style={brandName}>Groupe Breton</p>
+                <div style={brandSub}>Espace conducteur</div>
               </div>
             </div>
 
-            <div style={card}>
-              <div style={{ display: "grid", gap: 12 }}>
-                <div>
-                  <div style={{ ...muted, marginBottom: 6 }}>Transporteur</div>
-                  <select style={select} value={transporteur} onChange={(e) => setTransporteur(e.target.value as TCode)}>
-                    <option value="B">{LABEL.B}</option>
-                    <option value="C">{LABEL.C}</option>
-                    <option value="S">{LABEL.S}</option>
-                  </select>
-                </div>
-
-                <div>
-                  <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
-                  <select style={select} value={circuitId} onChange={(e) => setCircuitId(e.target.value)} disabled={!canUse}>
-                    {!canUse ? (
-                      <option value="">(connexion requise)</option>
-                    ) : circuits.length ? (
-                      circuits.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.nom}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">(aucun circuit)</option>
-                    )}
-                  </select>
-                </div>
-
-                <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
+            {view === "home" ? (
+              <>
+                {!ready ? null : !isAuthed ? (
                   <button
-                    style={{ ...circlePrimary, ...(canUse && hasCircuit ? {} : disabledStyle) }}
+                    type="button"
+                    style={{ ...btn("primary"), width: "100%", boxSizing: "border-box" }}
+                    onClick={() => goLogin("/")}
+                  >
+                    Se connecter
+                  </button>
+                ) : null}
+
+                {/* Navigation */}
+                <div style={actionBlue} onClick={() => setView("gps")} title="Navigation guidée">
+                  <div style={overlay} />
+
+                  <div style={navLeft}>
+                    <div
+                      style={{
+                        fontWeight: 950,
+                        fontSize: 22,
+                        letterSpacing: -0.2,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      NAVIGATION GPS
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: 6,
+                        fontWeight: 750,
+                        opacity: 0.88,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Navigation guidée en temps réel
+                    </div>
+                  </div>
+
+                  <div style={navRight}>Ouvrir ›</div>
+                </div>
+
+                {/* Nouveau */}
+                <div style={actionLight} onClick={goRecord} title="Nouveau / Mettre à jour">
+                  <div style={newLeft}>
+                    <RefreshCw size={26} color="rgba(124,45,18,.85)" />
+                    <div style={{ minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontWeight: 950,
+                          fontSize: 18,
+                          color: "#7c2d12",
+                          letterSpacing: -0.2,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        NOUVEAU CIRCUIT
+                      </div>
+                      <div
+                        style={{
+                          marginTop: 6,
+                          fontWeight: 750,
+                          color: "rgba(124,45,18,.70)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Mettre à jour circuit existant
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ✅ Ajout du pill "Ouvrir" */}
+                  <div style={newRightPill}>Ouvrir ›</div>
+                </div>
+
+                <div style={quote}>
+                  Vous transportez plus que des élèves. <br />
+                  Vous transportez l’avenir.
+                </div>
+
+                <img src="/bus.png" alt="" aria-hidden="true" style={busImg} />
+              </>
+            ) : (
+              <>
+                {/* GPS selection */}
+                <div style={{ display: "grid", gap: 12 }}>
+                  <button type="button" style={btn("ghost")} onClick={() => setView("home")}>
+                    Retour
+                  </button>
+
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 900, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
+                      Transporteur
+                    </div>
+                    <select
+                      style={select}
+                      value={transporteur}
+                      onChange={(e) => setTransporteur(e.target.value as TCode)}
+                    >
+                      <option value="B">{LABEL.B}</option>
+                      <option value="C">{LABEL.C}</option>
+                      <option value="S">{LABEL.S}</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 900, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
+                      Circuit
+                    </div>
+                    <select
+                      style={select}
+                      value={circuitId}
+                      onChange={(e) => setCircuitId(e.target.value)}
+                      disabled={!canUse}
+                    >
+                      {!canUse ? (
+                        <option value="">(connexion requise)</option>
+                      ) : circuits.length ? (
+                        circuits.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nom}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">(aucun circuit)</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    style={{
+                      ...btn("primary"),
+                      width: "100%",
+                      opacity: canUse && hasCircuit ? 1 : 0.55,
+                      boxSizing: "border-box",
+                    }}
                     onClick={goNav}
                     disabled={!canUse || !hasCircuit}
-                    title="Naviguer"
                   >
-                    <div style={{ textAlign: "center" }}>
-                      <div style={{ fontWeight: 1000, fontSize: 22, lineHeight: 1 }}>GPS</div>
-                      <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>NAVIGUER</div>
-                    </div>
+                    Ouvrir la navigation
                   </button>
-                </div>
 
-                <div style={{ ...muted, textAlign: "center" }}>{selected ? selected.nom : ""}</div>
-              </div>
-            </div>
-          </>
-        )}
+                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.70)", fontWeight: 900, fontSize: 13.5 }}>
+                    {selected ? selected.nom : ""}
+                  </div>
+
+                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.55)", fontWeight: 800, fontSize: 12.5 }}>
+                    Transporteur: {LABEL[transporteur]}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -484,275 +484,449 @@ export default function Record() {
     nav("/");
   }
 
-  // --- Styles (même vibe que remplacant)
-  const softShadow = "0 10px 30px rgba(17,24,39,.08)";
-  const ring = "0 0 0 6px rgba(59,130,246,.10)";
-
-  const circleBase: React.CSSProperties = {
-    borderRadius: 999,
+  // =========================
+  // LOOK (aligné Portal)
+  // =========================
+  const pageLook: React.CSSProperties = {
+    minHeight: "100vh",
+    width: "100%",
+    padding: "clamp(14px, 3.5vw, 28px)",
+    fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    background:
+      "radial-gradient(circle at 1px 1px, rgba(59,130,246,.10) 1px, rgba(0,0,0,0) 1px) 0 0 / 14px 14px," +
+      "radial-gradient(130% 70% at 50% 35%, rgba(59,130,246,.18) 0%, rgba(59,130,246,0) 60%)," +
+      "linear-gradient(180deg, #f7fafc 0%, #eef2f7 62%, #f7fafc 100%)",
     display: "grid",
     placeItems: "center",
-    border: "1px solid #e5e7eb",
-    background: "#fff",
+    boxSizing: "border-box",
+  };
+
+  const wrap: React.CSSProperties = { width: "min(620px, 100%)" };
+
+  const mainCard: React.CSSProperties = {
+    boxSizing: "border-box",
+    borderRadius: 34,
+    background: "rgba(255,255,255,.90)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 26px 80px rgba(2,6,23,.16)",
+    backdropFilter: "blur(10px)",
+    padding: "clamp(16px, 2.8vw, 22px)",
+    overflow: "hidden",
+    position: "relative",
+  };
+
+  const topRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 14,
+  };
+
+  const brand: React.CSSProperties = { minWidth: 0 };
+  const brandName: React.CSSProperties = {
+    margin: 0,
+    fontWeight: 950,
+    fontSize: 18,
+    letterSpacing: -0.3,
+    color: "#0f172a",
+    lineHeight: 1.1,
+  };
+  const brandSub: React.CSSProperties = {
+    marginTop: 4,
+    fontSize: 12.5,
+    fontWeight: 800,
+    color: "rgba(15,23,42,.62)",
+  };
+
+  const sectionCard: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    background: "linear-gradient(180deg, rgba(255,255,255,.94) 0%, rgba(255,255,255,.78) 100%)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
+    marginTop: 14,
+  };
+
+  const actionBase: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    border: "1px solid rgba(255,255,255,.18)",
+    boxShadow: "0 20px 60px rgba(2,6,23,.18)",
+    color: "#fff",
     cursor: "pointer",
-    boxShadow: softShadow,
-    userSelect: "none",
+    position: "relative",
+    overflow: "hidden",
+    minHeight: 98,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
   };
 
-  const circlePrimary: React.CSSProperties = {
-    ...circleBase,
-    width: 136,
-    height: 136,
-    border: "1px solid rgba(37,99,235,.25)",
-    background: "linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)",
-    color: "#fff",
-    boxShadow: `${softShadow}, ${ring}`,
+  const overlay: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(140% 140% at 88% 20%, rgba(255,255,255,.20) 0%, rgba(255,255,255,0) 55%)," +
+      "radial-gradient(140% 140% at 25% 95%, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 62%)," +
+      "radial-gradient(130% 150% at 92% 92%, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 62%)",
+    pointerEvents: "none",
   };
 
-  const circleWarn: React.CSSProperties = {
-    ...circleBase,
-    width: 136,
-    height: 136,
-    border: "1px solid rgba(245,158,11,.25)",
-    background: "linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%)",
-    color: "#7c2d12",
+  const leftText: React.CSSProperties = { minWidth: 0, flex: "1 1 auto", position: "relative", zIndex: 1 };
+  const rightPill: React.CSSProperties = {
+    flex: "0 0 auto",
+    position: "relative",
+    zIndex: 1,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 14px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,.14)",
+    border: "1px solid rgba(255,255,255,.18)",
+    fontWeight: 950,
+    whiteSpace: "nowrap",
   };
 
-  const circleGood: React.CSSProperties = {
-    ...circleBase,
-    width: 136,
-    height: 136,
-    border: "1px solid rgba(16,185,129,.25)",
-    background: "linear-gradient(180deg, #10b981 0%, #059669 100%)",
-    color: "#fff",
-    boxShadow: softShadow,
+  const rightPillLight: React.CSSProperties = {
+    flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 14px",
+    borderRadius: 999,
+    background: "rgba(124,45,18,.10)",
+    border: "1px solid rgba(124,45,18,.18)",
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+    color: "rgba(124,45,18,.85)",
   };
 
-  const disabledStyle: React.CSSProperties = {
-    opacity: 0.45,
-    cursor: "not-allowed",
-    boxShadow: "none",
+  const disabledAction: React.CSSProperties = { opacity: 0.55, cursor: "not-allowed", boxShadow: "none" };
+
+  const actionBlue: React.CSSProperties = {
+    ...actionBase,
+    background: "linear-gradient(135deg, #1e40af 0%, #2f6fdb 50%, #1d4ed8 100%)",
+  };
+
+  const actionGreen: React.CSSProperties = {
+    ...actionBase,
+    background: "linear-gradient(135deg, #047857 0%, #10b981 55%, #059669 100%)",
+  };
+
+  const actionRed: React.CSSProperties = {
+    ...actionBase,
+    background: "linear-gradient(135deg, #7f1d1d 0%, #ef4444 55%, #dc2626 100%)",
+  };
+
+  const actionLightRow: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    background: "linear-gradient(180deg, rgba(255,255,255,.94) 0%, rgba(255,255,255,.78) 100%)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    cursor: "pointer",
+    minHeight: 86,
+  };
+
+  const warnTitle: React.CSSProperties = { fontWeight: 950, fontSize: 18, color: "#7c2d12", letterSpacing: -0.2 };
+  const warnSub: React.CSSProperties = { marginTop: 6, fontWeight: 750, color: "rgba(124,45,18,.70)" };
+
+  const statusLine: React.CSSProperties = {
+    textAlign: "center",
+    fontWeight: 900,
+    fontSize: 13,
+    color: "rgba(15,23,42,.68)",
   };
 
   const canStartNew = !busy && Boolean(newNom.trim());
   const canStartUpdate = !busy && Boolean(selectedCircuit);
 
-  const headerCardStyle: React.CSSProperties = { ...card, padding: "12px 14px" };
-
   return (
-    <div style={page}>
-      <div style={container}>
-        {/* Header minimal: Retour à gauche seulement */}
-        {!recording && step === "pick" && (
-          <div style={headerCardStyle}>
-            <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <button style={btn("ghost")} onClick={() => nav("/")}>
+    <div style={pageLook}>
+      <div style={wrap}>
+        <div style={mainCard}>
+          {/* Entête (même vibe Portal) */}
+          <div style={topRow}>
+            <div style={brand}>
+              <p style={brandName}>Groupe Breton</p>
+              <div style={brandSub}>Espace conducteur</div>
+            </div>
+
+            {/* Retour en haut à droite (comme tu montrais) */}
+            {!recording ? (
+              <button
+                type="button"
+                style={{ ...btn("ghost"), paddingInline: 16, borderRadius: 14 }}
+                onClick={() => {
+                  if (step === "pick") nav("/");
+                  else {
+                    setStep("pick");
+                    setNewNom("");
+                  }
+                }}
+                disabled={busy}
+              >
                 Retour
               </button>
-            </div>
+            ) : null}
           </div>
-        )}
 
-        {/* ENREGISTREMENT */}
-        {recording ? (
-          <>
-            <div style={card}>
-              <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
-                <div style={{ ...muted, textAlign: "center" }}>
-                  Arrêts : <b>{points.length}</b> · Trace : <b>{trace.length}</b> points · GPS :{" "}
-                  <b>{gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}</b>
-                </div>
+          {/* ENREGISTREMENT */}
+          {recording ? (
+            <>
+              <div style={{ ...sectionCard, marginTop: 0 }}>
+                <div style={{ display: "grid", gap: 14 }}>
+                  <div style={statusLine}>
+                    Arrêts : <b>{points.length}</b> · Trace : <b>{trace.length}</b> points · GPS :{" "}
+                    <b>{gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}</b>
+                  </div>
 
-                <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
-                  <button
-                    style={{ ...circleGood, ...(busy || savingTrace ? disabledStyle : {}) }}
-                    onClick={addStop}
-                    disabled={busy || savingTrace}
+                  <div
+                    style={{
+                      display: "grid",
+                      gap: 14,
+                    }}
                   >
-                    <div style={{ textAlign: "center" }}>
-                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>ARRÊT</div>
-                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>ENREGISTRER</div>
-                    </div>
-                  </button>
-
-                  <button
-                    style={{ ...circleWarn, ...(busy || savingTrace ? disabledStyle : {}) }}
-                    onClick={stop}
-                    disabled={busy || savingTrace}
-                  >
-                    <div style={{ textAlign: "center" }}>
-                      <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>
-                        {savingTrace ? "STOP…" : "STOP"}
-                      </div>
-                      <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>
-                        {savingTrace ? "SAUVEGARDE" : "TERMINER"}
-                      </div>
-                    </div>
-                  </button>
-                </div>
-
-                {savingTrace && <div style={{ ...muted, textAlign: "center" }}>Sauvegarde de la trace…</div>}
-              </div>
-            </div>
-
-            {/* Liste des arrêts (discrète) */}
-            <div style={card}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Arrêts</div>
-              {points.length === 0 ? (
-                <div style={muted}>—</div>
-              ) : (
-                <div style={{ display: "grid", gap: 8 }}>
-                  {points.map((p) => (
+                    {/* ARRÊT */}
                     <div
-                      key={p.idx}
-                      style={{
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "baseline",
-                        padding: "10px 12px",
-                        border: "1px solid #e5e7eb",
-                        borderRadius: 12,
-                      }}
+                      style={{ ...actionGreen, ...(busy || savingTrace ? disabledAction : {}) }}
+                      onClick={busy || savingTrace ? undefined : addStop}
+                      role="button"
+                      aria-disabled={busy || savingTrace}
+                      title="Enregistrer un arrêt"
                     >
-                      <div style={{ width: 42, fontWeight: 900 }}>{p.idx}</div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 800 }}>Arrêt</div>
-                        <div style={muted}>
-                          {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
+                      <div style={overlay} />
+                      <div style={leftText}>
+                        <div style={{ fontWeight: 950, fontSize: 22, letterSpacing: -0.2 }}>ARRÊT</div>
+                        <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.9 }}>Enregistrer la position</div>
+                      </div>
+                      <div style={rightPill}>Ouvrir ›</div>
+                    </div>
+
+                    {/* STOP */}
+                    <div
+                      style={{ ...actionRed, ...(busy || savingTrace ? disabledAction : {}) }}
+                      onClick={busy || savingTrace ? undefined : stop}
+                      role="button"
+                      aria-disabled={busy || savingTrace}
+                      title="Terminer"
+                    >
+                      <div style={overlay} />
+                      <div style={leftText}>
+                        <div style={{ fontWeight: 950, fontSize: 22, letterSpacing: -0.2 }}>
+                          {savingTrace ? "STOP…" : "STOP"}
+                        </div>
+                        <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.9 }}>
+                          {savingTrace ? "Sauvegarde en cours" : "Terminer la session"}
                         </div>
                       </div>
+                      <div style={rightPill}>{savingTrace ? "…" : "Ouvrir ›"}</div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        ) : (
-          <>
-            {/* DÉPART */}
-            {step === "pick" ? (
-              <div style={card}>
-                <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
-                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
-                    <button style={circlePrimary} onClick={() => setStep("new")} title="Nouveau circuit">
-                      <div style={{ textAlign: "center" }}>
-                        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>NOUVEAU</div>
-                        <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>CIRCUIT</div>
-                      </div>
-                    </button>
 
-                    <button style={circleWarn} onClick={() => setStep("update")} title="Mettre à jour">
-                      <div style={{ textAlign: "center" }}>
-                        <div style={{ fontWeight: 1000, fontSize: 18, lineHeight: 1 }}>METTRE</div>
-                        <div style={{ fontWeight: 950, fontSize: 13, marginTop: 6 }}>À JOUR</div>
-                      </div>
-                    </button>
+                    {savingTrace ? <div style={{ ...muted, textAlign: "center" }}>Sauvegarde de la trace…</div> : null}
                   </div>
                 </div>
               </div>
-            ) : (
-              <div style={card}>
-                <div style={{ display: "grid", gap: 12 }}>
-                  <div>
-                    <div style={{ ...muted, marginBottom: 6 }}>Transporteur</div>
-                    <select
-                      style={select}
-                      value={transporteur}
-                      onChange={(e) => setTransporteur(e.target.value as TCode)}
-                      disabled={busy}
-                    >
-                      <option value="B">Breton</option>
-                      <option value="C">Champagne</option>
-                      <option value="S">Sécuritaire</option>
-                    </select>
+
+              {/* Liste des arrêts (discrète) */}
+              <div style={sectionCard}>
+                <div style={{ fontWeight: 950, marginBottom: 10, color: "#0f172a" }}>Arrêts</div>
+                {points.length === 0 ? (
+                  <div style={muted}>—</div>
+                ) : (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {points.map((p) => (
+                      <div
+                        key={p.idx}
+                        style={{
+                          display: "flex",
+                          gap: 10,
+                          alignItems: "baseline",
+                          padding: "12px 14px",
+                          border: "1px solid rgba(2,6,23,.08)",
+                          borderRadius: 16,
+                          background: "rgba(255,255,255,.75)",
+                        }}
+                      >
+                        <div style={{ width: 42, fontWeight: 950, color: "rgba(15,23,42,.85)" }}>{p.idx}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 900, color: "#0f172a" }}>Arrêt</div>
+                          <div style={muted}>
+                            {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              {/* DÉPART */}
+              {step === "pick" ? (
+                <div style={{ display: "grid", gap: 14 }}>
+                  {/* Nouveau */}
+                  <div
+                    style={actionBlue}
+                    onClick={() => setStep("new")}
+                    role="button"
+                    title="Nouveau circuit"
+                    aria-label="Nouveau circuit"
+                  >
+                    <div style={overlay} />
+                    <div style={leftText}>
+                      <div style={{ fontWeight: 950, fontSize: 22, letterSpacing: -0.2 }}>NOUVEAU CIRCUIT</div>
+                      <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.88 }}>Créer un circuit</div>
+                    </div>
+                    <div style={rightPill}>Ouvrir ›</div>
                   </div>
 
-                  {step === "new" ? (
-                    <>
-                      <div>
-                        <div style={{ ...muted, marginBottom: 6 }}>Nom du circuit</div>
-                        <input
-                          style={input}
-                          value={newNom}
-                          onChange={(e) => setNewNom(e.target.value)}
-                          placeholder="Ex: Circuit matin – St-Joseph"
-                          disabled={busy}
-                        />
-                      </div>
+                  {/* Mettre à jour */}
+                  <div
+                    style={actionLightRow}
+                    onClick={() => setStep("update")}
+                    role="button"
+                    title="Mettre à jour"
+                    aria-label="Mettre à jour"
+                  >
+                    <div style={{ minWidth: 0, flex: "1 1 auto" }}>
+                      <div style={warnTitle}>METTRE À JOUR</div>
+                      <div style={warnSub}>Modifier un circuit existant</div>
+                    </div>
+                    <div style={rightPillLight}>Ouvrir ›</div>
+                  </div>
 
-                      <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
-                        <button
-                          style={{ ...circlePrimary, ...(canStartNew ? {} : disabledStyle) }}
-                          onClick={startNew}
-                          disabled={!canStartNew}
-                          title="Démarrer"
-                        >
-                          <div style={{ textAlign: "center" }}>
-                            <div style={{ fontWeight: 1000, fontSize: 20, lineHeight: 1 }}>DÉMARRER</div>
-                            <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>NOUVEAU</div>
-                          </div>
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div>
-                        <div style={{ ...muted, marginBottom: 6 }}>Circuit</div>
-                        <select
-                          style={select}
-                          value={selectedCircuit}
-                          onChange={(e) => setSelectedCircuit(e.target.value)}
-                          disabled={busy}
-                        >
-                          <option value="">— Choisir —</option>
-                          {circuits.map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.nom}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div style={{ display: "flex", justifyContent: "center", paddingTop: 6 }}>
-                        <button
-                          style={{ ...circlePrimary, ...(canStartUpdate ? {} : disabledStyle) }}
-                          onClick={startUpdate}
-                          disabled={!canStartUpdate}
-                          title="Démarrer"
-                        >
-                          <div style={{ textAlign: "center" }}>
-                            <div style={{ fontWeight: 1000, fontSize: 20, lineHeight: 1 }}>DÉMARRER</div>
-                            <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.92, marginTop: 6 }}>
-                              MISE À JOUR
-                            </div>
-                          </div>
-                        </button>
-                      </div>
-                    </>
-                  )}
-
-                  <div style={{ ...muted, textAlign: "center" }}>
+                  <div style={{ ...muted, textAlign: "center", marginTop: 6 }}>
                     GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
                   </div>
+                </div>
+              ) : (
+                <div style={sectionCard}>
+                  <div style={{ display: "grid", gap: 12 }}>
+                    <div>
+                      <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Transporteur</div>
+                      <select
+                        style={select}
+                        value={transporteur}
+                        onChange={(e) => setTransporteur(e.target.value as TCode)}
+                        disabled={busy}
+                      >
+                        <option value="B">Breton</option>
+                        <option value="C">Champagne</option>
+                        <option value="S">Sécuritaire</option>
+                      </select>
+                    </div>
 
-                  {/* Retour à gauche seulement (pas de rafraîchir) */}
-                  <div style={{ marginTop: 10 }}>
-                    <button
-                      style={btn("ghost")}
-                      onClick={() => {
-                        setStep("pick");
-                        setNewNom("");
-                      }}
-                      disabled={busy}
-                    >
-                      Retour
-                    </button>
+                    {step === "new" ? (
+                      <>
+                        <div>
+                          <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Nom du circuit</div>
+                          <input
+                            style={input}
+                            value={newNom}
+                            onChange={(e) => setNewNom(e.target.value)}
+                            placeholder="Ex: Circuit matin – St-Joseph"
+                            disabled={busy}
+                          />
+                        </div>
+
+                        <div style={{ display: "grid", gap: 12, marginTop: 6 }}>
+                          <button
+                            type="button"
+                            style={{
+                              ...btn("primary"),
+                              width: "100%",
+                              opacity: canStartNew ? 1 : 0.55,
+                              boxSizing: "border-box",
+                              borderRadius: 18,
+                              padding: "14px 16px",
+                              fontWeight: 950,
+                            }}
+                            onClick={startNew}
+                            disabled={!canStartNew}
+                          >
+                            Démarrer (nouveau)
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Circuit</div>
+                          <select
+                            style={select}
+                            value={selectedCircuit}
+                            onChange={(e) => setSelectedCircuit(e.target.value)}
+                            disabled={busy}
+                          >
+                            <option value="">— Choisir —</option>
+                            {circuits.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.nom}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div style={{ display: "grid", gap: 12, marginTop: 6 }}>
+                          <button
+                            type="button"
+                            style={{
+                              ...btn("primary"),
+                              width: "100%",
+                              opacity: canStartUpdate ? 1 : 0.55,
+                              boxSizing: "border-box",
+                              borderRadius: 18,
+                              padding: "14px 16px",
+                              fontWeight: 950,
+                            }}
+                            onClick={startUpdate}
+                            disabled={!canStartUpdate}
+                          >
+                            Démarrer (mise à jour)
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    <div style={{ ...muted, textAlign: "center", marginTop: 4 }}>
+                      GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
+                    </div>
+
+                    {/* NOTE: le "Retour" est en haut à droite; on garde quand même un fallback bas */}
+                    <div style={{ marginTop: 6 }}>
+                      <button
+                        type="button"
+                        style={btn("ghost")}
+                        onClick={() => {
+                          setStep("pick");
+                          setNewNom("");
+                        }}
+                        disabled={busy}
+                      >
+                        Retour
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
-          </>
-        )}
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

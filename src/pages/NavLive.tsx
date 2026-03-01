@@ -137,6 +137,37 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
   return { idx: bestIdx, dist: best };
 }
 
+/** ✅ Trouve le 1er "passage" sur la trace (ordre croissant), au lieu du point le plus proche (évite sauts sur boucles/croisements) */
+function firstHitIndexForward(
+  stop: LatLng,
+  line: [number, number][],
+  fromIdx: number,
+  maxAheadPts: number,
+  hitRadiusM: number
+) {
+  if (!line || line.length === 0) return null;
+  const start = clamp(Math.floor(fromIdx), 0, line.length - 1);
+  const end = clamp(start + Math.max(20, Math.floor(maxAheadPts)), 0, line.length - 1);
+
+  let best = Infinity;
+  let bestIdx = start;
+
+  for (let i = start; i <= end; i++) {
+    const d = haversineMeters(stop, { lat: line[i][0], lng: line[i][1] });
+
+    // ✅ dès qu'on "touche" le rayon, on retourne ce premier passage
+    if (d <= hitRadiusM) return { idx: i, dist: d };
+
+    // fallback: garder le meilleur dans la fenêtre
+    if (d < best) {
+      best = d;
+      bestIdx = i;
+    }
+  }
+
+  return { idx: bestIdx, dist: best };
+}
+
 /** Arrondi “style GPS” */
 function roundMetersForDisplay(m: number) {
   const mm = Math.max(0, Math.round(m));
@@ -368,15 +399,15 @@ export default function NavLive() {
   const [err, setErr] = useState<string | null>(null);
 
   // GPS refs (animation fluide)
-  const targetPosRef = useRef<LatLng | null>(null); // dernière position GPS brute
-  const animPosRef = useRef<LatLng | null>(null); // position animée (60fps)
+  const targetPosRef = useRef<LatLng | null>(null);
+  const animPosRef = useRef<LatLng | null>(null);
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
 
-  // Stops
-  const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
+  // Stops (✅ on garde aussi idx provenant de l’API pour trier)
+  const [points, setPoints] = useState<{ idx: number; lat: number; lng: number; label?: string | null }[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
@@ -407,7 +438,7 @@ export default function NavLive() {
   // Progression sur trace (idx)
   const traceIdxRef = useRef<number>(0);
 
-  // 🔒 “join” logique : au début on reste sur idx=0, puis on “rejoint” la trace quand on est proche
+  // 🔒 join : au début idx=0, puis join quand proche
   const joinedTraceRef = useRef<boolean>(false);
 
   // Anti-finish si arrêts trop proches
@@ -433,7 +464,7 @@ export default function NavLive() {
   // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
-  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
+  const STOP_SKIP_MIN_SPEED = 1.2;
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
@@ -445,16 +476,16 @@ export default function NavLive() {
 
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // dernière trace + stops
+  // dernière trace + stops (map)
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
-  // Full trace (discrète)
+  // Full trace
   const MAP_LINE_SRC = "line-src";
   const MAP_LINE_LAYER = "line-layer";
   const MAP_LINE_HALO = "line-halo";
 
-  // Active trace (fenêtre + halo)
+  // Active trace
   const MAP_ACTIVE_SRC = "active-src";
   const MAP_ACTIVE_LAYER = "active-layer";
   const MAP_ACTIVE_HALO = "active-halo";
@@ -464,18 +495,22 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
-  // Fenêtre active (distance vers l’avant)
+  // Fenêtre active
   const ACTIVE_AHEAD_METERS = 520;
   const ACTIVE_MAX_POINTS = 140;
   const ACTIVE_MIN_POINTS = 12;
 
-  // Join / snapping (anti-croisements)
-  const JOIN_DIST_M = 35; // quand on est à <= 35m, on “rejoint” la trace
-  const SNAP_MAX_DIST_M = 55; // si on “snap” plus loin que ça, on refuse (évite les croisements)
-  const SNAP_AHEAD_PTS = 240; // fenêtre de recherche vers l’avant (points)
-  const SNAP_BACK_PTS = 12; // un petit retour autorisé
+  // Join / snapping
+  const JOIN_DIST_M = 35;
+  const SNAP_MAX_DIST_M = 55;
+  const SNAP_AHEAD_PTS = 240;
+  const SNAP_BACK_PTS = 12;
 
-  // Manual zoom lock (pour que +/− ne “revienne” pas)
+  // ✅ mapping stops->trace (premier passage)
+  const STOP_TRACE_HIT_RADIUS_M = 28;
+  const STOP_TRACE_LOOKAHEAD_PTS = 900;
+
+  // Manual zoom lock
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
 
@@ -539,7 +574,7 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  // Fenêtre active seulement vers l’avant, basée sur meters
+  // Fenêtre active vers l’avant (meters)
   function buildActiveForwardGeoJSON(line: [number, number][], idx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
 
@@ -589,11 +624,9 @@ export default function NavLive() {
     };
   }
 
-  // FULL = visible, mais moins “dominant” que l’active
   const FULL_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 3.8, 15, 5.0, 17, 6.3, 19, 7.4];
   const FULL_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 7.4, 15, 9.8, 17, 12.4, 19, 14.8];
 
-  // ACTIVE = nettement plus large
   const ACTIVE_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 7.2, 15, 9.8, 17, 12.8, 19, 15.8];
   const ACTIVE_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 12.2, 15, 16.8, 17, 22.6, 19, 28.2];
 
@@ -749,7 +782,6 @@ export default function NavLive() {
     }
   }
 
-  // throttle: update active seulement si idx change ou si >250ms
   const lastActiveUpdateRef = useRef<{ idx: number; t: number }>({ idx: -1, t: 0 });
 
   function upsertActiveLineOnMap() {
@@ -869,7 +901,10 @@ export default function NavLive() {
     return yOff;
   }
 
+<<<<<<< HEAD
   // ✅ Recentrer = jump immédiat + reprise follow “instant”
+=======
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
   function recenter() {
     followRef.current = true;
 
@@ -881,7 +916,10 @@ export default function NavLive() {
       m.stop();
     } catch {}
 
+<<<<<<< HEAD
     // quand on recentre, on “redonne” la main à l’auto-zoom
+=======
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
     manualZoomRef.current = null;
     manualZoomUntilRef.current = 0;
 
@@ -935,7 +973,7 @@ export default function NavLive() {
   }
 
   /* =========================
-     Stop index sur trace (monotone forward)
+     Stop index sur trace (monotone forward) - FIX anti "saut vers une boucle"
   ========================= */
 
   const stopIdxOnTrace = useMemo(() => {
@@ -945,25 +983,22 @@ export default function NavLive() {
     const line = officialLine;
     const out: number[] = [];
 
-    const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
-
-    const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
-    let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
+    // ✅ départ strict au début
+    let prevIdx = 0;
     out.push(prevIdx);
 
     for (let i = 1; i < points.length; i++) {
       const p = points[i];
 
-      const near = nearestLineIndexWindow(
-        { lat: p.lat, lng: p.lng },
-        line,
-        prevIdx,
-        Math.min(line.length - 1, prevIdx + AHEAD_WINDOW)
-      );
+      // ✅ on cherche le 1er passage en avant (hit radius), pas le plus proche global
+      const pick =
+        firstHitIndexForward({ lat: p.lat, lng: p.lng }, line, prevIdx, STOP_TRACE_LOOKAHEAD_PTS, STOP_TRACE_HIT_RADIUS_M) ??
+        nearestLineIndexWindow({ lat: p.lat, lng: p.lng }, line, prevIdx, Math.min(line.length - 1, prevIdx + STOP_TRACE_LOOKAHEAD_PTS)) ??
+        nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
 
-      const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
       let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
 
+      // ✅ monotone strict (jamais reculer)
       if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
 
       out.push(idx);
@@ -973,6 +1008,7 @@ export default function NavLive() {
     return out;
   }, [hasOfficial, officialLine, points]);
 
+<<<<<<< HEAD
   // ✅ Fenêtre autorisée sur la trace active, basée sur l’ordre croissant des arrêts
   function getActiveBounds(lineLen: number) {
     const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
@@ -984,6 +1020,19 @@ export default function NavLive() {
 
     const minIdx = clampIdx(Math.min(prevStop, curStop));
     const maxIdx = clampIdx(Math.max(curStop, nextStop) + 80); // petit buffer après le prochain arrêt
+=======
+  // ✅ bornes autorisées = entre arrêt courant et prochain arrêt (ordre croissant)
+  function getActiveBounds(lineLen: number) {
+    const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
+
+    const curStopIdx = stopIdxOnTrace[targetIdx] ?? 0;
+    const nextStopIdx =
+      targetIdx + 1 < stopIdxOnTrace.length ? stopIdxOnTrace[targetIdx + 1] ?? curStopIdx : curStopIdx + SNAP_AHEAD_PTS;
+
+    // petit back autorisé (pour smooth) MAIS jamais assez pour tomber sur une autre branche loin
+    const minIdx = clampIdx(Math.max(0, curStopIdx - 10));
+    const maxIdx = clampIdx(Math.max(curStopIdx + 1, nextStopIdx));
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
 
     return { minIdx, maxIdx };
   }
@@ -996,7 +1045,12 @@ export default function NavLive() {
     if (!circuitId) throw new Error("Circuit manquant.");
 
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
-    const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
+
+    // ✅ IMPORTANT: tri par idx API (ordre croissant des arrêts)
+    const pts = [...(r.points ?? [])]
+      .sort((a, b) => (a.idx ?? 0) - (b.idx ?? 0))
+      .map((p) => ({ idx: p.idx, lat: p.lat, lng: p.lng, label: p.label ?? null }));
+
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
@@ -1029,7 +1083,7 @@ export default function NavLive() {
     initialDistToTargetRef.current = null;
 
     lineRef.current = line;
-    stopsRef.current = pts;
+    stopsRef.current = pts.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
 
     const m = ensureMap();
     if (m) {
@@ -1052,7 +1106,6 @@ export default function NavLive() {
 
     setRunning(true);
 
-    // ✅ tente fullscreen tout de suite + fallback au 1er tap
     tryEnterFullscreen();
     installAutoFullscreenOnce();
 
@@ -1089,7 +1142,6 @@ export default function NavLive() {
 
     await loadCircuit();
 
-    // ✅ jump instant au démarrage (pas de easing long)
     try {
       const m = mapRef.current;
       if (m) {
@@ -1173,7 +1225,7 @@ export default function NavLive() {
         };
 
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
+        const movingEnough = sp == null ? true : sp >= 0.6;
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -1192,34 +1244,50 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
+<<<<<<< HEAD
           // ✅ Trace idx = commence au début (sans exception), puis rejoint et suit ta position courante,
           //    MAIS dans une fenêtre autorisée par l'ordre croissant des arrêts (anti-croisements).
+=======
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
             const { minIdx, maxIdx } = getActiveBounds(line.length);
 
             if (!joinedTraceRef.current) {
+<<<<<<< HEAD
               // ✅ sans exception: fenêtre active au début de la trace
+=======
+              // ✅ sans exception: au début -> idx=0
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               traceIdxRef.current = 0;
 
               const d = minDistanceToPolylineMeters(next, line);
               if (d != null && d <= JOIN_DIST_M) {
                 joinedTraceRef.current = true;
 
+<<<<<<< HEAD
                 // ✅ au join: snap sur ta position courante, mais uniquement dans les bornes des arrêts
+=======
+                // ✅ join: snap sur ta position courante MAIS borné dans [minIdx..maxIdx]
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
                 const pick =
                   nearestLineIndexWindow(next, line, minIdx, maxIdx) ??
                   nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
                   nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
+<<<<<<< HEAD
                   const floorIdx = Math.max(minIdx, traceIdxRef.current);
                   traceIdxRef.current = clamp(pick.idx, floorIdx, maxIdx);
+=======
+                  traceIdxRef.current = clamp(pick.idx, minIdx, maxIdx);
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
                 } else {
                   traceIdxRef.current = 0;
                 }
               }
             } else {
+<<<<<<< HEAD
               // ✅ déjà rejoint: on suit ta position courante, monotone forward, borné par les arrêts
               const floorIdx = Math.max(minIdx, traceIdxRef.current);
               const ceilIdx = Math.max(floorIdx, maxIdx);
@@ -1232,6 +1300,15 @@ export default function NavLive() {
                 traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
               } else {
                 // trop loin -> on garde l'idx courant
+=======
+              const floorIdx = Math.max(minIdx, traceIdxRef.current); // ✅ monotone forward réel
+              const ceilIdx = Math.max(floorIdx + 1, maxIdx);
+
+              const pick = nearestLineIndexWindow(next, line, floorIdx, ceilIdx);
+
+              if (pick && pick.dist <= SNAP_MAX_DIST_M) {
+                traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               }
             }
 
@@ -1255,12 +1332,10 @@ export default function NavLive() {
             const yOff = computeFollowOffsetPx(m);
             const b = wrap360(lastBearingRef.current || 0);
 
-            // ✅ stop l’animation en cours pour éviter la “reprise lente”
             try {
               m.stop();
             } catch {}
 
-            // follow fluide mais rapide
             try {
               (m as any).easeTo({
                 center: [next.lng, next.lat],
@@ -1283,7 +1358,11 @@ export default function NavLive() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+<<<<<<< HEAD
   }, [running, hasOfficial, stopIdxOnTrace, targetIdx]);
+=======
+  }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
 
   /* =========================
      Quand le targetIdx change: maj visuelle stops
@@ -1342,7 +1421,7 @@ export default function NavLive() {
 
       const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
       const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
-      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
+      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= 90;
 
       if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
         const nextIdx = targetIdx + 1;
@@ -1467,8 +1546,11 @@ export default function NavLive() {
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
+<<<<<<< HEAD
 
     // ✅ iOS: empêcher Safari de “voler” le tap / double-tap zoom
+=======
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
     touchAction: "none",
     WebkitTapHighlightColor: "transparent",
     WebkitTouchCallout: "none",
@@ -1629,6 +1711,7 @@ export default function NavLive() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
+<<<<<<< HEAD
               onPointerDown={tapHandler(() => {
                 enableAudio();
               })}
@@ -1638,6 +1721,11 @@ export default function NavLive() {
               onClick={tapHandler(() => {
                 enableAudio();
               })}
+=======
+              onPointerDown={tapHandler(() => enableAudio())}
+              onTouchStart={tapHandler(() => enableAudio())}
+              onClick={tapHandler(() => enableAudio())}
+>>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
