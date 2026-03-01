@@ -137,37 +137,6 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
   return { idx: bestIdx, dist: best };
 }
 
-/** ✅ Trouve le 1er "passage" sur la trace (ordre croissant), au lieu du point le plus proche (évite sauts sur boucles/croisements) */
-function firstHitIndexForward(
-  stop: LatLng,
-  line: [number, number][],
-  fromIdx: number,
-  maxAheadPts: number,
-  hitRadiusM: number
-) {
-  if (!line || line.length === 0) return null;
-  const start = clamp(Math.floor(fromIdx), 0, line.length - 1);
-  const end = clamp(start + Math.max(20, Math.floor(maxAheadPts)), 0, line.length - 1);
-
-  let best = Infinity;
-  let bestIdx = start;
-
-  for (let i = start; i <= end; i++) {
-    const d = haversineMeters(stop, { lat: line[i][0], lng: line[i][1] });
-
-    // ✅ dès qu'on "touche" le rayon, on retourne ce premier passage
-    if (d <= hitRadiusM) return { idx: i, dist: d };
-
-    // fallback: garder le meilleur dans la fenêtre
-    if (d < best) {
-      best = d;
-      bestIdx = i;
-    }
-  }
-
-  return { idx: bestIdx, dist: best };
-}
-
 /** Arrondi “style GPS” */
 function roundMetersForDisplay(m: number) {
   const mm = Math.max(0, Math.round(m));
@@ -300,7 +269,7 @@ function useSpeaker() {
 async function tryEnterFullscreen() {
   try {
     const el = document.documentElement as any;
-    if (document.fullscreenElement) return;
+    if ((document as any).fullscreenElement) return;
     if (el.requestFullscreen) await el.requestFullscreen();
     else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
   } catch {}
@@ -321,7 +290,6 @@ function installAutoFullscreenOnce() {
     } catch {}
   };
 
-  // capture=true pour passer avant Mapbox
   window.addEventListener("pointerdown", handler, { capture: true });
   window.addEventListener("touchstart", handler, { capture: true });
 }
@@ -336,7 +304,6 @@ function wrap360(deg: number) {
   return d;
 }
 
-/** ✅ bearing à partir du mouvement (fallback quand heading GPS est null) */
 function bearingDeg(a: LatLng, b: LatLng) {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const toDeg = (r: number) => (r * 180) / Math.PI;
@@ -354,7 +321,6 @@ function bearingDeg(a: LatLng, b: LatLng) {
 }
 
 function smoothAngle(prev: number, next: number) {
-  // évite les sauts 359 -> 0
   const delta = ((next - prev + 540) % 360) - 180;
   return prev + delta;
 }
@@ -405,9 +371,11 @@ export default function NavLive() {
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
+  const lastBearingRef2 = useRef<number>(0); // compat: garder le nom utilisé plus bas
+  (lastBearingRef2 as any).current = lastBearingRef.current;
 
-  // Stops (✅ on garde aussi idx provenant de l’API pour trier)
-  const [points, setPoints] = useState<{ idx: number; lat: number; lng: number; label?: string | null }[]>([]);
+  // Stops
+  const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
@@ -426,12 +394,9 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
-    show: false,
-    meters: 0,
-    label: null,
-    max: 150,
-  });
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
+    { show: false, meters: 0, label: null, max: 150 }
+  );
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
@@ -441,7 +406,7 @@ export default function NavLive() {
   // Progression sur trace (idx)
   const traceIdxRef = useRef<number>(0);
 
-  // 🔒 join : au début idx=0, puis join quand proche
+  // 🔒 join logique
   const joinedTraceRef = useRef<boolean>(false);
 
   // Anti-finish si arrêts trop proches
@@ -467,7 +432,7 @@ export default function NavLive() {
   // Arrêt manqué
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
-  const STOP_SKIP_MIN_SPEED = 1.2;
+  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
@@ -479,16 +444,16 @@ export default function NavLive() {
 
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
-  // dernière trace + stops (map)
+  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
   const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
-  // Full trace
+  // Full trace (discrète)
   const MAP_LINE_SRC = "line-src";
   const MAP_LINE_LAYER = "line-layer";
   const MAP_LINE_HALO = "line-halo";
 
-  // Active trace
+  // Active trace (fenêtre + halo)
   const MAP_ACTIVE_SRC = "active-src";
   const MAP_ACTIVE_LAYER = "active-layer";
   const MAP_ACTIVE_HALO = "active-halo";
@@ -498,20 +463,16 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
-  // Fenêtre active
+  // Fenêtre active (distance vers l’avant)
   const ACTIVE_AHEAD_METERS = 520;
   const ACTIVE_MAX_POINTS = 140;
   const ACTIVE_MIN_POINTS = 12;
 
-  // Join / snapping
+  // Join / snapping (anti-croisements)
   const JOIN_DIST_M = 35;
   const SNAP_MAX_DIST_M = 55;
   const SNAP_AHEAD_PTS = 240;
   const SNAP_BACK_PTS = 12;
-
-  // ✅ mapping stops->trace (premier passage)
-  const STOP_TRACE_HIT_RADIUS_M = 28;
-  const STOP_TRACE_LOOKAHEAD_PTS = 900;
 
   // Manual zoom lock
   const manualZoomRef = useRef<number | null>(null);
@@ -577,19 +538,22 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  // Fenêtre active vers l’avant (meters)
-  function buildActiveForwardGeoJSON(line: [number, number][], idx: number) {
+  // ✅ Fenêtre active vers l’avant, MAIS: doit au minimum atteindre l'arrêt courant (targetIdx) sur la trace.
+  function buildActiveForwardGeoJSON(line: [number, number][], startIdx: number, minEndIdx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
 
-    const s = clamp(Math.floor(idx), 0, Math.max(0, line.length - 2));
-    let coords: [number, number][] = [];
+    const s = clamp(Math.floor(startIdx), 0, Math.max(0, line.length - 2));
+    const mustReach = clamp(Math.floor(minEndIdx), s, line.length - 1);
 
+    const coords: [number, number][] = [];
     let total = 0;
     let count = 0;
 
     const start = line[s];
     coords.push([start[0], start[1]]);
     count++;
+
+    const HARD_MAX_POINTS = 900; // hard cap anti-lag
 
     for (let i = s; i < line.length - 1; i++) {
       const a = { lat: line[i][0], lng: line[i][1] };
@@ -600,8 +564,15 @@ export default function NavLive() {
       coords.push([line[i + 1][0], line[i + 1][1]]);
       count++;
 
-      if (count >= ACTIVE_MAX_POINTS) break;
-      if (total >= ACTIVE_AHEAD_METERS && count >= ACTIVE_MIN_POINTS) break;
+      const reachedMust = i + 1 >= mustReach;
+
+      if (count >= HARD_MAX_POINTS) break;
+
+      // ❗ On n'a PAS le droit d'arrêter avant mustReach.
+      if (reachedMust) {
+        if (count >= ACTIVE_MAX_POINTS) break;
+        if (total >= ACTIVE_AHEAD_METERS && count >= ACTIVE_MIN_POINTS) break;
+      }
     }
 
     if (coords.length < 2) {
@@ -616,12 +587,7 @@ export default function NavLive() {
       type: "FeatureCollection" as const,
       features: pts.map((p, i) => ({
         type: "Feature" as const,
-        properties: {
-          idx: i,
-          num: String(i + 1),
-          label: p.label ?? "",
-          active: i === activeIdx ? 1 : 0,
-        },
+        properties: { idx: i, num: String(i + 1), label: p.label ?? "", active: i === activeIdx ? 1 : 0 },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
@@ -632,6 +598,45 @@ export default function NavLive() {
 
   const ACTIVE_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 7.2, 15, 9.8, 17, 12.8, 19, 15.8];
   const ACTIVE_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 12.2, 15, 16.8, 17, 22.6, 19, 28.2];
+
+  /* =========================
+     Stop index sur trace (monotone forward)
+  ========================= */
+
+  const stopIdxOnTrace = useMemo(() => {
+    if (!hasOfficial || officialLine.length < 2) return [];
+    if (!points.length) return [];
+
+    const line = officialLine;
+    const out: number[] = [];
+
+    const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
+
+    const first = nearestLineIndex({ lat: points[0].lat, lng: points[0].lng }, line);
+    let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
+    out.push(prevIdx);
+
+    for (let i = 1; i < points.length; i++) {
+      const p = points[i];
+
+      const near = nearestLineIndexWindow(
+        { lat: p.lat, lng: p.lng },
+        line,
+        prevIdx,
+        Math.min(line.length - 1, prevIdx + AHEAD_WINDOW)
+      );
+
+      const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
+      let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
+
+      if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
+
+      out.push(idx);
+      prevIdx = idx;
+    }
+
+    return out;
+  }, [hasOfficial, officialLine, points]);
 
   function applyOverlays() {
     const m = mapRef.current;
@@ -663,12 +668,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#FFFFFF",
-            "line-width": FULL_HALO_WIDTH,
-            "line-opacity": 0.55,
-            "line-blur": 0.25,
-          },
+          paint: { "line-color": "#FFFFFF", "line-width": FULL_HALO_WIDTH, "line-opacity": 0.55, "line-blur": 0.25 },
         });
 
         m.addLayer({
@@ -676,22 +676,27 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#2563eb",
-            "line-width": FULL_LINE_WIDTH,
-            "line-opacity": 0.58,
-            "line-blur": 0.06,
-          },
+          paint: { "line-color": "#2563eb", "line-width": FULL_LINE_WIDTH, "line-opacity": 0.58, "line-blur": 0.06 },
         });
       } catch (e) {
         console.error("Mapbox apply full line failed:", e);
       }
     }
 
-    // TRACE ACTIVE
+    // TRACE ACTIVE (✅ doit atteindre l'arrêt courant)
     if (fullLine && fullLine.length >= 2) {
       try {
-        const activeGeo = buildActiveForwardGeoJSON(fullLine, traceIdxRef.current);
+        const startIdx = traceIdxRef.current;
+
+        const stopIdx = stopIdxOnTrace[targetIdx] ?? startIdx;
+        const BUFFER_AFTER_STOP_PTS = 40;
+
+        const minEndIdx = Math.min(
+          fullLine.length - 1,
+          Math.max(stopIdx + BUFFER_AFTER_STOP_PTS, startIdx + ACTIVE_MIN_POINTS)
+        );
+
+        const activeGeo = buildActiveForwardGeoJSON(fullLine, startIdx, minEndIdx);
         m.addSource(MAP_ACTIVE_SRC, { type: "geojson", data: activeGeo as any });
 
         m.addLayer({
@@ -699,12 +704,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#93c5fd",
-            "line-width": ACTIVE_HALO_WIDTH,
-            "line-opacity": 0.28,
-            "line-blur": 1.15,
-          },
+          paint: { "line-color": "#93c5fd", "line-width": ACTIVE_HALO_WIDTH, "line-opacity": 0.28, "line-blur": 1.15 },
         });
 
         m.addLayer({
@@ -712,12 +712,7 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": "#1d4ed8",
-            "line-width": ACTIVE_LINE_WIDTH,
-            "line-opacity": 1.0,
-            "line-blur": 0.02,
-          },
+          paint: { "line-color": "#1d4ed8", "line-width": ACTIVE_LINE_WIDTH, "line-opacity": 1.0, "line-blur": 0.02 },
         });
       } catch (e) {
         console.error("Mapbox apply active line failed:", e);
@@ -734,12 +729,7 @@ export default function NavLive() {
           id: MAP_STOPS_LAYER,
           type: "circle",
           source: MAP_STOPS_SRC,
-          paint: {
-            "circle-radius": 16,
-            "circle-color": "#ff0000",
-            "circle-stroke-width": 6,
-            "circle-stroke-color": "#ffffff",
-          },
+          paint: { "circle-radius": 16, "circle-color": "#ff0000", "circle-stroke-width": 6, "circle-stroke-color": "#ffffff" },
         });
 
         m.addLayer({
@@ -753,11 +743,7 @@ export default function NavLive() {
             "text-allow-overlap": true,
             "text-ignore-placement": true,
           },
-          paint: {
-            "text-color": "#ffffff",
-            "text-halo-color": "rgba(0,0,0,0.55)",
-            "text-halo-width": 1.6,
-          },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
         });
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
@@ -785,7 +771,8 @@ export default function NavLive() {
     }
   }
 
-  const lastActiveUpdateRef = useRef<{ idx: number; t: number }>({ idx: -1, t: 0 });
+  // throttle: update active si idx change OU targetIdx change OU >250ms
+  const lastActiveUpdateRef = useRef<{ idx: number; t: number; targetIdx: number }>({ idx: -1, t: 0, targetIdx: -1 });
 
   function upsertActiveLineOnMap() {
     const m = mapRef.current;
@@ -800,14 +787,25 @@ export default function NavLive() {
 
       const last = lastActiveUpdateRef.current;
       const idxChanged = idx !== last.idx;
+      const targetChanged = targetIdx !== last.targetIdx;
       const timeOk = now - last.t >= 250;
 
-      if (!idxChanged && !timeOk) return;
+      if (!idxChanged && !targetChanged && !timeOk) return;
 
-      lastActiveUpdateRef.current = { idx, t: now };
+      lastActiveUpdateRef.current = { idx, t: now, targetIdx };
 
       const src = m.getSource(MAP_ACTIVE_SRC) as mapboxgl.GeoJSONSource | undefined;
-      const data = buildActiveForwardGeoJSON(full, idx) as any;
+
+      const startIdx = idx;
+      const stopIdx = stopIdxOnTrace[targetIdx] ?? startIdx;
+      const BUFFER_AFTER_STOP_PTS = 40;
+
+      const minEndIdx = Math.min(
+        full.length - 1,
+        Math.max(stopIdx + BUFFER_AFTER_STOP_PTS, startIdx + ACTIVE_MIN_POINTS)
+      );
+
+      const data = buildActiveForwardGeoJSON(full, startIdx, minEndIdx) as any;
 
       if (src) {
         src.setData(data);
@@ -916,7 +914,6 @@ export default function NavLive() {
       m.stop();
     } catch {}
 
-    // quand on recentre, on “redonne” la main à l’auto-zoom
     manualZoomRef.current = null;
     manualZoomUntilRef.current = 0;
 
@@ -970,57 +967,6 @@ export default function NavLive() {
   }
 
   /* =========================
-     Stop index sur trace (monotone forward) - FIX anti "saut vers une boucle"
-  ========================= */
-
-  const stopIdxOnTrace = useMemo(() => {
-    if (!hasOfficial || officialLine.length < 2) return [];
-    if (!points.length) return [];
-
-    const line = officialLine;
-    const out: number[] = [];
-
-    // ✅ départ strict au début
-    let prevIdx = 0;
-    out.push(prevIdx);
-
-    for (let i = 1; i < points.length; i++) {
-      const p = points[i];
-
-      // ✅ on cherche le 1er passage en avant (hit radius), pas le plus proche global
-      const pick =
-        firstHitIndexForward({ lat: p.lat, lng: p.lng }, line, prevIdx, STOP_TRACE_LOOKAHEAD_PTS, STOP_TRACE_HIT_RADIUS_M) ??
-        nearestLineIndexWindow({ lat: p.lat, lng: p.lng }, line, prevIdx, Math.min(line.length - 1, prevIdx + STOP_TRACE_LOOKAHEAD_PTS)) ??
-        nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
-
-      let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
-
-      // ✅ monotone strict (jamais reculer)
-      if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
-
-      out.push(idx);
-      prevIdx = idx;
-    }
-
-    return out;
-  }, [hasOfficial, officialLine, points]);
-
-  // ✅ bornes autorisées = entre arrêt courant et prochain arrêt (ordre croissant)
-  function getActiveBounds(lineLen: number) {
-    const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
-
-    const curStopIdx = stopIdxOnTrace[targetIdx] ?? 0;
-    const nextStopIdx =
-      targetIdx + 1 < stopIdxOnTrace.length ? stopIdxOnTrace[targetIdx + 1] ?? curStopIdx : curStopIdx + SNAP_AHEAD_PTS;
-
-    // petit back autorisé (pour smooth) MAIS jamais assez pour tomber sur une autre branche loin
-    const minIdx = clampIdx(Math.max(0, curStopIdx - 10));
-    const maxIdx = clampIdx(Math.max(curStopIdx + 1, nextStopIdx));
-
-    return { minIdx, maxIdx };
-  }
-
-  /* =========================
      Load circuit
   ========================= */
 
@@ -1028,12 +974,7 @@ export default function NavLive() {
     if (!circuitId) throw new Error("Circuit manquant.");
 
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
-
-    // ✅ IMPORTANT: tri par idx API (ordre croissant des arrêts)
-    const pts = [...(r.points ?? [])]
-      .sort((a, b) => (a.idx ?? 0) - (b.idx ?? 0))
-      .map((p) => ({ idx: p.idx, lat: p.lat, lng: p.lng, label: p.label ?? null }));
-
+    const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
@@ -1051,7 +992,7 @@ export default function NavLive() {
     // ✅ IMPORTANT: au chargement, on démarre TOUJOURS au début de la trace
     traceIdxRef.current = 0;
     joinedTraceRef.current = false;
-    lastActiveUpdateRef.current = { idx: -1, t: 0 };
+    lastActiveUpdateRef.current = { idx: -1, t: 0, targetIdx: -1 };
 
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
@@ -1066,7 +1007,7 @@ export default function NavLive() {
     initialDistToTargetRef.current = null;
 
     lineRef.current = line;
-    stopsRef.current = pts.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
+    stopsRef.current = pts;
 
     const m = ensureMap();
     if (m) {
@@ -1208,7 +1149,7 @@ export default function NavLive() {
         };
 
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -1227,40 +1168,39 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // ✅ Trace idx = commence au début (sans exception), puis rejoint et suit ta position courante,
-          //    MAIS dans une fenêtre autorisée par l'ordre croissant des arrêts (anti-croisements).
+          // ✅ Trace idx = commence au début, puis “rejoint” la trace et suit monotone forward
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
-            const { minIdx, maxIdx } = getActiveBounds(line.length);
 
             if (!joinedTraceRef.current) {
-              // ✅ sans exception: au début -> idx=0
-              traceIdxRef.current = 0;
-
               const d = minDistanceToPolylineMeters(next, line);
               if (d != null && d <= JOIN_DIST_M) {
                 joinedTraceRef.current = true;
 
-                // ✅ join: snap sur ta position courante MAIS borné dans [minIdx..maxIdx]
                 const pick =
-                  nearestLineIndexWindow(next, line, minIdx, maxIdx) ??
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
-                  nearestLineIndex(next, line);
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                  traceIdxRef.current = clamp(pick.idx, minIdx, maxIdx);
+                  traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
                 } else {
                   traceIdxRef.current = 0;
                 }
+              } else {
+                traceIdxRef.current = 0;
               }
             } else {
-              const floorIdx = Math.max(minIdx, traceIdxRef.current); // ✅ monotone forward réel
-              const ceilIdx = Math.max(floorIdx + 1, maxIdx);
+              const curIdx = traceIdxRef.current;
+              const start = Math.max(0, curIdx - SNAP_BACK_PTS);
+              const end = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
 
-              const pick = nearestLineIndexWindow(next, line, floorIdx, ceilIdx);
+              const pick =
+                nearestLineIndexWindow(next, line, start, end) ??
+                nearestLineIndexWindow(next, line, curIdx, Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS));
 
               if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
+                const minAllowed = Math.max(0, curIdx - 3);
+                const maxAllowed = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
+                traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
               }
             }
 
@@ -1313,11 +1253,12 @@ export default function NavLive() {
   }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
 
   /* =========================
-     Quand le targetIdx change: maj visuelle stops
+     Quand le targetIdx change: maj visuelle stops + active line
   ========================= */
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
+    upsertActiveLineOnMap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1369,7 +1310,7 @@ export default function NavLive() {
 
       const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
       const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
-      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= 90;
+      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
 
       if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
         const nextIdx = targetIdx + 1;
@@ -1656,9 +1597,15 @@ export default function NavLive() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
-              onPointerDown={tapHandler(() => enableAudio())}
-              onTouchStart={tapHandler(() => enableAudio())}
-              onClick={tapHandler(() => enableAudio())}
+              onPointerDown={tapHandler(() => {
+                enableAudio();
+              })}
+              onTouchStart={tapHandler(() => {
+                enableAudio();
+              })}
+              onClick={tapHandler(() => {
+                enableAudio();
+              })}
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >

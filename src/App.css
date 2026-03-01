@@ -4,12 +4,13 @@
 
 #root {
   width: 100%;
-  min-height: 100vh;
+  min-height: 100vh;   /* fallback */
+  min-height: 100dvh;  /* iOS/Android */
   margin: 0;
   padding: 0;
 }
 
-/* Supprime tout centrage automatique */
+/* Supprime tout centrage automatique (si un vieux CSS traîne) */
 body {
   margin: 0;
 }
@@ -19,15 +20,24 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Neutralise animations template Vite */
+/* Neutralise styles template Vite (sans casser ton UI) */
 .logo,
-.read-the-docs,
+.read-the-docs {
+  display: none !important;
+}
+
+/* Si Vite avait laissé des trucs */
 .card {
   all: unset;
+  display: contents;
 }
 
 /* Empêche toute animation héritée */
 @keyframes logo-spin {
-  from { transform: none; }
-  to { transform: none; }
+  from {
+    transform: none;
+  }
+  to {
+    transform: none;
+  }
 }
