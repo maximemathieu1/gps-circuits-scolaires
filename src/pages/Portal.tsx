@@ -54,10 +54,7 @@ export default function Portal() {
   const [circuits, setCircuits] = useState<Circuit[]>([]);
   const [circuitId, setCircuitId] = useState("");
 
-  const selected = useMemo(
-    () => circuits.find((c) => c.id === circuitId) ?? null,
-    [circuits, circuitId]
-  );
+  const selected = useMemo(() => circuits.find((c) => c.id === circuitId) ?? null, [circuits, circuitId]);
 
   const canUse = ready && isAuthed;
   const hasCircuit = Boolean(circuitId);
@@ -101,23 +98,39 @@ export default function Portal() {
   }
 
   // =========================
-  // Responsive layout (iOS + tablette)
+  // Responsive layout (iOS + Android + tablette) — FIX “flottant”
   // =========================
   const page: React.CSSProperties = {
     minHeight: "100vh",
+    minHeight: "100dvh",
     width: "100%",
-    padding: "clamp(14px, 3.5vw, 28px)",
+    boxSizing: "border-box",
+
+    // ✅ TOP-ALIGNED (pas de centrage vertical)
+    display: "flex",
+    justifyContent: "flex-start",
+    alignItems: "stretch",
+
+    // ✅ Safe areas iOS + padding constant
+    paddingTop: "calc(env(safe-area-inset-top) + 14px)",
+    paddingRight: "calc(env(safe-area-inset-right) + 14px)",
+    paddingBottom: "calc(env(safe-area-inset-bottom) + 24px)",
+    paddingLeft: "calc(env(safe-area-inset-left) + 14px)",
+
     fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
     background:
       "radial-gradient(circle at 1px 1px, rgba(59,130,246,.10) 1px, rgba(0,0,0,0) 1px) 0 0 / 14px 14px," +
       "radial-gradient(130% 70% at 50% 35%, rgba(59,130,246,.18) 0%, rgba(59,130,246,0) 60%)," +
       "linear-gradient(180deg, #f7fafc 0%, #eef2f7 62%, #f7fafc 100%)",
-    display: "grid",
-    placeItems: "center",
+
+    overflowX: "hidden",
   };
 
   const wrap: React.CSSProperties = {
-    width: "min(620px, 100%)",
+    width: "100%",
+    maxWidth: 620,
+    margin: "0 auto",
+    boxSizing: "border-box",
   };
 
   // ✅ mini reset box-sizing (évite le débordement même si ton CSS global ne le fait pas)
@@ -126,6 +139,7 @@ export default function Portal() {
   };
 
   const card: React.CSSProperties = {
+    width: "100%",
     boxSizing: "border-box",
     borderRadius: 34,
     background: "rgba(255,255,255,.90)",
@@ -182,6 +196,9 @@ export default function Portal() {
     alignItems: "center",
     justifyContent: "space-between",
     gap: 14,
+
+    // ✅ iOS: évite certains comportements de double-tap/zoom
+    touchAction: "manipulation",
   };
 
   const overlay: React.CSSProperties = {
@@ -232,6 +249,9 @@ export default function Portal() {
     gap: 14,
     cursor: "pointer",
     minHeight: 86,
+
+    // ✅ iOS
+    touchAction: "manipulation",
   };
 
   const newLeft: React.CSSProperties = {
@@ -242,7 +262,7 @@ export default function Portal() {
     flex: "1 1 auto",
   };
 
-  // ✅ NOUVEAU: pill "Ouvrir" comme Navigation (mais teinte brun)
+  // ✅ pill "Ouvrir" comme Navigation (mais teinte brun)
   const newRightPill: React.CSSProperties = {
     flex: "0 0 auto",
     display: "inline-flex",
@@ -371,7 +391,6 @@ export default function Portal() {
                     </div>
                   </div>
 
-                  {/* ✅ Ajout du pill "Ouvrir" */}
                   <div style={newRightPill}>Ouvrir ›</div>
                 </div>
 
@@ -394,11 +413,7 @@ export default function Portal() {
                     <div style={{ fontSize: 12.5, fontWeight: 900, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
                       Transporteur
                     </div>
-                    <select
-                      style={select}
-                      value={transporteur}
-                      onChange={(e) => setTransporteur(e.target.value as TCode)}
-                    >
+                    <select style={select} value={transporteur} onChange={(e) => setTransporteur(e.target.value as TCode)}>
                       <option value="B">{LABEL.B}</option>
                       <option value="C">{LABEL.C}</option>
                       <option value="S">{LABEL.S}</option>
