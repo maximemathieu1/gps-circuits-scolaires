@@ -35,7 +35,6 @@ async function unlockIOSAudioOnce() {
 
   try {
     const u = new SpeechSynthesisUtterance(" ");
-    u.volume = 1.0;
     window.speechSynthesis.speak(u);
     setTimeout(() => {
       try {
@@ -78,7 +77,6 @@ export default function Portal() {
     if (!ready) return;
     if (view !== "gps") return;
     load().catch((e: any) => alert(e?.message || "Erreur chargement."));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transporteur, isAuthed, ready, view]);
 
   function goLogin(redirectTo: string = "/") {
@@ -97,380 +95,153 @@ export default function Portal() {
     nav("/record");
   }
 
-  // =========================
-  // Responsive layout (iOS + Android + tablette) — FIX “flottant”
-  // =========================
+  // ===== Layout FULL APP =====
   const page: React.CSSProperties = {
-    minHeight: "100vh",
     minHeight: "100dvh",
-    width: "100%",
+    background: "#f3f4f6",
+    padding: "20px",
     boxSizing: "border-box",
-
-    // ✅ TOP-ALIGNED (pas de centrage vertical)
-    display: "flex",
-    justifyContent: "flex-start",
-    alignItems: "stretch",
-
-    // ✅ Safe areas iOS + padding constant
-    paddingTop: "calc(env(safe-area-inset-top) + 14px)",
-    paddingRight: "calc(env(safe-area-inset-right) + 14px)",
-    paddingBottom: "calc(env(safe-area-inset-bottom) + 24px)",
-    paddingLeft: "calc(env(safe-area-inset-left) + 14px)",
-
     fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
-    background:
-      "radial-gradient(circle at 1px 1px, rgba(59,130,246,.10) 1px, rgba(0,0,0,0) 1px) 0 0 / 14px 14px," +
-      "radial-gradient(130% 70% at 50% 35%, rgba(59,130,246,.18) 0%, rgba(59,130,246,0) 60%)," +
-      "linear-gradient(180deg, #f7fafc 0%, #eef2f7 62%, #f7fafc 100%)",
-
-    overflowX: "hidden",
   };
 
-  const wrap: React.CSSProperties = {
-    width: "100%",
-    maxWidth: 620,
-    margin: "0 auto",
-    boxSizing: "border-box",
+  const section: React.CSSProperties = {
+    background: "#ffffff",
+    borderRadius: 18,
+    padding: "18px",
+    marginBottom: 16,
+    boxShadow: "0 2px 10px rgba(0,0,0,.04)",
   };
 
-  // ✅ mini reset box-sizing (évite le débordement même si ton CSS global ne le fait pas)
-  const rootReset: React.CSSProperties = {
-    boxSizing: "border-box",
-  };
-
-  const card: React.CSSProperties = {
-    width: "100%",
-    boxSizing: "border-box",
-    borderRadius: 34,
-    background: "rgba(255,255,255,.90)",
-    border: "1px solid rgba(2,6,23,.06)",
-    boxShadow: "0 26px 80px rgba(2,6,23,.16)",
-    backdropFilter: "blur(10px)",
-    padding: "clamp(16px, 2.8vw, 22px)",
-    overflow: "hidden",
-    position: "relative",
-  };
-
-  const topRow: React.CSSProperties = {
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
-    marginBottom: 14,
-  };
-
-  const brand: React.CSSProperties = { minWidth: 0 };
-
-  const brandName: React.CSSProperties = {
-    margin: 0,
-    fontWeight: 950,
-    fontSize: 18,
-    letterSpacing: -0.3,
-    color: "#0f172a",
-    lineHeight: 1.1,
-  };
-
-  const brandSub: React.CSSProperties = {
-    marginTop: 4,
-    fontSize: 12.5,
-    fontWeight: 800,
-    color: "rgba(15,23,42,.62)",
-  };
-
-  // --- Navigation card (fix overflow + align CTA) ---
-  const actionBlue: React.CSSProperties = {
-    width: "100%",
-    boxSizing: "border-box",
-    borderRadius: 28,
-    padding: "clamp(16px, 2.6vw, 20px)",
-    background: "linear-gradient(135deg, #1e40af 0%, #2f6fdb 50%, #1d4ed8 100%)",
-    border: "1px solid rgba(255,255,255,.18)",
-    boxShadow: "0 20px 60px rgba(2,6,23,.18)",
+  const primaryCard: React.CSSProperties = {
+    ...section,
+    background: "linear-gradient(135deg, #1e40af, #2563eb)",
     color: "#fff",
     cursor: "pointer",
-    position: "relative",
-    overflow: "hidden",
-    minHeight: 98,
+  };
 
+  const rowBetween: React.CSSProperties = {
     display: "flex",
-    alignItems: "center",
     justifyContent: "space-between",
-    gap: 14,
-
-    // ✅ iOS: évite certains comportements de double-tap/zoom
-    touchAction: "manipulation",
-  };
-
-  const overlay: React.CSSProperties = {
-    position: "absolute",
-    inset: 0,
-    background:
-      "radial-gradient(140% 140% at 88% 20%, rgba(255,255,255,.20) 0%, rgba(255,255,255,0) 55%)," +
-      "radial-gradient(140% 140% at 25% 95%, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 62%)," +
-      "radial-gradient(130% 150% at 92% 92%, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 62%)",
-    pointerEvents: "none",
-  };
-
-  const navLeft: React.CSSProperties = {
-    minWidth: 0,
-    flex: "1 1 auto",
-    position: "relative",
-    zIndex: 1,
-  };
-
-  const navRight: React.CSSProperties = {
-    flex: "0 0 auto",
-    position: "relative",
-    zIndex: 1,
-    display: "inline-flex",
     alignItems: "center",
-    justifyContent: "center",
-    padding: "10px 14px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,.14)",
-    border: "1px solid rgba(255,255,255,.18)",
-    fontWeight: 950,
-    whiteSpace: "nowrap",
-  };
-
-  // --- Secondary card ---
-  const actionLight: React.CSSProperties = {
-    width: "100%",
-    boxSizing: "border-box",
-    borderRadius: 28,
-    padding: "clamp(16px, 2.6vw, 20px)",
-    marginTop: 14,
-    background: "linear-gradient(180deg, rgba(255,255,255,.94) 0%, rgba(255,255,255,.78) 100%)",
-    border: "1px solid rgba(2,6,23,.06)",
-    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 14,
-    cursor: "pointer",
-    minHeight: 86,
-
-    // ✅ iOS
-    touchAction: "manipulation",
-  };
-
-  const newLeft: React.CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    minWidth: 0,
-    flex: "1 1 auto",
-  };
-
-  // ✅ pill "Ouvrir" comme Navigation (mais teinte brun)
-  const newRightPill: React.CSSProperties = {
-    flex: "0 0 auto",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "10px 14px",
-    borderRadius: 999,
-    background: "rgba(124,45,18,.12)",
-    border: "1px solid rgba(124,45,18,.18)",
-    fontWeight: 950,
-    color: "rgba(124,45,18,.88)",
-    whiteSpace: "nowrap",
-  };
-
-  const quote: React.CSSProperties = {
-    textAlign: "center",
-    marginTop: 18,
-    fontWeight: 900,
-    fontSize: "clamp(18px, 2.2vw, 22px)",
-    color: "rgba(15,23,42,.68)",
-    letterSpacing: -0.35,
-    lineHeight: 1.25,
-  };
-
-  const busImg: React.CSSProperties = {
-    width: "min(360px, 78%)",
-    margin: "12px auto 0",
-    display: "block",
-    opacity: 0.32,
-    filter: "blur(.2px)",
-    transform: "translateY(6px)",
-    pointerEvents: "none",
-    userSelect: "none",
   };
 
   return (
     <div style={page}>
-      <div style={wrap}>
-        <div style={{ ...rootReset }}>
-          <div style={card}>
-            {/* Header text only */}
-            <div style={topRow}>
-              <div style={brand}>
-                <p style={brandName}>Groupe Breton</p>
-                <div style={brandSub}>Espace conducteur</div>
-              </div>
-            </div>
-
-            {view === "home" ? (
-              <>
-                {!ready ? null : !isAuthed ? (
-                  <button
-                    type="button"
-                    style={{ ...btn("primary"), width: "100%", boxSizing: "border-box" }}
-                    onClick={() => goLogin("/")}
-                  >
-                    Se connecter
-                  </button>
-                ) : null}
-
-                {/* Navigation */}
-                <div style={actionBlue} onClick={() => setView("gps")} title="Navigation guidée">
-                  <div style={overlay} />
-
-                  <div style={navLeft}>
-                    <div
-                      style={{
-                        fontWeight: 950,
-                        fontSize: 22,
-                        letterSpacing: -0.2,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      NAVIGATION GPS
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: 6,
-                        fontWeight: 750,
-                        opacity: 0.88,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      Navigation guidée en temps réel
-                    </div>
-                  </div>
-
-                  <div style={navRight}>Ouvrir ›</div>
-                </div>
-
-                {/* Nouveau */}
-                <div style={actionLight} onClick={goRecord} title="Nouveau / Mettre à jour">
-                  <div style={newLeft}>
-                    <RefreshCw size={26} color="rgba(124,45,18,.85)" />
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontWeight: 950,
-                          fontSize: 18,
-                          color: "#7c2d12",
-                          letterSpacing: -0.2,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        NOUVEAU CIRCUIT
-                      </div>
-                      <div
-                        style={{
-                          marginTop: 6,
-                          fontWeight: 750,
-                          color: "rgba(124,45,18,.70)",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        Mettre à jour circuit existant
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={newRightPill}>Ouvrir ›</div>
-                </div>
-
-                <div style={quote}>
-                  Vous transportez plus que des élèves. <br />
-                  Vous transportez l’avenir.
-                </div>
-
-                <img src="/bus.png" alt="" aria-hidden="true" style={busImg} />
-              </>
-            ) : (
-              <>
-                {/* GPS selection */}
-                <div style={{ display: "grid", gap: 12 }}>
-                  <button type="button" style={btn("ghost")} onClick={() => setView("home")}>
-                    Retour
-                  </button>
-
-                  <div>
-                    <div style={{ fontSize: 12.5, fontWeight: 900, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
-                      Transporteur
-                    </div>
-                    <select style={select} value={transporteur} onChange={(e) => setTransporteur(e.target.value as TCode)}>
-                      <option value="B">{LABEL.B}</option>
-                      <option value="C">{LABEL.C}</option>
-                      <option value="S">{LABEL.S}</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <div style={{ fontSize: 12.5, fontWeight: 900, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
-                      Circuit
-                    </div>
-                    <select
-                      style={select}
-                      value={circuitId}
-                      onChange={(e) => setCircuitId(e.target.value)}
-                      disabled={!canUse}
-                    >
-                      {!canUse ? (
-                        <option value="">(connexion requise)</option>
-                      ) : circuits.length ? (
-                        circuits.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.nom}
-                          </option>
-                        ))
-                      ) : (
-                        <option value="">(aucun circuit)</option>
-                      )}
-                    </select>
-                  </div>
-
-                  <button
-                    type="button"
-                    style={{
-                      ...btn("primary"),
-                      width: "100%",
-                      opacity: canUse && hasCircuit ? 1 : 0.55,
-                      boxSizing: "border-box",
-                    }}
-                    onClick={goNav}
-                    disabled={!canUse || !hasCircuit}
-                  >
-                    Ouvrir la navigation
-                  </button>
-
-                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.70)", fontWeight: 900, fontSize: 13.5 }}>
-                    {selected ? selected.nom : ""}
-                  </div>
-
-                  <div style={{ textAlign: "center", color: "rgba(15,23,42,.55)", fontWeight: 800, fontSize: 12.5 }}>
-                    Transporteur: {LABEL[transporteur]}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+      {/* HEADER */}
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ margin: 0, fontWeight: 900 }}>Groupe Breton</h2>
+        <div style={{ opacity: 0.6, fontWeight: 600 }}>Espace conducteur</div>
       </div>
+
+      {view === "home" ? (
+        <>
+          {!ready ? null : !isAuthed ? (
+            <button
+              type="button"
+              style={{ ...btn("primary"), width: "100%", marginBottom: 16 }}
+              onClick={() => goLogin("/")}
+            >
+              Se connecter
+            </button>
+          ) : null}
+
+          {/* NAVIGATION */}
+          <div style={primaryCard} onClick={() => setView("gps")}>
+            <div style={rowBetween}>
+              <div>
+                <div style={{ fontSize: 20, fontWeight: 900 }}>NAVIGATION GPS</div>
+                <div style={{ opacity: 0.9, marginTop: 4 }}>
+                  Navigation guidée en temps réel
+                </div>
+              </div>
+              <div style={{ fontWeight: 800 }}>Ouvrir ›</div>
+            </div>
+          </div>
+
+          {/* NOUVEAU */}
+          <div style={{ ...section, cursor: "pointer" }} onClick={goRecord}>
+            <div style={rowBetween}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <RefreshCw size={22} />
+                <div>
+                  <div style={{ fontWeight: 800 }}>NOUVEAU CIRCUIT</div>
+                  <div style={{ opacity: 0.6 }}>Mettre à jour circuit existant</div>
+                </div>
+              </div>
+              <div style={{ fontWeight: 700 }}>Ouvrir ›</div>
+            </div>
+          </div>
+
+          {/* MESSAGE */}
+          <div style={{ textAlign: "center", marginTop: 30, opacity: 0.7 }}>
+            <strong>
+              Vous transportez plus que des élèves.
+              <br />
+              Vous transportez l’avenir.
+            </strong>
+          </div>
+        </>
+      ) : (
+        <>
+          <button style={{ ...btn("ghost"), marginBottom: 16 }} onClick={() => setView("home")}>
+            Retour
+          </button>
+
+          <div style={section}>
+            <div style={{ marginBottom: 8, fontWeight: 700 }}>Transporteur</div>
+            <select
+              style={select}
+              value={transporteur}
+              onChange={(e) => setTransporteur(e.target.value as TCode)}
+            >
+              <option value="B">{LABEL.B}</option>
+              <option value="C">{LABEL.C}</option>
+              <option value="S">{LABEL.S}</option>
+            </select>
+          </div>
+
+          <div style={section}>
+            <div style={{ marginBottom: 8, fontWeight: 700 }}>Circuit</div>
+            <select
+              style={select}
+              value={circuitId}
+              onChange={(e) => setCircuitId(e.target.value)}
+              disabled={!canUse}
+            >
+              {!canUse ? (
+                <option value="">(connexion requise)</option>
+              ) : circuits.length ? (
+                circuits.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nom}
+                  </option>
+                ))
+              ) : (
+                <option value="">(aucun circuit)</option>
+              )}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            style={{
+              ...btn("primary"),
+              width: "100%",
+              opacity: canUse && hasCircuit ? 1 : 0.55,
+            }}
+            onClick={goNav}
+            disabled={!canUse || !hasCircuit}
+          >
+            Ouvrir la navigation
+          </button>
+
+          {selected && (
+            <div style={{ textAlign: "center", marginTop: 14, opacity: 0.6 }}>
+              {selected.nom}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
