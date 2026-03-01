@@ -426,9 +426,12 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
-    { show: false, meters: 0, label: null, max: 150 }
-  );
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
+    show: false,
+    meters: 0,
+    label: null,
+    max: 150,
+  });
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
@@ -901,10 +904,7 @@ export default function NavLive() {
     return yOff;
   }
 
-<<<<<<< HEAD
   // ✅ Recentrer = jump immédiat + reprise follow “instant”
-=======
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
   function recenter() {
     followRef.current = true;
 
@@ -916,10 +916,7 @@ export default function NavLive() {
       m.stop();
     } catch {}
 
-<<<<<<< HEAD
     // quand on recentre, on “redonne” la main à l’auto-zoom
-=======
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
     manualZoomRef.current = null;
     manualZoomUntilRef.current = 0;
 
@@ -1008,19 +1005,6 @@ export default function NavLive() {
     return out;
   }, [hasOfficial, officialLine, points]);
 
-<<<<<<< HEAD
-  // ✅ Fenêtre autorisée sur la trace active, basée sur l’ordre croissant des arrêts
-  function getActiveBounds(lineLen: number) {
-    const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
-
-    const curStop = stopIdxOnTrace[targetIdx] ?? 0;
-    const prevStop = targetIdx > 0 ? stopIdxOnTrace[targetIdx - 1] ?? 0 : 0;
-    const nextStop =
-      targetIdx + 1 < stopIdxOnTrace.length ? stopIdxOnTrace[targetIdx + 1] ?? curStop : curStop + SNAP_AHEAD_PTS;
-
-    const minIdx = clampIdx(Math.min(prevStop, curStop));
-    const maxIdx = clampIdx(Math.max(curStop, nextStop) + 80); // petit buffer après le prochain arrêt
-=======
   // ✅ bornes autorisées = entre arrêt courant et prochain arrêt (ordre croissant)
   function getActiveBounds(lineLen: number) {
     const clampIdx = (x: number) => clamp(Math.floor(x), 0, Math.max(0, lineLen - 1));
@@ -1032,7 +1016,6 @@ export default function NavLive() {
     // petit back autorisé (pour smooth) MAIS jamais assez pour tomber sur une autre branche loin
     const minIdx = clampIdx(Math.max(0, curStopIdx - 10));
     const maxIdx = clampIdx(Math.max(curStopIdx + 1, nextStopIdx));
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
 
     return { minIdx, maxIdx };
   }
@@ -1244,63 +1227,33 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-<<<<<<< HEAD
           // ✅ Trace idx = commence au début (sans exception), puis rejoint et suit ta position courante,
           //    MAIS dans une fenêtre autorisée par l'ordre croissant des arrêts (anti-croisements).
-=======
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
             const { minIdx, maxIdx } = getActiveBounds(line.length);
 
             if (!joinedTraceRef.current) {
-<<<<<<< HEAD
-              // ✅ sans exception: fenêtre active au début de la trace
-=======
               // ✅ sans exception: au début -> idx=0
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               traceIdxRef.current = 0;
 
               const d = minDistanceToPolylineMeters(next, line);
               if (d != null && d <= JOIN_DIST_M) {
                 joinedTraceRef.current = true;
 
-<<<<<<< HEAD
-                // ✅ au join: snap sur ta position courante, mais uniquement dans les bornes des arrêts
-=======
                 // ✅ join: snap sur ta position courante MAIS borné dans [minIdx..maxIdx]
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
                 const pick =
                   nearestLineIndexWindow(next, line, minIdx, maxIdx) ??
                   nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
                   nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-<<<<<<< HEAD
-                  const floorIdx = Math.max(minIdx, traceIdxRef.current);
-                  traceIdxRef.current = clamp(pick.idx, floorIdx, maxIdx);
-=======
                   traceIdxRef.current = clamp(pick.idx, minIdx, maxIdx);
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
                 } else {
                   traceIdxRef.current = 0;
                 }
               }
             } else {
-<<<<<<< HEAD
-              // ✅ déjà rejoint: on suit ta position courante, monotone forward, borné par les arrêts
-              const floorIdx = Math.max(minIdx, traceIdxRef.current);
-              const ceilIdx = Math.max(floorIdx, maxIdx);
-
-              const pick =
-                nearestLineIndexWindow(next, line, floorIdx, ceilIdx) ??
-                nearestLineIndexWindow(next, line, floorIdx, Math.min(line.length - 1, floorIdx + SNAP_AHEAD_PTS));
-
-              if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
-              } else {
-                // trop loin -> on garde l'idx courant
-=======
               const floorIdx = Math.max(minIdx, traceIdxRef.current); // ✅ monotone forward réel
               const ceilIdx = Math.max(floorIdx + 1, maxIdx);
 
@@ -1308,7 +1261,6 @@ export default function NavLive() {
 
               if (pick && pick.dist <= SNAP_MAX_DIST_M) {
                 traceIdxRef.current = clamp(pick.idx, floorIdx, ceilIdx);
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               }
             }
 
@@ -1358,11 +1310,7 @@ export default function NavLive() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-<<<<<<< HEAD
-  }, [running, hasOfficial, stopIdxOnTrace, targetIdx]);
-=======
   }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
 
   /* =========================
      Quand le targetIdx change: maj visuelle stops
@@ -1546,11 +1494,8 @@ export default function NavLive() {
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
-<<<<<<< HEAD
 
     // ✅ iOS: empêcher Safari de “voler” le tap / double-tap zoom
-=======
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
     touchAction: "none",
     WebkitTapHighlightColor: "transparent",
     WebkitTouchCallout: "none",
@@ -1711,21 +1656,9 @@ export default function NavLive() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
-<<<<<<< HEAD
-              onPointerDown={tapHandler(() => {
-                enableAudio();
-              })}
-              onTouchStart={tapHandler(() => {
-                enableAudio();
-              })}
-              onClick={tapHandler(() => {
-                enableAudio();
-              })}
-=======
               onPointerDown={tapHandler(() => enableAudio())}
               onTouchStart={tapHandler(() => enableAudio())}
               onClick={tapHandler(() => enableAudio())}
->>>>>>> 04c1011 (NOUVEAU UI +FIX fenetre active monotone forward stops order)
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
