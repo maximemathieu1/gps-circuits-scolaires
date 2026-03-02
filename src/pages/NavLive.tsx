@@ -403,7 +403,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx)
+  // Progression sur trace (idx) — conservé pour join/off-route, MAIS plus utilisé pour la trace active
   const traceIdxRef = useRef<number>(0);
 
   // 🔒 join logique
@@ -453,7 +453,7 @@ export default function NavLive() {
   const MAP_LINE_LAYER = "line-layer";
   const MAP_LINE_HALO = "line-halo";
 
-  // Active trace (fenêtre + halo)
+  // Active trace (segment strict)
   const MAP_ACTIVE_SRC = "active-src";
   const MAP_ACTIVE_LAYER = "active-layer";
   const MAP_ACTIVE_HALO = "active-halo";
@@ -463,7 +463,7 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
-  // Fenêtre active (distance vers l’avant)
+  // Fenêtre active (gardés, mais l’actif devient un segment strict)
   const ACTIVE_AHEAD_METERS = 520;
   const ACTIVE_MAX_POINTS = 140;
   const ACTIVE_MIN_POINTS = 12;
@@ -538,48 +538,19 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  // ✅ Fenêtre active vers l’avant, MAIS: doit au minimum atteindre l'arrêt courant (targetIdx) sur la trace.
-  function buildActiveForwardGeoJSON(line: [number, number][], startIdx: number, minEndIdx: number) {
+  // ✅ SEGMENT STRICT : Départ→1, puis 1→2, 2→3, etc. (ignore totalement la proximité)
+  function buildActiveSegmentGeoJSON(line: [number, number][], startIdx: number, endIdx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
-
-    const s = clamp(Math.floor(startIdx), 0, Math.max(0, line.length - 2));
-    const mustReach = clamp(Math.floor(minEndIdx), s, line.length - 1);
-
-    const coords: [number, number][] = [];
-    let total = 0;
-    let count = 0;
-
-    const start = line[s];
-    coords.push([start[0], start[1]]);
-    count++;
-
-    const HARD_MAX_POINTS = 900; // hard cap anti-lag
-
-    for (let i = s; i < line.length - 1; i++) {
-      const a = { lat: line[i][0], lng: line[i][1] };
-      const b = { lat: line[i + 1][0], lng: line[i + 1][1] };
-      const seg = haversineMeters(a, b);
-
-      total += seg;
-      coords.push([line[i + 1][0], line[i + 1][1]]);
-      count++;
-
-      const reachedMust = i + 1 >= mustReach;
-
-      if (count >= HARD_MAX_POINTS) break;
-
-      // ❗ On n'a PAS le droit d'arrêter avant mustReach.
-      if (reachedMust) {
-        if (count >= ACTIVE_MAX_POINTS) break;
-        if (total >= ACTIVE_AHEAD_METERS && count >= ACTIVE_MIN_POINTS) break;
-      }
+    const s = clamp(Math.floor(startIdx), 0, line.length - 1);
+    const e = clamp(Math.floor(endIdx), 0, line.length - 1);
+    const a = Math.min(s, e);
+    const b = Math.max(s, e);
+    const slice = line.slice(a, b + 1);
+    if (slice.length < 2) {
+      const fallback = line.slice(Math.max(0, b - 1), b + 1);
+      return buildLineGeoJSON(fallback);
     }
-
-    if (coords.length < 2) {
-      const tail = line.slice(Math.max(0, line.length - 2));
-      return buildLineGeoJSON(tail);
-    }
-    return buildLineGeoJSON(coords);
+    return buildLineGeoJSON(slice);
   }
 
   function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
@@ -638,6 +609,37 @@ export default function NavLive() {
     return out;
   }, [hasOfficial, officialLine, points]);
 
+  // ✅ Indices segment actif (règle demandée)
+  // targetIdx = arrêt courant visé (0=>arrêt #1). Segment:
+  // - targetIdx=0: Départ(trace start) -> arrêt 1
+  // - targetIdx=1: arrêt 1 -> arrêt 2
+  // - targetIdx=2: arrêt 2 -> arrêt 3 ...
+  function getActiveSegmentIdxs(fullLineLen: number) {
+    const last = Math.max(0, fullLineLen - 1);
+
+    // fallback si mapping pas prêt
+    const safeStop0 = stopIdxOnTrace[0];
+    if (!stopIdxOnTrace.length || safeStop0 == null) {
+      return { start: 0, end: clamp(ACTIVE_MIN_POINTS, 1, last) };
+    }
+
+    if (targetIdx <= 0) {
+      // Départ -> arrêt 1
+      return { start: 0, end: clamp(stopIdxOnTrace[0], 1, last) };
+    }
+
+    const prevStopTrace = clamp(stopIdxOnTrace[targetIdx - 1] ?? 0, 0, last);
+    const curStopTrace = clamp(stopIdxOnTrace[targetIdx] ?? (prevStopTrace + 1), 0, last);
+
+    // sécurité monotone
+    const start = Math.min(prevStopTrace, curStopTrace);
+    const end = Math.max(prevStopTrace, curStopTrace);
+
+    // ensure au moins 2 pts
+    if (end <= start) return { start: Math.max(0, end - 1), end };
+    return { start, end };
+  }
+
   function applyOverlays() {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
@@ -683,20 +685,12 @@ export default function NavLive() {
       }
     }
 
-    // TRACE ACTIVE (✅ doit atteindre l'arrêt courant)
+    // TRACE ACTIVE = ✅ SEGMENT STRICT basé sur les numéros d'arrêts (pas sur la proximité / pas sur traceIdxRef)
     if (fullLine && fullLine.length >= 2) {
       try {
-        const startIdx = traceIdxRef.current;
+        const { start, end } = getActiveSegmentIdxs(fullLine.length);
+        const activeGeo = buildActiveSegmentGeoJSON(fullLine, start, end);
 
-        const stopIdx = stopIdxOnTrace[targetIdx] ?? startIdx;
-        const BUFFER_AFTER_STOP_PTS = 40;
-
-        const minEndIdx = Math.min(
-          fullLine.length - 1,
-          Math.max(stopIdx + BUFFER_AFTER_STOP_PTS, startIdx + ACTIVE_MIN_POINTS)
-        );
-
-        const activeGeo = buildActiveForwardGeoJSON(fullLine, startIdx, minEndIdx);
         m.addSource(MAP_ACTIVE_SRC, { type: "geojson", data: activeGeo as any });
 
         m.addLayer({
@@ -771,8 +765,8 @@ export default function NavLive() {
     }
   }
 
-  // throttle: update active si idx change OU targetIdx change OU >250ms
-  const lastActiveUpdateRef = useRef<{ idx: number; t: number; targetIdx: number }>({ idx: -1, t: 0, targetIdx: -1 });
+  // throttle: update active si targetIdx change OU >250ms
+  const lastActiveUpdateRef = useRef<{ t: number; targetIdx: number }>({ t: 0, targetIdx: -1 });
 
   function upsertActiveLineOnMap() {
     const m = mapRef.current;
@@ -783,29 +777,18 @@ export default function NavLive() {
       if (!full || full.length < 2) return;
 
       const now = performance.now();
-      const idx = traceIdxRef.current;
-
       const last = lastActiveUpdateRef.current;
-      const idxChanged = idx !== last.idx;
       const targetChanged = targetIdx !== last.targetIdx;
       const timeOk = now - last.t >= 250;
 
-      if (!idxChanged && !targetChanged && !timeOk) return;
+      if (!targetChanged && !timeOk) return;
 
-      lastActiveUpdateRef.current = { idx, t: now, targetIdx };
+      lastActiveUpdateRef.current = { t: now, targetIdx };
 
       const src = m.getSource(MAP_ACTIVE_SRC) as mapboxgl.GeoJSONSource | undefined;
 
-      const startIdx = idx;
-      const stopIdx = stopIdxOnTrace[targetIdx] ?? startIdx;
-      const BUFFER_AFTER_STOP_PTS = 40;
-
-      const minEndIdx = Math.min(
-        full.length - 1,
-        Math.max(stopIdx + BUFFER_AFTER_STOP_PTS, startIdx + ACTIVE_MIN_POINTS)
-      );
-
-      const data = buildActiveForwardGeoJSON(full, startIdx, minEndIdx) as any;
+      const { start, end } = getActiveSegmentIdxs(full.length);
+      const data = buildActiveSegmentGeoJSON(full, start, end) as any;
 
       if (src) {
         src.setData(data);
@@ -992,7 +975,7 @@ export default function NavLive() {
     // ✅ IMPORTANT: au chargement, on démarre TOUJOURS au début de la trace
     traceIdxRef.current = 0;
     joinedTraceRef.current = false;
-    lastActiveUpdateRef.current = { idx: -1, t: 0, targetIdx: -1 };
+    lastActiveUpdateRef.current = { t: 0, targetIdx: -1 };
 
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
@@ -1168,7 +1151,7 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // ✅ Trace idx = commence au début, puis “rejoint” la trace et suit monotone forward
+          // ✅ Join trace (pour off-route / stabilité), MAIS trace active = segment strict (géré ailleurs)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
 
@@ -1203,9 +1186,10 @@ export default function NavLive() {
                 traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
               }
             }
-
-            upsertActiveLineOnMap();
           }
+
+          // ✅ Active line update (segment strict)
+          upsertActiveLineOnMap();
 
           if (m.isStyleLoaded()) {
             if (!m.getLayer(MAP_LINE_LAYER) && lineRef.current.length >= 2) applyOverlays();
