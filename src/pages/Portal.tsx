@@ -157,14 +157,12 @@ export default function Portal() {
   };
 
   const topRow: React.CSSProperties = {
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
-    marginBottom: 14,
-    position: "relative",
-    zIndex: 1,
-  };
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 32, // 👈 augmente ici
+};
 
   const brand: React.CSSProperties = { minWidth: 0 };
 
@@ -289,24 +287,24 @@ export default function Portal() {
 
   // --- Secondary Action (Nouveau Circuit) -> ORANGE/JAUNE demandé ---
   const actionOrange: React.CSSProperties = {
-    width: "100%",
-    boxSizing: "border-box",
-    borderRadius: 28,
-    padding: "clamp(16px, 2.6vw, 20px)",
-    marginTop: 14,
-    background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 45%, #ffffff 100%)",
+  width: "100%",
+  boxSizing: "border-box",
+  borderRadius: 28,
+  padding: "clamp(16px, 2.6vw, 20px)",
+  marginTop: 14,
+  background: "linear-gradient(135deg, #fde68a 0%, #ffedd5 45%, #ffffff 100%)",
     border: "1px solid rgba(234,88,12,.16)",
     boxShadow: "0 14px 40px rgba(2,6,23,.10)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 14,
-    cursor: "pointer",
-    minHeight: 92,
-    position: "relative",
-    overflow: "hidden",
-    touchAction: "manipulation",
-  };
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 14,
+  cursor: "pointer",
+  minHeight: 98, // aligné avec navigation
+  position: "relative",
+  overflow: "hidden",
+  touchAction: "manipulation",
+};
 
   const overlayOrange: React.CSSProperties = {
     position: "absolute",
@@ -390,7 +388,7 @@ export default function Portal() {
             <div style={topRow}>
               <div style={brand}>
                 <p style={brandName}>Groupe Breton</p>
-                <div style={brandSub}>Espace conducteur</div>
+                <div style={brandSub}>Espace Conducteur</div>
               </div>
 
               <div style={tinyBadge} title={ready ? (isAuthed ? "Connecté" : "Déconnecté") : "Chargement..."}>
@@ -412,51 +410,45 @@ export default function Portal() {
                 ) : null}
 
                 {/* NAVIGATION */}
-                <div style={actionBlue} onClick={() => setView("gps")} title="Navigation guidée">
-                  <div style={overlayBlue} />
-                  <div style={navLeft}>
-                    <div style={navTitle}>NAVIGATION GPS</div>
-                    <div style={navSub}>Navigation guidée en temps réel</div>
-                  </div>
-                  <div style={pillBlue}>Ouvrir ›</div>
-                </div>
+<div
+  style={actionBlue}
+  onClick={() => setView("gps")}
+  title="Navigation guidée"
+>
+  <div style={overlayBlue} />
+  <div style={navLeft}>
+    <div style={navTitle}>NAVIGATION GPS</div>
+    <div style={navSub}>Navigation guidée en temps réel</div>
+  </div>
+</div>
+
 
                 {/* NOUVEAU CIRCUIT (jaune/orange) */}
-                <div style={actionOrange} onClick={goRecord} title="Nouveau / Mettre à jour">
-                  <div style={overlayOrange} />
+<div style={actionOrange} onClick={goRecord} title="Nouveau / Mettre à jour">
+  <div style={overlayOrange} />
 
-                  <div style={newLeft}>
-                    <div
-                      style={{
-                        width: 44,
-                        height: 44,
-                        borderRadius: 14,
-                        display: "grid",
-                        placeItems: "center",
-                        background: "linear-gradient(135deg, rgba(251,191,36,.22) 0%, rgba(234,88,12,.18) 100%)",
-                        border: "1px solid rgba(180,83,9,.18)",
-                        boxShadow: "0 12px 26px rgba(2,6,23,.10)",
-                        flex: "0 0 auto",
-                      }}
-                      aria-hidden="true"
-                    >
-                      <RefreshCw size={22} color="rgba(180,83,9,.92)" />
-                    </div>
+  <div style={{ minWidth: 0 }}>
+    <div style={newTitle}>NOUVEAU CIRCUIT</div>
+    <div style={newSub}>Mettre à jour circuit existant</div>
+  </div>
+</div>
 
-                    <div style={{ minWidth: 0 }}>
-                      <div style={newTitle}>NOUVEAU CIRCUIT</div>
-                      <div style={newSub}>Mettre à jour circuit existant</div>
-                    </div>
-                  </div>
+{/* ESPACE AJOUTÉ */}
+<div style={{ height: 36 }} />
 
-                  <div style={pillOrange}>Ouvrir ›</div>
-                </div>
-
-                <div style={quote}>
-                  Vous transportez plus que des élèves. <br />
-                  Vous transportez l’avenir.
-                </div>
-
+<div
+  style={{
+    marginTop: 40,
+    textAlign: "center",
+    fontSize: 15,
+    fontWeight: 600,
+    color: "rgba(15,23,42,.75)",
+    letterSpacing: 0.2,
+    lineHeight: 1.6,
+  }}
+>
+  Votre calme, votre attention et votre dévouement font notre fierté.
+</div>
                 {/* ✅ Remis bus.png en bas */}
                 <img src="/bus.png" alt="" aria-hidden="true" style={busImg} />
               </>

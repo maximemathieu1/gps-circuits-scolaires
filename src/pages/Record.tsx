@@ -630,7 +630,7 @@ export default function Record() {
     boxSizing: "border-box",
     borderRadius: 28,
     padding: "clamp(16px, 2.6vw, 20px)",
-    background: "linear-gradient(180deg, rgba(255,255,255,.94) 0%, rgba(255,255,255,.78) 100%)",
+    background: "linear-gradient(135deg, #fde68a 0%, #ffedd5 45%, #ffffff 100%)",
     border: "1px solid rgba(2,6,23,.06)",
     boxShadow: "0 14px 40px rgba(2,6,23,.10)",
     display: "flex",
