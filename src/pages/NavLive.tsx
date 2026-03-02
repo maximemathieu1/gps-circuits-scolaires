@@ -156,110 +156,107 @@ function fmtDist(m: number) {
 }
 
 /* =========================
-   Ding + voix (arrêts seulement)
+   MP3 SFX (Safari iOS + Fully Android)
 ========================= */
 
-function useDing() {
-  const ctxRef = useRef<AudioContext | null>(null);
+function useSfx() {
+  const unlockedRef = useRef(false);
 
-  function ensureCtx() {
-    const AC = (window.AudioContext || (window as any).webkitAudioContext) as any;
-    if (!AC) return null;
-    if (!ctxRef.current) ctxRef.current = new AC();
-    return ctxRef.current;
+  const soundsRef = useRef<Record<string, string>>({
+    audioOn: "/audio/audio_on.mp3",
+    stopWarning: "/audio/stop_warning.mp3",
+    stopReached: "/audio/stop_reached.mp3",
+    stopMissed: "/audio/stop_missed.mp3",
+    circuitDone: "/audio/circuit_done.mp3",
+    ding: "/audio/ding.mp3",
+  });
+
+  const poolRef = useRef<Record<string, HTMLAudioElement[]>>({});
+  const poolPtrRef = useRef<Record<string, number>>({});
+  const lastPlayAtRef = useRef<Record<string, number>>({});
+
+  function getFromPool(key: string) {
+    if (!poolRef.current[key]) {
+      const url = soundsRef.current[key] || "";
+      const poolSize = key === "ding" ? 3 : 2;
+
+      poolRef.current[key] = Array.from({ length: poolSize }).map(() => {
+        const a = new Audio(url);
+        a.preload = "auto";
+        a.crossOrigin = "anonymous";
+        (a as any).playsInline = true;
+        return a;
+      });
+      poolPtrRef.current[key] = 0;
+    }
+
+    const arr = poolRef.current[key];
+    const ptr = poolPtrRef.current[key] ?? 0;
+    const a = arr[ptr % arr.length];
+    poolPtrRef.current[key] = (ptr + 1) % arr.length;
+    return a;
   }
 
-  async function unlock() {
+  function preloadAll() {
+    Object.keys(soundsRef.current).forEach((k) => {
+      try {
+        const a = getFromPool(k);
+        a.load?.();
+      } catch {}
+    });
+  }
+
+  // Unlock iOS: doit être appelé DIRECTEMENT dans un tap (pas de await)
+  function unlock() {
+    if (unlockedRef.current) return;
     try {
-      const ctx = ensureCtx();
-      if (!ctx) return;
-      if (ctx.state === "suspended") await ctx.resume();
+      const a = getFromPool("audioOn");
+      a.volume = 0.001;
+      a.currentTime = 0;
+
+      const p = a.play();
+      Promise.resolve(p)
+        .then(() => {
+          try {
+            a.pause();
+            a.currentTime = 0;
+          } catch {}
+          unlockedRef.current = true;
+          try {
+            a.volume = 1.0;
+          } catch {}
+        })
+        .catch(() => {
+          // retentera au prochain tap
+        });
     } catch {}
   }
 
-  function play() {
+  function play(key: keyof typeof soundsRef.current, opts?: { volume?: number; cooldownMs?: number }) {
     try {
-      const ctx = ensureCtx();
-      if (!ctx) return;
+      const k = String(key);
+      const now = Date.now();
+      const cd = opts?.cooldownMs ?? 700;
+      const last = lastPlayAtRef.current[k] ?? 0;
+      if (now - last < cd) return;
+      lastPlayAtRef.current[k] = now;
+
+      const a = getFromPool(k);
       try {
-        if (ctx.state === "suspended") ctx.resume();
+        a.pause();
+      } catch {}
+      try {
+        a.currentTime = 0;
+      } catch {}
+      try {
+        a.volume = clamp(opts?.volume ?? 1.0, 0, 1);
       } catch {}
 
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-
-      o.type = "sine";
-      o.frequency.setValueAtTime(1046.5, ctx.currentTime);
-      g.gain.setValueAtTime(0.0001, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.45, ctx.currentTime + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
-
-      o.connect(g);
-      g.connect(ctx.destination);
-
-      o.start();
-      o.stop(ctx.currentTime + 0.24);
+      a.play().catch(() => {});
     } catch {}
   }
 
-  return { unlock, play };
-}
-
-function useSpeaker() {
-  const lastSpeakAtRef = useRef(0);
-  const lastTextRef = useRef<string>("");
-
-  useEffect(() => {
-    try {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-    } catch {}
-  }, []);
-
-  function speak(text: string, opts?: { cooldownMs?: number; interrupt?: boolean; dedupe?: boolean }) {
-    try {
-      const t = (text ?? "").trim();
-      if (!t) return;
-
-      const now = Date.now();
-      const cooldownMs = opts?.cooldownMs ?? 900;
-
-      if (opts?.dedupe !== false) {
-        if (t === lastTextRef.current) return;
-      }
-      if (now - lastSpeakAtRef.current < cooldownMs) return;
-
-      lastSpeakAtRef.current = now;
-      lastTextRef.current = t;
-
-      const interrupt = opts?.interrupt ?? true;
-      if (interrupt) window.speechSynthesis.cancel();
-
-      const u = new SpeechSynthesisUtterance(t);
-      const voices = window.speechSynthesis.getVoices?.() ?? [];
-      const pick =
-        voices.find((v) => (v.lang || "").toLowerCase() === "fr-ca") ||
-        voices.find((v) => (v.lang || "").toLowerCase().startsWith("fr")) ||
-        voices[0];
-
-      if (pick) u.voice = pick;
-      u.lang = pick?.lang || "fr-CA";
-
-      u.rate = 1.0;
-      u.pitch = 1.0;
-      u.volume = 1.0;
-
-      window.speechSynthesis.speak(u);
-    } catch {}
-  }
-
-  function stopAll() {
-    try {
-      window.speechSynthesis.cancel();
-    } catch {}
-  }
-
-  return { speak, stopAll };
+  return { unlock, play, preloadAll };
 }
 
 /* =========================
@@ -346,8 +343,7 @@ function tapHandler(fn: () => void) {
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
-  const { speak, stopAll } = useSpeaker();
-  const ding = useDing();
+  const sfx = useSfx();
 
   const circuitId = q.get("circuit") || "";
 
@@ -389,7 +385,7 @@ export default function NavLive() {
   // Wake lock
   const { supported: wlSupported, active: wlActive } = useWakeLock(running);
 
-  // Bandeau stop + ding
+  // Bandeau stop + sons
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
@@ -403,7 +399,7 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx) — conservé pour join/off-route, MAIS plus utilisé pour la trace active
+  // Progression sur trace (idx) — conservé pour join/off-route
   const traceIdxRef = useRef<number>(0);
 
   // 🔒 join logique
@@ -463,7 +459,7 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
-  // Fenêtre active (gardés, mais l’actif devient un segment strict)
+  // Fenêtre active (gardés)
   const ACTIVE_AHEAD_METERS = 520;
   const ACTIVE_MAX_POINTS = 140;
   const ACTIVE_MIN_POINTS = 12;
@@ -538,7 +534,7 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
-  // ✅ SEGMENT STRICT : Départ→1, puis 1→2, 2→3, etc. (ignore totalement la proximité)
+  // ✅ SEGMENT STRICT : Départ→1, puis 1→2, 2→3...
   function buildActiveSegmentGeoJSON(line: [number, number][], startIdx: number, endIdx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
     const s = clamp(Math.floor(startIdx), 0, line.length - 1);
@@ -610,32 +606,27 @@ export default function NavLive() {
   }, [hasOfficial, officialLine, points]);
 
   // ✅ Indices segment actif (règle demandée)
-  // targetIdx = arrêt courant visé (0=>arrêt #1). Segment:
-  // - targetIdx=0: Départ(trace start) -> arrêt 1
-  // - targetIdx=1: arrêt 1 -> arrêt 2
-  // - targetIdx=2: arrêt 2 -> arrêt 3 ...
+  // targetIdx=0: Départ -> arrêt 1
+  // targetIdx=1: arrêt 1 -> arrêt 2
+  // etc.
   function getActiveSegmentIdxs(fullLineLen: number) {
     const last = Math.max(0, fullLineLen - 1);
 
-    // fallback si mapping pas prêt
     const safeStop0 = stopIdxOnTrace[0];
     if (!stopIdxOnTrace.length || safeStop0 == null) {
       return { start: 0, end: clamp(ACTIVE_MIN_POINTS, 1, last) };
     }
 
     if (targetIdx <= 0) {
-      // Départ -> arrêt 1
       return { start: 0, end: clamp(stopIdxOnTrace[0], 1, last) };
     }
 
     const prevStopTrace = clamp(stopIdxOnTrace[targetIdx - 1] ?? 0, 0, last);
     const curStopTrace = clamp(stopIdxOnTrace[targetIdx] ?? (prevStopTrace + 1), 0, last);
 
-    // sécurité monotone
     const start = Math.min(prevStopTrace, curStopTrace);
     const end = Math.max(prevStopTrace, curStopTrace);
 
-    // ensure au moins 2 pts
     if (end <= start) return { start: Math.max(0, end - 1), end };
     return { start, end };
   }
@@ -685,7 +676,7 @@ export default function NavLive() {
       }
     }
 
-    // TRACE ACTIVE = ✅ SEGMENT STRICT basé sur les numéros d'arrêts (pas sur la proximité / pas sur traceIdxRef)
+    // TRACE ACTIVE = segment strict
     if (fullLine && fullLine.length >= 2) {
       try {
         const { start, end } = getActiveSegmentIdxs(fullLine.length);
@@ -918,17 +909,12 @@ export default function NavLive() {
     } catch {}
   }
 
-  async function enableAudio() {
-    try {
-      await ding.unlock();
-    } catch {}
-    try {
-      ding.play();
-      speak("Audio activé.", { cooldownMs: 0, interrupt: true, dedupe: false });
-      setAudioOn(true);
-    } catch {
-      setAudioOn(true);
-    }
+  function enableAudio() {
+    // DOIT rester sync (tap => unlock iOS)
+    sfx.unlock();
+    sfx.preloadAll();
+    sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
+    setAudioOn(true);
   }
 
   function stop() {
@@ -945,7 +931,6 @@ export default function NavLive() {
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
 
-    stopAll();
     nav("/");
   }
 
@@ -1151,7 +1136,7 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
-          // ✅ Join trace (pour off-route / stabilité), MAIS trace active = segment strict (géré ailleurs)
+          // Join trace (pour off-route / stabilité)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
 
@@ -1261,7 +1246,7 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + ding + skip
+     Stops + bandeau + sons + skip
   ========================= */
 
   useEffect(() => {
@@ -1299,7 +1284,7 @@ export default function NavLive() {
       if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
         const nextIdx = targetIdx + 1;
         if (nextIdx < points.length) {
-          if (audioOn) speak("Arrêt manqué. Prochain arrêt.", { cooldownMs: 1200, interrupt: true });
+          if (audioOn) sfx.play("stopMissed", { volume: 1.0, cooldownMs: 1200 });
           setTargetIdx(nextIdx);
 
           travelSinceTargetSetRef.current = 0;
@@ -1333,14 +1318,14 @@ export default function NavLive() {
 
       if (audioOn && stopWarnRef.current !== targetIdx) {
         stopWarnRef.current = targetIdx;
-        speak(`Arrêt scolaire dans ${WARN_STOP_M} mètres.`, { cooldownMs: 1400, interrupt: true });
+        sfx.play("stopWarning", { volume: 1.0, cooldownMs: 2500 });
       }
     }
 
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        ding.play();
+        sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
       }
     }
 
@@ -1353,13 +1338,11 @@ export default function NavLive() {
 
       const nextIdx = targetIdx + 1;
       if (nextIdx < points.length) {
-        const nextTarget = points[nextIdx] ?? null;
-        const distNext = nextTarget ? Math.round(haversineMeters(p, nextTarget)) : 0;
-
         travelSinceTargetSetRef.current = 0;
+        const nextTarget = points[nextIdx] ?? null;
         initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
-        if (audioOn) speak(`Arrêt atteint. Prochain embarquement dans ${fmtDist(distNext)}.`, { cooldownMs: 1400, interrupt: true });
+        if (audioOn) sfx.play("stopReached", { volume: 1.0, cooldownMs: 1200 });
         setTargetIdx(nextIdx);
 
         stopWarnRef.current = null;
@@ -1373,7 +1356,7 @@ export default function NavLive() {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = null;
 
-        if (audioOn) speak("Circuit terminé.", { cooldownMs: 1200, interrupt: true });
+        if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
         setFinished(true);
 
         stopWarnRef.current = null;
@@ -1396,8 +1379,6 @@ export default function NavLive() {
     hasOfficial,
     officialLine,
     stopIdxOnTrace,
-    speak,
-    ding,
     audioOn,
   ]);
 
@@ -1581,15 +1562,9 @@ export default function NavLive() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
-              onPointerDown={tapHandler(() => {
-                enableAudio();
-              })}
-              onTouchStart={tapHandler(() => {
-                enableAudio();
-              })}
-              onClick={tapHandler(() => {
-                enableAudio();
-              })}
+              onPointerDown={tapHandler(() => enableAudio())}
+              onTouchStart={tapHandler(() => enableAudio())}
+              onClick={tapHandler(() => enableAudio())}
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
