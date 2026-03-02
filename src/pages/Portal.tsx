@@ -59,7 +59,7 @@ export default function Portal() {
   const hasCircuit = Boolean(circuitId);
 
   // =========================
-  // Geolocation gate (premier check-up)
+  // Geolocation gate (après connexion seulement)
   // =========================
   const [geoReady, setGeoReady] = useState(false);
   const [needGeoPerm, setNeedGeoPerm] = useState(false);
@@ -68,7 +68,6 @@ export default function Portal() {
 
   function requestGeoNow(onOk?: () => void) {
     try {
-      // ✅ affiche tout de suite
       setNeedGeoPerm(true);
       setGeoBusy(true);
       setGeoHint("Vérification de la localisation…");
@@ -97,15 +96,29 @@ export default function Portal() {
     }
   }
 
-  // Premier check-up au chargement (si Permissions API dispo)
+  // Reset geo quand déconnecté
   useEffect(() => {
+    if (!ready) return;
+    if (!isAuthed) {
+      setGeoReady(false);
+      setNeedGeoPerm(false);
+      setGeoHint("");
+      setGeoBusy(false);
+    }
+  }, [ready, isAuthed]);
+
+  // Premier check-up permissions (SEULEMENT une fois connecté)
+  useEffect(() => {
+    if (!ready || !isAuthed) return;
+
     let cancelled = false;
 
     async function checkPerm() {
       try {
         const perms: any = (navigator as any).permissions;
+
+        // iOS Safari souvent: pas de Permissions API -> on exige le bouton
         if (!perms?.query) {
-          // iOS Safari souvent: pas de permissions API -> on exige le bouton
           if (!cancelled) {
             setGeoReady(false);
             setNeedGeoPerm(true);
@@ -157,7 +170,7 @@ export default function Portal() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ready, isAuthed]);
 
   // =========================
   // Data load
@@ -206,7 +219,6 @@ export default function Portal() {
   }
 
   function goRecord() {
-    // Record aussi a besoin GPS → si pas prêt, on force l'autorisation
     if (!isAuthed) return goLogin("/record");
     if (!geoReady) {
       requestGeoNow(() => nav("/record"));
@@ -403,7 +415,7 @@ export default function Portal() {
     boxShadow: "0 10px 28px rgba(2,6,23,.14)",
   };
 
-  // --- Secondary Action (Nouveau Circuit) -> ORANGE/JAUNE demandé ---
+  // --- Secondary Action (Nouveau Circuit) ---
   const actionOrange: React.CSSProperties = {
     width: "100%",
     boxSizing: "border-box",
@@ -464,11 +476,13 @@ export default function Portal() {
     userSelect: "none",
   };
 
-  // Overlay geolocation (gros bouton au centre)
-  const geoOverlay: React.CSSProperties = {
-    position: "absolute",
+  // =========================
+  // Overlays (ordre: Connexion -> Localisation)
+  // =========================
+  const overlayScreen: React.CSSProperties = {
+    position: "fixed",
     inset: 0,
-    zIndex: 5000,
+    zIndex: 9999,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -477,36 +491,63 @@ export default function Portal() {
     backdropFilter: "blur(8px)",
   };
 
-  const geoCard: React.CSSProperties = {
+  const overlayBox: React.CSSProperties = {
     width: "min(520px, 100%)",
-    borderRadius: 26,
-    background: "rgba(255,255,255,.94)",
-    border: "1px solid rgba(2,6,23,.10)",
-    boxShadow: "0 30px 90px rgba(2,6,23,.28)",
-    padding: 18,
-    textAlign: "center",
   };
 
-  const geoBtn: React.CSSProperties = {
-    width: "100%",
-    borderRadius: 18,
-    padding: "16px 14px",
-    fontWeight: 1000,
-    fontSize: 18,
-    border: "1px solid rgba(0,0,0,.10)",
-    background: "linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #16a34a 100%)",
-    color: "#fff",
-    cursor: "pointer",
-    boxShadow: "0 18px 44px rgba(2,6,23,.18)",
-    userSelect: "none",
-    touchAction: "manipulation",
-    opacity: geoBusy ? 0.75 : 1,
-  };
+  const canEnterNav = geoReady;
 
-  const canEnterNav = geoReady; // ✅ ton requirement: sans geo => pas de navigation
+  const showLoginOverlay = ready && !isAuthed;
+  const showGeoOverlay = ready && isAuthed && needGeoPerm && !geoReady;
 
   return (
     <div style={page}>
+      {/* 1) Overlay Connexion (bloquant, même style/disposition que NAVIGATION GPS) */}
+      {showLoginOverlay ? (
+        <div style={overlayScreen}>
+          <div style={overlayBox}>
+            <div
+              style={{ ...actionBlue, cursor: "pointer" }}
+              onClick={() => goLogin("/")}
+              title="Se connecter"
+            >
+              <div style={overlayBlue} />
+              <div style={navLeft}>
+                <div style={navTitle}>SE CONNECTER</div>
+                <div style={navSub}>Connexion requise pour accéder au portail</div>
+              </div>
+              <div style={pillBlue}>OK</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* 2) Overlay Localisation (bloquant, après connexion) */}
+      {showGeoOverlay ? (
+        <div style={{ ...overlayScreen, zIndex: 9998 }}>
+          <div style={overlayBox}>
+            <div
+              style={{ ...actionBlue, cursor: geoBusy ? "not-allowed" : "pointer", opacity: geoBusy ? 0.85 : 1 }}
+              onClick={() => {
+                if (geoBusy) return;
+                requestGeoNow();
+              }}
+              title="Activer la localisation"
+            >
+              <div style={overlayBlue} />
+              <div style={navLeft}>
+                <div style={navTitle}>ACTIVER LOCALISATION</div>
+                <div style={navSub}>
+                  {geoHint ? geoHint : "La navigation GPS et l’enregistrement ont besoin de la localisation."}
+                  {geoBusy ? "  ⏳" : ""}
+                </div>
+              </div>
+              <div style={pillBlue}>GPS</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div style={wrap}>
         <div style={{ ...rootReset }}>
           <div style={card}>
@@ -525,88 +566,54 @@ export default function Portal() {
               </div>
             </div>
 
-            {/* ✅ Overlay obligatoire tant que la geo n'est pas OK */}
-            {needGeoPerm && !geoReady ? (
-              <div style={geoOverlay}>
-                <div style={geoCard}>
-                  <div style={{ fontWeight: 1100, fontSize: 20, color: "#0f172a", letterSpacing: -0.2 }}>
-                    Activer la localisation
-                  </div>
-                  <div style={{ marginTop: 10, fontWeight: 850, color: "rgba(15,23,42,.72)", lineHeight: 1.5 }}>
-                    La navigation GPS et l’enregistrement de circuit ont besoin de la localisation.
-                  </div>
-
-                  {geoHint ? (
-                    <div style={{ marginTop: 10, fontSize: 13, fontWeight: 900, color: "rgba(15,23,42,.60)" }}>
-                      {geoHint} {geoBusy ? <span style={{ marginLeft: 8 }}>⏳</span> : null}
-                    </div>
-                  ) : null}
-
-                  <div style={{ marginTop: 14 }}>
-                    <button type="button" style={geoBtn} disabled={geoBusy} onClick={() => requestGeoNow()}>
-                      ACTIVER LA LOCALISATION
-                    </button>
-                  </div>
-
-                  <div style={{ marginTop: 12, fontSize: 12.5, fontWeight: 850, color: "rgba(15,23,42,.55)" }}>
-               
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
             {view === "home" ? (
               <>
-                {!ready ? null : !isAuthed ? (
-                  <button
-                    type="button"
-                    style={{ ...btn("primary"), width: "100%", boxSizing: "border-box" }}
-                    onClick={() => goLogin("/")}
-                  >
-                    Se connecter
-                  </button>
-                ) : null}
-
                 {/* NAVIGATION (bloquée si geo pas permise) */}
                 <div
                   style={{
                     ...actionBlue,
-                    opacity: canEnterNav ? 1 : 0.55,
-                    cursor: canEnterNav ? "pointer" : "not-allowed",
+                    opacity: canUse && canEnterNav ? 1 : 0.55,
+                    cursor: canUse && canEnterNav ? "pointer" : "not-allowed",
                   }}
                   onClick={() => {
-                    if (!canEnterNav) return; // ✅ interdit sans geo
+                    if (!canUse || !canEnterNav) return;
                     setView("gps");
                   }}
-                  title={canEnterNav ? "Navigation guidée" : "Localisation requise"}
+                  title={!canUse ? "Connexion requise" : canEnterNav ? "Navigation guidée" : "Localisation requise"}
                 >
                   <div style={overlayBlue} />
                   <div style={navLeft}>
                     <div style={navTitle}>NAVIGATION GPS</div>
                     <div style={navSub}>
-                      {canEnterNav ? "Navigation guidée en temps réel" : "Localisation requise (active-la pour continuer)"}
+                      {!canUse
+                        ? "Connexion requise"
+                        : canEnterNav
+                          ? "Navigation guidée en temps réel"
+                          : "Localisation requise (active-la pour continuer)"}
                     </div>
                   </div>
-                  <div style={pillBlue}>{canEnterNav ? "OK" : "GPS"}</div>
+                  <div style={pillBlue}>{!canUse ? "LOGIN" : canEnterNav ? "OK" : "GPS"}</div>
                 </div>
 
                 {/* NOUVEAU CIRCUIT (record) */}
                 <div
                   style={{
                     ...actionOrange,
-                    opacity: geoReady ? 1 : 0.55,
-                    cursor: geoReady ? "pointer" : "not-allowed",
+                    opacity: canUse && geoReady ? 1 : 0.55,
+                    cursor: canUse && geoReady ? "pointer" : "not-allowed",
                   }}
                   onClick={() => {
-                    if (!geoReady) return; // ✅ interdit sans geo (record en a besoin)
+                    if (!canUse || !geoReady) return;
                     goRecord();
                   }}
-                  title={geoReady ? "Nouveau / Mettre à jour" : "Localisation requise"}
+                  title={!canUse ? "Connexion requise" : geoReady ? "Nouveau / Mettre à jour" : "Localisation requise"}
                 >
                   <div style={overlayOrange} />
                   <div style={{ minWidth: 0, position: "relative", zIndex: 1 }}>
                     <div style={newTitle}>NOUVEAU CIRCUIT</div>
-                    <div style={newSub}>{geoReady ? "Mettre à jour circuit existant" : "Localisation requise (active-la)"}</div>
+                    <div style={newSub}>
+                      {!canUse ? "Connexion requise" : geoReady ? "Mettre à jour circuit existant" : "Localisation requise (active-la)"}
+                    </div>
                   </div>
                   <div
                     style={{
@@ -617,7 +624,7 @@ export default function Portal() {
                       boxShadow: "0 10px 26px rgba(2,6,23,.10)",
                     }}
                   >
-                    {geoReady ? "OK" : "GPS"}
+                    {!canUse ? "LOGIN" : geoReady ? "OK" : "GPS"}
                   </div>
                 </div>
 
