@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
 import { useAuth } from "@/lib/useAuth";
 import { btn, select } from "@/ui";
-import { RefreshCw } from "lucide-react";
 
 type TCode = "B" | "C" | "S";
 const LABEL: Record<TCode, string> = { B: "Breton", C: "Champagne", S: "Sécuritaire" };
@@ -59,6 +58,110 @@ export default function Portal() {
   const canUse = ready && isAuthed;
   const hasCircuit = Boolean(circuitId);
 
+  // =========================
+  // Geolocation gate (premier check-up)
+  // =========================
+  const [geoReady, setGeoReady] = useState(false);
+  const [needGeoPerm, setNeedGeoPerm] = useState(false);
+  const [geoHint, setGeoHint] = useState<string>("");
+  const [geoBusy, setGeoBusy] = useState(false);
+
+  function requestGeoNow(onOk?: () => void) {
+    try {
+      // ✅ affiche tout de suite
+      setNeedGeoPerm(true);
+      setGeoBusy(true);
+      setGeoHint("Vérification de la localisation…");
+
+      navigator.geolocation.getCurrentPosition(
+        () => {
+          setGeoBusy(false);
+          setGeoReady(true);
+          setNeedGeoPerm(false);
+          setGeoHint("");
+          onOk?.();
+        },
+        (e) => {
+          setGeoBusy(false);
+          setGeoReady(false);
+          setNeedGeoPerm(true);
+          setGeoHint(e?.message || "Localisation refusée ou bloquée.");
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 }
+      );
+    } catch {
+      setGeoBusy(false);
+      setGeoReady(false);
+      setNeedGeoPerm(true);
+      setGeoHint("Localisation indisponible.");
+    }
+  }
+
+  // Premier check-up au chargement (si Permissions API dispo)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkPerm() {
+      try {
+        const perms: any = (navigator as any).permissions;
+        if (!perms?.query) {
+          // iOS Safari souvent: pas de permissions API -> on exige le bouton
+          if (!cancelled) {
+            setGeoReady(false);
+            setNeedGeoPerm(true);
+            setGeoHint("Active la localisation pour utiliser la navigation.");
+          }
+          return;
+        }
+
+        const st = await perms.query({ name: "geolocation" as any });
+        if (cancelled) return;
+
+        if (st.state === "granted") {
+          setGeoReady(true);
+          setNeedGeoPerm(false);
+          setGeoHint("");
+        } else {
+          setGeoReady(false);
+          setNeedGeoPerm(true);
+          setGeoHint("Active la localisation pour utiliser la navigation.");
+        }
+
+        // si ça change pendant que l'app est ouverte
+        try {
+          st.onchange = () => {
+            try {
+              const s = (st as any).state;
+              if (s === "granted") {
+                setGeoReady(true);
+                setNeedGeoPerm(false);
+                setGeoHint("");
+              } else {
+                setGeoReady(false);
+                setNeedGeoPerm(true);
+                setGeoHint("Active la localisation pour utiliser la navigation.");
+              }
+            } catch {}
+          };
+        } catch {}
+      } catch {
+        if (!cancelled) {
+          setGeoReady(false);
+          setNeedGeoPerm(true);
+          setGeoHint("Active la localisation pour utiliser la navigation.");
+        }
+      }
+    }
+
+    checkPerm();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // =========================
+  // Data load
+  // =========================
   async function load() {
     if (!isAuthed) {
       setCircuits([]);
@@ -88,12 +191,27 @@ export default function Portal() {
   async function goNav() {
     if (!isAuthed) return goLogin("/");
     if (!circuitId) return;
+
+    // ✅ si pas de geo => on force l'autorisation AVANT navigation
+    if (!geoReady) {
+      requestGeoNow(async () => {
+        await unlockIOSAudioOnce();
+        nav(`/nav?circuit=${encodeURIComponent(circuitId)}&t=${transporteur}`);
+      });
+      return;
+    }
+
     await unlockIOSAudioOnce();
     nav(`/nav?circuit=${encodeURIComponent(circuitId)}&t=${transporteur}`);
   }
 
   function goRecord() {
+    // Record aussi a besoin GPS → si pas prêt, on force l'autorisation
     if (!isAuthed) return goLogin("/record");
+    if (!geoReady) {
+      requestGeoNow(() => nav("/record"));
+      return;
+    }
     nav("/record");
   }
 
@@ -157,12 +275,12 @@ export default function Portal() {
   };
 
   const topRow: React.CSSProperties = {
-  display: "flex",
-  alignItems: "flex-start",
-  justifyContent: "space-between",
-  gap: 12,
-  marginBottom: 32, // 👈 augmente ici
-};
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 32,
+  };
 
   const brand: React.CSSProperties = { minWidth: 0 };
 
@@ -287,24 +405,24 @@ export default function Portal() {
 
   // --- Secondary Action (Nouveau Circuit) -> ORANGE/JAUNE demandé ---
   const actionOrange: React.CSSProperties = {
-  width: "100%",
-  boxSizing: "border-box",
-  borderRadius: 28,
-  padding: "clamp(16px, 2.6vw, 20px)",
-  marginTop: 14,
-  background: "linear-gradient(135deg, #fde68a 0%, #ffedd5 45%, #ffffff 100%)",
+    width: "100%",
+    boxSizing: "border-box",
+    borderRadius: 28,
+    padding: "clamp(16px, 2.6vw, 20px)",
+    marginTop: 14,
+    background: "linear-gradient(135deg, #fde68a 0%, #ffedd5 45%, #ffffff 100%)",
     border: "1px solid rgba(234,88,12,.16)",
     boxShadow: "0 14px 40px rgba(2,6,23,.10)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 14,
-  cursor: "pointer",
-  minHeight: 98, // aligné avec navigation
-  position: "relative",
-  overflow: "hidden",
-  touchAction: "manipulation",
-};
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    cursor: "pointer",
+    minHeight: 98,
+    position: "relative",
+    overflow: "hidden",
+    touchAction: "manipulation",
+  };
 
   const overlayOrange: React.CSSProperties = {
     position: "absolute",
@@ -314,16 +432,6 @@ export default function Portal() {
       "radial-gradient(120% 140% at 92% 30%, rgba(251,191,36,.30) 0%, rgba(251,191,36,0) 58%)," +
       "radial-gradient(140% 140% at 20% 100%, rgba(234,88,12,.14) 0%, rgba(234,88,12,0) 60%)," +
       "linear-gradient(180deg, rgba(255,255,255,.70) 0%, rgba(255,255,255,0) 60%)",
-  };
-
-  const newLeft: React.CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    minWidth: 0,
-    flex: "1 1 auto",
-    position: "relative",
-    zIndex: 1,
   };
 
   const newTitle: React.CSSProperties = {
@@ -345,27 +453,6 @@ export default function Portal() {
     whiteSpace: "nowrap",
   };
 
-  const pillOrange: React.CSSProperties = {
-    ...pill,
-    background: "linear-gradient(135deg, rgba(251,191,36,.20) 0%, rgba(234,88,12,.16) 100%)",
-    border: "1px solid rgba(180,83,9,.22)",
-    color: "rgba(146,64,14,.95)",
-    boxShadow: "0 10px 26px rgba(2,6,23,.10)",
-  };
-
-  const quote: React.CSSProperties = {
-    textAlign: "center",
-    marginTop: 18,
-    fontWeight: 950,
-    fontSize: "clamp(18px, 2.2vw, 22px)",
-    color: "rgba(15,23,42,.68)",
-    letterSpacing: -0.35,
-    lineHeight: 1.25,
-    position: "relative",
-    zIndex: 1,
-  };
-
-  // ✅ bus en bas, plus propre (sans “flottant”)
   const busImg: React.CSSProperties = {
     width: "min(380px, 82%)",
     margin: "14px auto 0",
@@ -376,6 +463,47 @@ export default function Portal() {
     pointerEvents: "none",
     userSelect: "none",
   };
+
+  // Overlay geolocation (gros bouton au centre)
+  const geoOverlay: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    zIndex: 5000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+    background: "rgba(2,6,23,.55)",
+    backdropFilter: "blur(8px)",
+  };
+
+  const geoCard: React.CSSProperties = {
+    width: "min(520px, 100%)",
+    borderRadius: 26,
+    background: "rgba(255,255,255,.94)",
+    border: "1px solid rgba(2,6,23,.10)",
+    boxShadow: "0 30px 90px rgba(2,6,23,.28)",
+    padding: 18,
+    textAlign: "center",
+  };
+
+  const geoBtn: React.CSSProperties = {
+    width: "100%",
+    borderRadius: 18,
+    padding: "16px 14px",
+    fontWeight: 1000,
+    fontSize: 18,
+    border: "1px solid rgba(0,0,0,.10)",
+    background: "linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #16a34a 100%)",
+    color: "#fff",
+    cursor: "pointer",
+    boxShadow: "0 18px 44px rgba(2,6,23,.18)",
+    userSelect: "none",
+    touchAction: "manipulation",
+    opacity: geoBusy ? 0.75 : 1,
+  };
+
+  const canEnterNav = geoReady; // ✅ ton requirement: sans geo => pas de navigation
 
   return (
     <div style={page}>
@@ -397,6 +525,36 @@ export default function Portal() {
               </div>
             </div>
 
+            {/* ✅ Overlay obligatoire tant que la geo n'est pas OK */}
+            {needGeoPerm && !geoReady ? (
+              <div style={geoOverlay}>
+                <div style={geoCard}>
+                  <div style={{ fontWeight: 1100, fontSize: 20, color: "#0f172a", letterSpacing: -0.2 }}>
+                    Activer la localisation
+                  </div>
+                  <div style={{ marginTop: 10, fontWeight: 850, color: "rgba(15,23,42,.72)", lineHeight: 1.5 }}>
+                    La navigation GPS et l’enregistrement de circuit ont besoin de la localisation.
+                  </div>
+
+                  {geoHint ? (
+                    <div style={{ marginTop: 10, fontSize: 13, fontWeight: 900, color: "rgba(15,23,42,.60)" }}>
+                      {geoHint} {geoBusy ? <span style={{ marginLeft: 8 }}>⏳</span> : null}
+                    </div>
+                  ) : null}
+
+                  <div style={{ marginTop: 14 }}>
+                    <button type="button" style={geoBtn} disabled={geoBusy} onClick={() => requestGeoNow()}>
+                      ACTIVER LA LOCALISATION
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 12, fontSize: 12.5, fontWeight: 850, color: "rgba(15,23,42,.55)" }}>
+               
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             {view === "home" ? (
               <>
                 {!ready ? null : !isAuthed ? (
@@ -409,47 +567,76 @@ export default function Portal() {
                   </button>
                 ) : null}
 
-                {/* NAVIGATION */}
-<div
-  style={actionBlue}
-  onClick={() => setView("gps")}
-  title="Navigation guidée"
->
-  <div style={overlayBlue} />
-  <div style={navLeft}>
-    <div style={navTitle}>NAVIGATION GPS</div>
-    <div style={navSub}>Navigation guidée en temps réel</div>
-  </div>
-</div>
+                {/* NAVIGATION (bloquée si geo pas permise) */}
+                <div
+                  style={{
+                    ...actionBlue,
+                    opacity: canEnterNav ? 1 : 0.55,
+                    cursor: canEnterNav ? "pointer" : "not-allowed",
+                  }}
+                  onClick={() => {
+                    if (!canEnterNav) return; // ✅ interdit sans geo
+                    setView("gps");
+                  }}
+                  title={canEnterNav ? "Navigation guidée" : "Localisation requise"}
+                >
+                  <div style={overlayBlue} />
+                  <div style={navLeft}>
+                    <div style={navTitle}>NAVIGATION GPS</div>
+                    <div style={navSub}>
+                      {canEnterNav ? "Navigation guidée en temps réel" : "Localisation requise (active-la pour continuer)"}
+                    </div>
+                  </div>
+                  <div style={pillBlue}>{canEnterNav ? "OK" : "GPS"}</div>
+                </div>
 
+                {/* NOUVEAU CIRCUIT (record) */}
+                <div
+                  style={{
+                    ...actionOrange,
+                    opacity: geoReady ? 1 : 0.55,
+                    cursor: geoReady ? "pointer" : "not-allowed",
+                  }}
+                  onClick={() => {
+                    if (!geoReady) return; // ✅ interdit sans geo (record en a besoin)
+                    goRecord();
+                  }}
+                  title={geoReady ? "Nouveau / Mettre à jour" : "Localisation requise"}
+                >
+                  <div style={overlayOrange} />
+                  <div style={{ minWidth: 0, position: "relative", zIndex: 1 }}>
+                    <div style={newTitle}>NOUVEAU CIRCUIT</div>
+                    <div style={newSub}>{geoReady ? "Mettre à jour circuit existant" : "Localisation requise (active-la)"}</div>
+                  </div>
+                  <div
+                    style={{
+                      ...pill,
+                      background: "linear-gradient(135deg, rgba(251,191,36,.20) 0%, rgba(234,88,12,.16) 100%)",
+                      border: "1px solid rgba(180,83,9,.22)",
+                      color: "rgba(146,64,14,.95)",
+                      boxShadow: "0 10px 26px rgba(2,6,23,.10)",
+                    }}
+                  >
+                    {geoReady ? "OK" : "GPS"}
+                  </div>
+                </div>
 
-                {/* NOUVEAU CIRCUIT (jaune/orange) */}
-<div style={actionOrange} onClick={goRecord} title="Nouveau / Mettre à jour">
-  <div style={overlayOrange} />
+                <div style={{ height: 36 }} />
 
-  <div style={{ minWidth: 0 }}>
-    <div style={newTitle}>NOUVEAU CIRCUIT</div>
-    <div style={newSub}>Mettre à jour circuit existant</div>
-  </div>
-</div>
+                <div
+                  style={{
+                    marginTop: 40,
+                    textAlign: "center",
+                    fontSize: 15,
+                    fontWeight: 600,
+                    color: "rgba(15,23,42,.75)",
+                    letterSpacing: 0.2,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Votre calme, votre attention et votre dévouement font notre fierté.
+                </div>
 
-{/* ESPACE AJOUTÉ */}
-<div style={{ height: 36 }} />
-
-<div
-  style={{
-    marginTop: 40,
-    textAlign: "center",
-    fontSize: 15,
-    fontWeight: 600,
-    color: "rgba(15,23,42,.75)",
-    letterSpacing: 0.2,
-    lineHeight: 1.6,
-  }}
->
-  Votre calme, votre attention et votre dévouement font notre fierté.
-</div>
-                {/* ✅ Remis bus.png en bas */}
                 <img src="/bus.png" alt="" aria-hidden="true" style={busImg} />
               </>
             ) : (
@@ -475,12 +662,7 @@ export default function Portal() {
                     <div style={{ fontSize: 12.5, fontWeight: 950, color: "rgba(15,23,42,.70)", marginBottom: 6 }}>
                       Circuit
                     </div>
-                    <select
-                      style={select}
-                      value={circuitId}
-                      onChange={(e) => setCircuitId(e.target.value)}
-                      disabled={!canUse}
-                    >
+                    <select style={select} value={circuitId} onChange={(e) => setCircuitId(e.target.value)} disabled={!canUse}>
                       {!canUse ? (
                         <option value="">(connexion requise)</option>
                       ) : circuits.length ? (
@@ -500,14 +682,21 @@ export default function Portal() {
                     style={{
                       ...btn("primary"),
                       width: "100%",
-                      opacity: canUse && hasCircuit ? 1 : 0.55,
+                      opacity: canUse && hasCircuit && geoReady ? 1 : 0.55,
                       boxSizing: "border-box",
                     }}
                     onClick={goNav}
-                    disabled={!canUse || !hasCircuit}
+                    disabled={!canUse || !hasCircuit || !geoReady}
+                    title={!geoReady ? "Localisation requise" : "Ouvrir la navigation"}
                   >
                     Ouvrir la navigation
                   </button>
+
+                  {!geoReady ? (
+                    <div style={{ textAlign: "center", color: "rgba(185,28,28,.75)", fontWeight: 950, fontSize: 13.5 }}>
+                      Localisation requise. Retourne et active-la.
+                    </div>
+                  ) : null}
 
                   <div style={{ textAlign: "center", color: "rgba(15,23,42,.70)", fontWeight: 950, fontSize: 13.5 }}>
                     {selected ? selected.nom : ""}
@@ -517,8 +706,7 @@ export default function Portal() {
                     Transporteur: {LABEL[transporteur]}
                   </div>
 
-                  {/* petit rappel visuel bus en mode GPS aussi (discret) */}
-                  <img src="/bus.png" alt="" aria-hidden="true" style={{ ...busImg, opacity: 0.20, marginTop: 8 }} />
+                  <img src="/bus.png" alt="" aria-hidden="true" style={{ ...busImg, opacity: 0.2, marginTop: 8 }} />
                 </div>
               </>
             )}
