@@ -9,6 +9,8 @@ type TCode = "B" | "C" | "S";
 const LABEL: Record<TCode, string> = { B: "Breton", C: "Champagne", S: "Sécuritaire" };
 type Circuit = { id: string; nom: string };
 
+const GEO_OK_KEY = "gb_geo_ok_once_v1";
+
 // iOS audio unlock
 async function unlockIOSAudioOnce() {
   try {
@@ -61,10 +63,26 @@ export default function Portal() {
   // =========================
   // Geolocation gate (après connexion seulement)
   // =========================
-  const [geoReady, setGeoReady] = useState(false);
+
+  // Si on l'a déjà eu une fois, on part "optimiste" pour éviter l'overlay à chaque retour.
+  const initialGeoOk = (() => {
+    try {
+      return localStorage.getItem(GEO_OK_KEY) === "1";
+    } catch {
+      return false;
+    }
+  })();
+
+  const [geoReady, setGeoReady] = useState<boolean>(initialGeoOk);
   const [needGeoPerm, setNeedGeoPerm] = useState(false);
   const [geoHint, setGeoHint] = useState<string>("");
   const [geoBusy, setGeoBusy] = useState(false);
+
+  function markGeoOkOnce() {
+    try {
+      localStorage.setItem(GEO_OK_KEY, "1");
+    } catch {}
+  }
 
   function requestGeoNow(onOk?: () => void) {
     try {
@@ -78,6 +96,7 @@ export default function Portal() {
           setGeoReady(true);
           setNeedGeoPerm(false);
           setGeoHint("");
+          markGeoOkOnce();
           onOk?.();
         },
         (e) => {
@@ -93,6 +112,51 @@ export default function Portal() {
       setGeoReady(false);
       setNeedGeoPerm(true);
       setGeoHint("Localisation indisponible.");
+    }
+  }
+
+  // Check "silencieux" (ne force PAS l'overlay sauf si permission réellement refusée)
+  function silentGeoCheck() {
+    try {
+      setGeoBusy(true);
+      setGeoHint("Vérification de la localisation…");
+
+      navigator.geolocation.getCurrentPosition(
+        () => {
+          setGeoBusy(false);
+          setGeoReady(true);
+          setNeedGeoPerm(false);
+          setGeoHint("");
+          markGeoOkOnce();
+        },
+        (e: any) => {
+          setGeoBusy(false);
+
+          // Codes classiques:
+          // 1 = PERMISSION_DENIED
+          // 2 = POSITION_UNAVAILABLE
+          // 3 = TIMEOUT
+          const code = Number(e?.code || 0);
+
+          setGeoReady(false);
+
+          if (code === 1) {
+            // Seulement là: on affiche l'overlay
+            setNeedGeoPerm(true);
+            setGeoHint(e?.message || "Localisation refusée ou bloquée.");
+          } else {
+            // Timeout / pas dispo -> pas d'overlay automatique
+            // (l'utilisateur le verra seulement s'il clique NAV/RECORD)
+            setNeedGeoPerm(false);
+            setGeoHint("");
+          }
+        },
+        // On accepte une position "en cache" pour valider rapidement quand on revient sur la page.
+        { enableHighAccuracy: false, maximumAge: 10 * 60 * 1000, timeout: 2500 }
+      );
+    } catch {
+      setGeoBusy(false);
+      // pas d'overlay automatique ici
     }
   }
 
@@ -117,59 +181,78 @@ export default function Portal() {
       try {
         const perms: any = (navigator as any).permissions;
 
-        // iOS Safari souvent: pas de Permissions API -> on exige le bouton
-        if (!perms?.query) {
-          if (!cancelled) {
+        // ✅ Si Permissions API dispo: on s'y fie
+        if (perms?.query) {
+          const st = await perms.query({ name: "geolocation" as any });
+          if (cancelled) return;
+
+          if (st.state === "granted") {
+            setGeoReady(true);
+            setNeedGeoPerm(false);
+            setGeoHint("");
+            markGeoOkOnce();
+          } else if (st.state === "denied") {
             setGeoReady(false);
             setNeedGeoPerm(true);
-            setGeoHint("Active la localisation pour utiliser la navigation.");
+            setGeoHint("Localisation refusée. Active-la dans les réglages.");
+          } else {
+            // "prompt" -> ne force pas l'overlay tout de suite, on fait un check silencieux
+            setNeedGeoPerm(false);
+            silentGeoCheck();
           }
+
+          // si ça change pendant que l'app est ouverte
+          try {
+            st.onchange = () => {
+              try {
+                const s = (st as any).state;
+                if (s === "granted") {
+                  setGeoReady(true);
+                  setNeedGeoPerm(false);
+                  setGeoHint("");
+                  markGeoOkOnce();
+                } else if (s === "denied") {
+                  setGeoReady(false);
+                  setNeedGeoPerm(true);
+                  setGeoHint("Localisation refusée. Active-la dans les réglages.");
+                } else {
+                  setGeoReady(false);
+                  setNeedGeoPerm(false);
+                  setGeoHint("");
+                }
+              } catch {}
+            };
+          } catch {}
+
           return;
         }
 
-        const st = await perms.query({ name: "geolocation" as any });
-        if (cancelled) return;
-
-        if (st.state === "granted") {
-          setGeoReady(true);
-          setNeedGeoPerm(false);
-          setGeoHint("");
-        } else {
-          setGeoReady(false);
-          setNeedGeoPerm(true);
-          setGeoHint("Active la localisation pour utiliser la navigation.");
-        }
-
-        // si ça change pendant que l'app est ouverte
-        try {
-          st.onchange = () => {
-            try {
-              const s = (st as any).state;
-              if (s === "granted") {
-                setGeoReady(true);
-                setNeedGeoPerm(false);
-                setGeoHint("");
-              } else {
-                setGeoReady(false);
-                setNeedGeoPerm(true);
-                setGeoHint("Active la localisation pour utiliser la navigation.");
-              }
-            } catch {}
-          };
-        } catch {}
+        // ✅ iOS/Safari: PAS de Permissions API => on fait un check silencieux
+        // (et on n'affiche l'overlay QUE si on reçoit PERMISSION_DENIED)
+        silentGeoCheck();
       } catch {
-        if (!cancelled) {
-          setGeoReady(false);
-          setNeedGeoPerm(true);
-          setGeoHint("Active la localisation pour utiliser la navigation.");
-        }
+        // fallback silencieux
+        silentGeoCheck();
       }
     }
 
     checkPerm();
+
+    // Quand on revient sur l’onglet / app, on revalide sans overlay agressif
+    const onVis = () => {
+      try {
+        if (document.visibilityState === "visible" && ready && isAuthed) {
+          silentGeoCheck();
+        }
+      } catch {}
+    };
+    document.addEventListener("visibilitychange", onVis);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, isAuthed]);
 
   // =========================
@@ -506,11 +589,7 @@ export default function Portal() {
       {showLoginOverlay ? (
         <div style={overlayScreen}>
           <div style={overlayBox}>
-            <div
-              style={{ ...actionBlue, cursor: "pointer" }}
-              onClick={() => goLogin("/")}
-              title="Se connecter"
-            >
+            <div style={{ ...actionBlue, cursor: "pointer" }} onClick={() => goLogin("/")} title="Se connecter">
               <div style={overlayBlue} />
               <div style={navLeft}>
                 <div style={navTitle}>SE CONNECTER</div>
@@ -576,7 +655,12 @@ export default function Portal() {
                     cursor: canUse && canEnterNav ? "pointer" : "not-allowed",
                   }}
                   onClick={() => {
-                    if (!canUse || !canEnterNav) return;
+                    if (!canUse) return;
+                    if (!canEnterNav) {
+                      // Petit plus: si pas prêt, on peut lancer la demande ici (au lieu de bloquer sec)
+                      requestGeoNow(() => setView("gps"));
+                      return;
+                    }
                     setView("gps");
                   }}
                   title={!canUse ? "Connexion requise" : canEnterNav ? "Navigation guidée" : "Localisation requise"}
@@ -588,8 +672,8 @@ export default function Portal() {
                       {!canUse
                         ? "Connexion requise"
                         : canEnterNav
-                          ? "Navigation guidée en temps réel"
-                          : "Localisation requise (active-la pour continuer)"}
+                        ? "Navigation guidée en temps réel"
+                        : "Localisation requise (active-la pour continuer)"}
                     </div>
                   </div>
                   <div style={pillBlue}>{!canUse ? "LOGIN" : canEnterNav ? "OK" : "GPS"}</div>
@@ -603,7 +687,11 @@ export default function Portal() {
                     cursor: canUse && geoReady ? "pointer" : "not-allowed",
                   }}
                   onClick={() => {
-                    if (!canUse || !geoReady) return;
+                    if (!canUse) return;
+                    if (!geoReady) {
+                      requestGeoNow(() => nav("/record"));
+                      return;
+                    }
                     goRecord();
                   }}
                   title={!canUse ? "Connexion requise" : geoReady ? "Nouveau / Mettre à jour" : "Localisation requise"}
