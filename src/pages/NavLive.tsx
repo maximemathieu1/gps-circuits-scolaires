@@ -1303,6 +1303,22 @@ export default function NavLive() {
       }
     }
 
+    // ✅ AUDIO "Ralentissez..." un peu AVANT le bandeau jaune:
+    // - 2 sec avant pour 150m
+    // - 4 sec avant pour 200m
+    if (audioOn && stopWarnRef.current !== targetIdx) {
+      const sp = speedRef.current ?? 0; // m/s
+      const earlySeconds = WARN_STOP_M >= 200 ? 4 : 2;
+      const earlyMeters = clamp(sp * earlySeconds, 0, 140);
+      const audioTriggerM = WARN_STOP_M + earlyMeters;
+
+      // seulement AVANT le bandeau (donc > WARN_STOP_M)
+      if (rawStopM <= audioTriggerM && rawStopM > WARN_STOP_M) {
+        stopWarnRef.current = targetIdx;
+        sfx.play("stopWarning", { volume: 1.0, cooldownMs: 2500 });
+      }
+    }
+
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
@@ -1315,11 +1331,6 @@ export default function NavLive() {
       stopBannerLastMRef.current = shown;
 
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
-
-      if (audioOn && stopWarnRef.current !== targetIdx) {
-        stopWarnRef.current = targetIdx;
-        sfx.play("stopWarning", { volume: 1.0, cooldownMs: 2500 });
-      }
     }
 
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
