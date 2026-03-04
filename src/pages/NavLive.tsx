@@ -476,10 +476,14 @@ export default function NavLive() {
 
   // Notes (DB-driven)
   const [activeNote, setActiveNote] = useState<string | null>(null);
-  const noteHideTimerRef = useRef<number | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
+
+  // ✅ Anti re-pop après "Continuer" si le conducteur reste à 10-20m
+  // On supprime le blocage seulement quand il est sorti du rayon trigger (+hysteresis).
+  const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
+  const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
   // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
@@ -1048,23 +1052,7 @@ export default function NavLive() {
   }
 
   function clearNoteNow() {
-    if (noteHideTimerRef.current) {
-      window.clearTimeout(noteHideTimerRef.current);
-      noteHideTimerRef.current = null;
-    }
     setActiveNote(null);
-  }
-
-  function showNoteTimed(note: string, ms = 9500) {
-    if (noteHideTimerRef.current) {
-      window.clearTimeout(noteHideTimerRef.current);
-      noteHideTimerRef.current = null;
-    }
-    setActiveNote(note);
-    noteHideTimerRef.current = window.setTimeout(() => {
-      setActiveNote(null);
-      noteHideTimerRef.current = null;
-    }, ms) as any;
   }
 
   function speakNoteTTS(text: string) {
@@ -1083,6 +1071,9 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
+    // ✅ évite repop tant qu'on reste dans la zone
+    noteSuppressForIdxRef.current.add(targetIdx);
+
     setPaused(false);
     clearNoteNow();
   }
@@ -1160,6 +1151,7 @@ export default function NavLive() {
     clearNoteNow();
     noteShownForIdxRef.current = new Set();
     noteLastShowAtRef.current = {};
+    noteSuppressForIdxRef.current = new Set();
 
     lineRef.current = line;
     stopsRef.current = pts;
@@ -1418,6 +1410,10 @@ export default function NavLive() {
 
     setPaused(false);
     clearNoteNow();
+
+    // reset suppression pour ce nouvel arrêt
+    noteSuppressForIdxRef.current.delete(targetIdx);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1458,7 +1454,8 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 40, 1200);
+    // ✅ IMPORTANT: permet 20m / 10m etc.
+    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 5, 1200);
 
     // Bandeau
     if (rawStopM > WARN_STOP_M) {
@@ -1492,12 +1489,24 @@ export default function NavLive() {
       }
     }
 
-    // NOTES (DB)
-    const mode = (target.note_mode ?? "none") as NoteMode;
-    const noteRaw = String(target.note ?? "").trim();
-    const hasNote = mode !== "none" && !!noteRaw;
+    /* =========================
+       ✅ NOTES (règle demandée)
+       - École/Transfert: overlay + pause + bouton Continuer (même si note_mode = none)
+       - Autres: TTS seulement
+       - Trigger DB respecté (ex: école à 20m)
+       - Anti repop: après "Continuer", ne réaffiche pas tant qu'on reste dans la zone
+    ========================= */
 
-    const inNoteZone = rawStopM <= noteTriggerM && rawStopM > ARRIVE_STOP_M;
+    const noteRaw = String(target.note ?? "").trim();
+    const hasNote = noteRaw.length > 0;
+
+    // ✅ zone note: uniquement <= trigger (pas de condition > ARRIVE_STOP_M)
+    const inNoteZone = rawStopM <= noteTriggerM;
+
+    // ✅ libère la suppression quand on est sorti du rayon (avec hysteresis)
+    if (noteSuppressForIdxRef.current.has(targetIdx) && rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
+      noteSuppressForIdxRef.current.delete(targetIdx);
+    }
 
     if (hasNote && inNoteZone) {
       const once = Boolean(target.note_once ?? true);
@@ -1509,32 +1518,24 @@ export default function NavLive() {
 
       const canShow = once ? !alreadyOnce : cooldownOk;
 
-      if (canShow) {
+      // ✅ anti-repop: si on a "Continuer" et qu'on est encore dans la zone => block
+      const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
+
+      if (canShow && !suppressed) {
         noteLastShowAtRef.current[targetIdx] = now;
         if (once) noteShownForIdxRef.current.add(targetIdx);
 
         if (isBlockingType(t)) {
+          // ✅ École / Transfert => overlay + pause (pas de timer)
           setPaused(true);
           setActiveNote(noteRaw);
 
-          if (audioOn && mode === "tts") {
-            speakNoteTTS(noteRaw);
-          }
+          // Optionnel: si audio activé, on parle la note aussi
+          if (audioOn) speakNoteTTS(noteRaw);
         } else {
-          showNoteTimed(noteRaw, 9500);
-
-          if (audioOn && mode === "tts") {
-            speakNoteTTS(noteRaw);
-          } else if (audioOn && mode === "show") {
-            sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
-          }
+          // ✅ Autres => TTS seulement
+          if (audioOn) speakNoteTTS(noteRaw);
         }
-      }
-    }
-
-    if (!inNoteZone) {
-      if (!pausedRef.current) {
-        clearNoteNow();
       }
     }
 
@@ -1571,6 +1572,10 @@ export default function NavLive() {
           stopDingRef.current = null;
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+          clearNoteNow();
+          setPaused(false);
+
           return;
         }
       }
@@ -1602,6 +1607,7 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
 
         clearNoteNow();
+        setPaused(false);
       } else {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = null;
@@ -1618,6 +1624,7 @@ export default function NavLive() {
         stopMinDistRef.current = Infinity;
 
         clearNoteNow();
+        setPaused(false);
       }
     }
   }, [
@@ -1769,6 +1776,7 @@ export default function NavLive() {
                 </div>
               </div>
 
+              {/* ici on garde le X caché si paused => on force "Continuer" */}
               {!paused ? (
                 <button
                   style={{ ...overlayBtn, width: 42, height: 42, borderRadius: 14, fontSize: 18 }}
