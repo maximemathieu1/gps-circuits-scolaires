@@ -164,8 +164,7 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
 ========================= */
 
 function stopTypeOrDefault(t?: StopType | null): StopType {
-  const x = (t ?? "school") as StopType;
-  return x;
+  return (t ?? "school") as StopType;
 }
 
 function isBlockingType(t: StopType) {
@@ -237,7 +236,7 @@ function bannerIconForType(t: StopType) {
 }
 
 /* =========================
-   MP3 SFX (Safari iOS + Fully Android)
+   MP3 SFX
 ========================= */
 
 const SOUND_URLS = {
@@ -258,7 +257,6 @@ type SoundKey = keyof typeof SOUND_URLS;
 
 function useSfx() {
   const unlockedRef = useRef(false);
-
   const poolRef = useRef<Record<string, HTMLAudioElement[]>>({});
   const poolPtrRef = useRef<Record<string, number>>({});
   const lastPlayAtRef = useRef<Record<string, number>>({});
@@ -301,7 +299,6 @@ function useSfx() {
       const a = getFromPool("audioOn");
       a.volume = 0.001;
       a.currentTime = 0;
-
       const p = a.play();
       Promise.resolve(p)
         .then(() => {
@@ -361,7 +358,7 @@ function audioKeyForStopType(t: StopType): SoundKey {
 }
 
 /* =========================
-   Fullscreen helpers (best-effort web)
+   Fullscreen
 ========================= */
 
 async function tryEnterFullscreen() {
@@ -393,7 +390,7 @@ function installAutoFullscreenOnce() {
 }
 
 /* =========================
-   Bearing helpers
+   Bearing
 ========================= */
 
 function wrap360(deg: number) {
@@ -424,7 +421,7 @@ function smoothAngle(prev: number, next: number) {
 }
 
 /* =========================
-   iOS tap helper (évite le “double tap”)
+   iOS tap helper
 ========================= */
 
 function tapHandler(fn: () => void) {
@@ -474,16 +471,15 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Notes (DB-driven)
+  // Notes
   const [activeNote, setActiveNote] = useState<string | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
-  // ✅ Anti re-pop après "Continuer" si le conducteur reste à 10-20m
-  // On supprime le blocage seulement quand il est sorti du rayon trigger (+hysteresis).
+  // Anti re-pop après Continuer tant qu’on reste dans la zone
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
-  const NOTE_SUPPRESS_HYSTERESIS_M = 12;
+  const NOTE_SUPPRESS_HYSTERESIS_M = 12; // sortie = trigger + 12m
 
   // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
@@ -521,6 +517,30 @@ export default function NavLive() {
 
   // join logique
   const joinedTraceRef = useRef<boolean>(false);
+
+  // Cumul distances trace pour distance “le long de la ligne”
+  const cumDistRef = useRef<number[]>([]);
+
+  function buildCumDistances(line: [number, number][]) {
+    const cum: number[] = new Array(line.length).fill(0);
+    for (let i = 1; i < line.length; i++) {
+      const a = { lat: line[i - 1][0], lng: line[i - 1][1] };
+      const b = { lat: line[i][0], lng: line[i][1] };
+      cum[i] = cum[i - 1] + haversineMeters(a, b);
+    }
+    return cum;
+  }
+
+  function distAlongTraceAheadMeters(curIdx: number, targetTraceIdx: number) {
+    const line = lineRef.current;
+    const cum = cumDistRef.current;
+    if (!line || line.length < 2 || !cum || cum.length !== line.length) return null;
+
+    const a = clamp(curIdx, 0, line.length - 1);
+    const b = clamp(targetTraceIdx, 0, line.length - 1);
+    if (b <= a) return 0;
+    return Math.max(0, cum[b] - cum[a]);
+  }
 
   // Anti-finish si arrêts trop proches
   const lastMeRef = useRef<LatLng | null>(null);
@@ -914,9 +934,9 @@ export default function NavLive() {
         applyOverlays();
       }
 
-      const t = stopTypeOrDefault(target?.stop_type);
-      const halo = haloColorForType(t);
-      const lineCol = activeLineColorForType(t);
+      const tt = stopTypeOrDefault(target?.stop_type);
+      const halo = haloColorForType(tt);
+      const lineCol = activeLineColorForType(tt);
 
       try {
         if (m.getLayer(MAP_ACTIVE_HALO)) m.setPaintProperty(MAP_ACTIVE_HALO, "line-color", halo);
@@ -1044,7 +1064,7 @@ export default function NavLive() {
   }
 
   function enableAudio() {
-    if (audioOn) return; // ✅ idempotent
+    if (audioOn) return;
     sfx.unlock();
     sfx.preloadAll();
     sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
@@ -1071,7 +1091,7 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
-    // ✅ évite repop tant qu'on reste dans la zone
+    // bloque le repop tant qu’on est encore dans la zone (avec hysteresis)
     noteSuppressForIdxRef.current.add(targetIdx);
 
     setPaused(false);
@@ -1128,6 +1148,9 @@ export default function NavLive() {
 
     setOfficialLine(line);
     setHasOfficial(true);
+
+    // cum distances
+    cumDistRef.current = buildCumDistances(line);
 
     setFinished(false);
 
@@ -1325,8 +1348,7 @@ export default function NavLive() {
                 joinedTraceRef.current = true;
 
                 const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
-                  nearestLineIndex(next, line);
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
                   traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
@@ -1431,7 +1453,7 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + sons + skip + notes (DB)
+     Stops + bandeau + sons + skip + notes
   ========================= */
   useEffect(() => {
     if (!running) return;
@@ -1454,34 +1476,48 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ✅ IMPORTANT: permet 20m / 10m etc.
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 5, 1200);
+    // ✅ distance bandeau / notes basée sur la trace si possible
+    const targetTraceIdx = stopIdxOnTrace[targetIdx];
+    const traceDist =
+      hasOfficial && joinedTraceRef.current && typeof targetTraceIdx === "number"
+        ? distAlongTraceAheadMeters(traceIdxRef.current, targetTraceIdx)
+        : null;
 
-    // Bandeau
-    if (rawStopM > WARN_STOP_M) {
+    const distForUI = Math.round(traceDist != null ? traceDist : dStop); // fallback proximité
+    const distForBanner = distForUI;
+    const distForNotes = distForUI;
+    const distForWarn = distForUI;
+
+    // ✅ NO MINIMUM: tu peux mettre 2m, 0m, 500m etc.
+    let noteTriggerM = Number(target.note_trigger_m ?? WARN_STOP_M);
+    if (!Number.isFinite(noteTriggerM)) noteTriggerM = WARN_STOP_M;
+    noteTriggerM = clamp(noteTriggerM, 0, 20000);
+
+    // Bandeau (basé sur trace distance si join, sinon proximité)
+    if (distForBanner > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
     }
 
-    if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
+    if (distForBanner <= WARN_STOP_M && distForBanner > ARRIVE_STOP_M) {
       const prevShown = stopBannerLastMRef.current;
-      let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
+      let shown = prevShown == null ? distForBanner : Math.min(prevShown, distForBanner);
       shown = Math.round(shown / 5) * 5;
       stopBannerLastMRef.current = shown;
 
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    // ✅ Audio d’approche: dès qu’on ENTRE dans la zone WARN (1 fois)
+    // Audio d’approche: entrer dans la zone WARN (1 fois)
     if (audioOn && stopWarnRef.current !== targetIdx) {
-      if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
+      if (distForWarn <= WARN_STOP_M && distForWarn > ARRIVE_STOP_M) {
         stopWarnRef.current = targetIdx;
         const key = audioKeyForStopType(t);
         sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
       }
     }
 
-    // Ding proche
+    // Ding proche (proximité réelle, on garde RAW pour éviter ding trop tôt selon trace)
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
@@ -1490,21 +1526,20 @@ export default function NavLive() {
     }
 
     /* =========================
-       ✅ NOTES (règle demandée)
-       - École/Transfert: overlay + pause + bouton Continuer (même si note_mode = none)
+       NOTES
+       - École/Transfert: overlay + pause + Continuer (même si note_mode=none)
        - Autres: TTS seulement
-       - Trigger DB respecté (ex: école à 20m)
-       - Anti repop: après "Continuer", ne réaffiche pas tant qu'on reste dans la zone
+       - Trigger DB respecté (2m OK)
+       - Anti repop après Continuer tant qu'on reste dans la zone
     ========================= */
 
     const noteRaw = String(target.note ?? "").trim();
     const hasNote = noteRaw.length > 0;
 
-    // ✅ zone note: uniquement <= trigger (pas de condition > ARRIVE_STOP_M)
-    const inNoteZone = rawStopM <= noteTriggerM;
+    const inNoteZone = distForNotes <= noteTriggerM;
 
-    // ✅ libère la suppression quand on est sorti du rayon (avec hysteresis)
-    if (noteSuppressForIdxRef.current.has(targetIdx) && rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
+    // libère suppression après sortie (trigger + hysteresis)
+    if (noteSuppressForIdxRef.current.has(targetIdx) && distForNotes > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
       noteSuppressForIdxRef.current.delete(targetIdx);
     }
 
@@ -1517,8 +1552,6 @@ export default function NavLive() {
       const cooldownOk = now - last >= NOTE_REPEAT_COOLDOWN_MS;
 
       const canShow = once ? !alreadyOnce : cooldownOk;
-
-      // ✅ anti-repop: si on a "Continuer" et qu'on est encore dans la zone => block
       const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
 
       if (canShow && !suppressed) {
@@ -1526,14 +1559,10 @@ export default function NavLive() {
         if (once) noteShownForIdxRef.current.add(targetIdx);
 
         if (isBlockingType(t)) {
-          // ✅ École / Transfert => overlay + pause (pas de timer)
           setPaused(true);
           setActiveNote(noteRaw);
-
-          // Optionnel: si audio activé, on parle la note aussi
           if (audioOn) speakNoteTTS(noteRaw);
         } else {
-          // ✅ Autres => TTS seulement
           if (audioOn) speakNoteTTS(noteRaw);
         }
       }
@@ -1575,13 +1604,12 @@ export default function NavLive() {
 
           clearNoteNow();
           setPaused(false);
-
           return;
         }
       }
     }
 
-    // ARRIVÉE
+    // ARRIVÉE (on garde la proximité réelle pour être sûr)
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1627,19 +1655,7 @@ export default function NavLive() {
         setPaused(false);
       }
     }
-  }, [
-    running,
-    me,
-    target,
-    targetIdx,
-    points,
-    finished,
-    stopBanner.show,
-    hasOfficial,
-    officialLine,
-    stopIdxOnTrace,
-    audioOn,
-  ]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn]);
 
   /* =========================
      UI
@@ -1699,42 +1715,44 @@ export default function NavLive() {
     pointerEvents: "auto",
   };
 
+  // ✅ NOTE overlay centré + gros texte
   const noteOverlayWrap: React.CSSProperties = {
-  position: "absolute",
-  inset: 0,
-  zIndex: 24000,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 24,
-  background: "rgba(0,0,0,.45)",
-  pointerEvents: "auto",
-};
+    position: "absolute",
+    inset: 0,
+    zIndex: 24000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    background: "rgba(0,0,0,.45)",
+    pointerEvents: "auto",
+  };
 
   const noteCard: React.CSSProperties = {
-  width: "min(92vw, 900px)",
-  background: "rgba(17,24,39,.96)",
-  color: "#fff",
-  border: "2px solid rgba(255,255,255,.15)",
-  borderRadius: 24,
-  padding: "28px 32px",
-  boxShadow: "0 30px 80px rgba(0,0,0,.55)",
-  display: "grid",
-  gap: 22,
-  textAlign: "center",
-};
+    width: "min(92vw, 900px)",
+    background: "rgba(17,24,39,.96)",
+    color: "#fff",
+    border: "2px solid rgba(255,255,255,.15)",
+    borderRadius: 24,
+    padding: "28px 32px",
+    boxShadow: "0 30px 80px rgba(0,0,0,.55)",
+    display: "grid",
+    gap: 22,
+    textAlign: "center",
+  };
 
-  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
+  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 12 };
+
   const noteBadge: React.CSSProperties = {
-    width: 36,
-    height: 36,
-    borderRadius: 14,
+    width: 44,
+    height: 44,
+    borderRadius: 16,
     background: paused ? "#FBBF24" : "rgba(255,255,255,.14)",
     color: paused ? "#111827" : "#fff",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: 900,
     flex: "0 0 auto",
   };
@@ -1742,8 +1760,8 @@ export default function NavLive() {
   const noteBtn: React.CSSProperties = {
     width: "100%",
     height: 64,
-fontSize: 20,
-    borderRadius: 14,
+    fontSize: 20,
+    borderRadius: 16,
     border: "1px solid rgba(255,255,255,.12)",
     background: "#FBBF24",
     color: "#111827",
@@ -1753,7 +1771,7 @@ fontSize: 20,
     WebkitTapHighlightColor: "transparent",
   };
 
-  const t = stopTypeOrDefault(target?.stop_type);
+  const tt = stopTypeOrDefault(target?.stop_type);
 
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
@@ -1767,25 +1785,26 @@ fontSize: 20,
               <div style={noteBadge} aria-hidden>
                 {paused ? "⏸️" : "📝"}
               </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 950, fontSize: 16, lineHeight: 1.15 }}>{paused ? "Note (pause)" : "Note"}</div>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>
-                  {t === "transfer"
+
+              <div style={{ flex: 1, textAlign: "left" }}>
+                <div style={{ fontWeight: 950, fontSize: 18, lineHeight: 1.15 }}>{paused ? "Note (pause)" : "Note"}</div>
+                <div style={{ fontSize: 13, opacity: 0.85 }}>
+                  {tt === "transfer"
                     ? "Transfert"
-                    : t === "ecole"
+                    : tt === "ecole"
                       ? "École"
-                      : t === "uturn"
+                      : tt === "uturn"
                         ? "Demi-tour"
-                        : t === "school_uturn"
+                        : tt === "school_uturn"
                           ? "Scolaire + demi-tour"
                           : "Scolaire"}
                 </div>
               </div>
 
-              {/* ici on garde le X caché si paused => on force "Continuer" */}
+              {/* X caché si paused => on force Continuer */}
               {!paused ? (
                 <button
-                  style={{ ...overlayBtn, width: 42, height: 42, borderRadius: 14, fontSize: 18 }}
+                  style={{ ...overlayBtn, width: 44, height: 44, borderRadius: 16, fontSize: 18 }}
                   onPointerDown={tapHandler(clearNoteNow)}
                   onTouchStart={tapHandler(clearNoteNow)}
                   onClick={tapHandler(clearNoteNow)}
@@ -1798,16 +1817,16 @@ fontSize: 20,
             </div>
 
             <div
-  style={{
-    fontSize: 38,
-    fontWeight: 900,
-    lineHeight: 1.25,
-    whiteSpace: "pre-wrap",
-    letterSpacing: 0.3,
-  }}
->
-  {activeNote}
-</div>
+              style={{
+                fontSize: 38, // ✅ gros (double du header minimum)
+                fontWeight: 900,
+                lineHeight: 1.25,
+                whiteSpace: "pre-wrap",
+                letterSpacing: 0.3,
+              }}
+            >
+              {activeNote}
+            </div>
 
             {paused ? (
               <button
@@ -1831,7 +1850,6 @@ fontSize: 20,
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
 
-            const tt = stopTypeOrDefault(target?.stop_type);
             const title = bannerTitleForType(tt);
             const icon = bannerIconForType(tt);
 
