@@ -1700,24 +1700,29 @@ export default function NavLive() {
   };
 
   const noteOverlayWrap: React.CSSProperties = {
-    position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: "calc(env(safe-area-inset-bottom) + 12px)",
-    zIndex: 24000,
-    pointerEvents: "auto",
-  };
+  position: "absolute",
+  inset: 0,
+  zIndex: 24000,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 24,
+  background: "rgba(0,0,0,.45)",
+  pointerEvents: "auto",
+};
 
   const noteCard: React.CSSProperties = {
-    background: "rgba(17,24,39,.92)",
-    color: "#fff",
-    border: "1px solid rgba(255,255,255,.10)",
-    borderRadius: 18,
-    padding: "12px 14px",
-    boxShadow: "0 16px 34px rgba(0,0,0,.28)",
-    display: "grid",
-    gap: 10,
-  };
+  width: "min(92vw, 900px)",
+  background: "rgba(17,24,39,.96)",
+  color: "#fff",
+  border: "2px solid rgba(255,255,255,.15)",
+  borderRadius: 24,
+  padding: "28px 32px",
+  boxShadow: "0 30px 80px rgba(0,0,0,.55)",
+  display: "grid",
+  gap: 22,
+  textAlign: "center",
+};
 
   const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
   const noteBadge: React.CSSProperties = {
@@ -1736,7 +1741,8 @@ export default function NavLive() {
 
   const noteBtn: React.CSSProperties = {
     width: "100%",
-    height: 44,
+    height: 64,
+fontSize: 20,
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.12)",
     background: "#FBBF24",
@@ -1791,7 +1797,17 @@ export default function NavLive() {
               ) : null}
             </div>
 
-            <div style={{ fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>{activeNote}</div>
+            <div
+  style={{
+    fontSize: 38,
+    fontWeight: 900,
+    lineHeight: 1.25,
+    whiteSpace: "pre-wrap",
+    letterSpacing: 0.3,
+  }}
+>
+  {activeNote}
+</div>
 
             {paused ? (
               <button
