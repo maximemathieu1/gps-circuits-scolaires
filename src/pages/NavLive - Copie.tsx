@@ -8,37 +8,12 @@ import { haversineMeters } from "@/lib/geo";
 import { useWakeLock } from "@/lib/useWakeLock";
 
 /* =========================
-   Types (alignés DB)
+   Types
 ========================= */
-
-type StopType = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
-type NoteMode = "none" | "show" | "tts";
-
-type StopPoint = {
-  lat: number;
-  lng: number;
-  label?: string | null;
-  stop_type?: StopType | null;
-  note?: string | null;
-  note_mode?: NoteMode | null;
-  note_trigger_m?: number | null;
-  note_once?: boolean | null;
-};
 
 type PointsResp = {
   version_id: string;
-  points: {
-    idx: number;
-    lat: number;
-    lng: number;
-    label?: string | null;
-
-    stop_type?: StopType | null;
-    note?: string | null;
-    note_mode?: NoteMode | null;
-    note_trigger_m?: number | null;
-    note_once?: boolean | null;
-  }[];
+  points: { idx: number; lat: number; lng: number; label?: string | null }[];
 };
 
 type TraceResp = {
@@ -81,6 +56,7 @@ function clamp(v: number, a: number, b: number) {
   return Math.max(a, Math.min(b, v));
 }
 
+// Approx meters using equirectangular projection around current latitude
 function projectMeters(originLat: number, p: LatLng) {
   const R = 6371000;
   const lat = (p.lat * Math.PI) / 180;
@@ -125,6 +101,7 @@ function minDistanceToPolylineMeters(me: LatLng, line: [number, number][]) {
   return Number.isFinite(best) ? best : null;
 }
 
+/** index de point de la polyline le plus proche (vertex) */
 function nearestLineIndex(me: LatLng, line: [number, number][]) {
   if (!line || line.length === 0) return null;
   let best = Infinity;
@@ -139,6 +116,7 @@ function nearestLineIndex(me: LatLng, line: [number, number][]) {
   return { idx: bestIdx, dist: best };
 }
 
+/** ✅ index le plus proche mais CONTRAINT (fenêtre) */
 function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: number, end: number) {
   if (!line || line.length === 0) return null;
   const s = clamp(Math.floor(start), 0, line.length - 1);
@@ -159,135 +137,68 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
   return { idx: bestIdx, dist: best };
 }
 
-/* =========================
-   UI / Type mapping
-========================= */
-
-function stopTypeOrDefault(t?: StopType | null): StopType {
-  const x = (t ?? "school") as StopType;
-  return x;
+/** Arrondi “style GPS” */
+function roundMetersForDisplay(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) return mm;
+  if (mm >= 200) return Math.round(mm / 50) * 50;
+  if (mm >= 60) return Math.round(mm / 10) * 10;
+  return Math.round(mm / 5) * 5;
 }
-
-function isBlockingType(t: StopType) {
-  return t === "transfer" || t === "ecole";
-}
-
-function haloColorForType(t: StopType) {
-  switch (t) {
-    case "school":
-      return "#FBBF24";
-    case "school_uturn":
-      return "#f97316";
-    case "uturn":
-      return "#a855f7";
-    case "transfer":
-      return "#06b6d4";
-    case "ecole":
-      return "#22c55e";
-    default:
-      return "#93c5fd";
+function fmtDist(m: number) {
+  const mm = Math.max(0, Math.round(m));
+  if (mm >= 1000) {
+    const km = mm / 1000;
+    const v = Math.round(km * 10) / 10;
+    return `${v} km`;
   }
-}
-
-function activeLineColorForType(t: StopType) {
-  switch (t) {
-    case "school":
-      return "#1d4ed8";
-    case "school_uturn":
-      return "#ea580c";
-    case "uturn":
-      return "#7c3aed";
-    case "transfer":
-      return "#0891b2";
-    case "ecole":
-      return "#16a34a";
-    default:
-      return "#1d4ed8";
-  }
-}
-
-function bannerTitleForType(t: StopType) {
-  switch (t) {
-    case "transfer":
-      return "Transfert dans";
-    case "ecole":
-      return "École dans";
-    case "uturn":
-      return "Demi-tour dans";
-    case "school_uturn":
-      return "Arrêt + demi-tour dans";
-    default:
-      return "Arrêt scolaire dans";
-  }
-}
-
-function bannerIconForType(t: StopType) {
-  switch (t) {
-    case "transfer":
-      return "🔁";
-    case "ecole":
-      return "🏫";
-    case "uturn":
-      return "↩️";
-    case "school_uturn":
-      return "🚌";
-    default:
-      return "🧒";
-  }
+  return `${roundMetersForDisplay(mm)} m`;
 }
 
 /* =========================
    MP3 SFX (Safari iOS + Fully Android)
 ========================= */
 
-const SOUND_URLS = {
-  audioOn: "/audio/audio_on.mp3",
-  stopWarning: "/audio/stop_warning.mp3",
-  stopReached: "/audio/stop_reached.mp3",
-  stopMissed: "/audio/stop_missed.mp3",
-  circuitDone: "/audio/circuit_done.mp3",
-  ding: "/audio/ding.mp3",
-
-  demiTour: "/audio/demi_tour.mp3",
-  arretScolaireDemiTour: "/audio/arret_scolaire_demi_tour.mp3",
-  transfert: "/audio/transfert.mp3",
-  ecole: "/audio/ecole.mp3",
-} as const;
-
-type SoundKey = keyof typeof SOUND_URLS;
-
 function useSfx() {
   const unlockedRef = useRef(false);
+
+  const soundsRef = useRef<Record<string, string>>({
+    audioOn: "/audio/audio_on.mp3",
+    stopWarning: "/audio/stop_warning.mp3",
+    stopReached: "/audio/stop_reached.mp3",
+    stopMissed: "/audio/stop_missed.mp3",
+    circuitDone: "/audio/circuit_done.mp3",
+    ding: "/audio/ding.mp3",
+  });
 
   const poolRef = useRef<Record<string, HTMLAudioElement[]>>({});
   const poolPtrRef = useRef<Record<string, number>>({});
   const lastPlayAtRef = useRef<Record<string, number>>({});
 
-  function getFromPool(key: SoundKey) {
-    const k = String(key);
-    if (!poolRef.current[k]) {
-      const url = SOUND_URLS[key] || "";
+  function getFromPool(key: string) {
+    if (!poolRef.current[key]) {
+      const url = soundsRef.current[key] || "";
       const poolSize = key === "ding" ? 3 : 2;
 
-      poolRef.current[k] = Array.from({ length: poolSize }).map(() => {
+      poolRef.current[key] = Array.from({ length: poolSize }).map(() => {
         const a = new Audio(url);
         a.preload = "auto";
         a.crossOrigin = "anonymous";
         (a as any).playsInline = true;
         return a;
       });
-      poolPtrRef.current[k] = 0;
+      poolPtrRef.current[key] = 0;
     }
 
-    const arr = poolRef.current[k];
-    const ptr = poolPtrRef.current[k] ?? 0;
+    const arr = poolRef.current[key];
+    const ptr = poolPtrRef.current[key] ?? 0;
     const a = arr[ptr % arr.length];
-    poolPtrRef.current[k] = (ptr + 1) % arr.length;
+    poolPtrRef.current[key] = (ptr + 1) % arr.length;
     return a;
   }
 
   function preloadAll() {
-    (Object.keys(SOUND_URLS) as SoundKey[]).forEach((k) => {
+    Object.keys(soundsRef.current).forEach((k) => {
       try {
         const a = getFromPool(k);
         a.load?.();
@@ -295,6 +206,7 @@ function useSfx() {
     });
   }
 
+  // Unlock iOS: doit être appelé DIRECTEMENT dans un tap (pas de await)
   function unlock() {
     if (unlockedRef.current) return;
     try {
@@ -314,11 +226,13 @@ function useSfx() {
             a.volume = 1.0;
           } catch {}
         })
-        .catch(() => {});
+        .catch(() => {
+          // retentera au prochain tap
+        });
     } catch {}
   }
 
-  function play(key: SoundKey, opts?: { volume?: number; cooldownMs?: number }) {
+  function play(key: keyof typeof soundsRef.current, opts?: { volume?: number; cooldownMs?: number }) {
     try {
       const k = String(key);
       const now = Date.now();
@@ -327,7 +241,7 @@ function useSfx() {
       if (now - last < cd) return;
       lastPlayAtRef.current[k] = now;
 
-      const a = getFromPool(key);
+      const a = getFromPool(k);
       try {
         a.pause();
       } catch {}
@@ -343,21 +257,6 @@ function useSfx() {
   }
 
   return { unlock, play, preloadAll };
-}
-
-function audioKeyForStopType(t: StopType): SoundKey {
-  switch (t) {
-    case "school_uturn":
-      return "arretScolaireDemiTour";
-    case "uturn":
-      return "demiTour";
-    case "transfer":
-      return "transfert";
-    case "ecole":
-      return "ecole";
-    default:
-      return "stopWarning";
-  }
 }
 
 /* =========================
@@ -468,27 +367,15 @@ export default function NavLive() {
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
+  const lastBearingRef2 = useRef<number>(0); // compat: garder le nom utilisé plus bas
+  (lastBearingRef2 as any).current = lastBearingRef.current;
 
   // Stops
-  const [points, setPoints] = useState<StopPoint[]>([]);
+  const [points, setPoints] = useState<{ lat: number; lng: number; label?: string | null }[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Notes (DB-driven)
-  const [activeNote, setActiveNote] = useState<string | null>(null);
-  const noteHideTimerRef = useRef<number | null>(null);
-  const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
-  const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
-  const NOTE_REPEAT_COOLDOWN_MS = 2500;
-
-  // Pause (transfert/ecole)
-  const [paused, setPaused] = useState(false);
-  const pausedRef = useRef(false);
-  useEffect(() => {
-    pausedRef.current = paused;
-  }, [paused]);
-
-  // Trace officielle
+  // Trace officielle (recorded)
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
@@ -512,10 +399,10 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx)
+  // Progression sur trace (idx) — conservé pour join/off-route
   const traceIdxRef = useRef<number>(0);
 
-  // join logique
+  // 🔒 join logique
   const joinedTraceRef = useRef<boolean>(false);
 
   // Anti-finish si arrêts trop proches
@@ -550,30 +437,40 @@ export default function NavLive() {
 
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
+
   const meMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
+  // dernière trace + stops
   const lineRef = useRef<[number, number][]>([]);
-  const stopsRef = useRef<StopPoint[]>([]);
+  const stopsRef = useRef<{ lat: number; lng: number; label?: string | null }[]>([]);
 
+  // Full trace (discrète)
   const MAP_LINE_SRC = "line-src";
   const MAP_LINE_LAYER = "line-layer";
   const MAP_LINE_HALO = "line-halo";
 
+  // Active trace (segment strict)
   const MAP_ACTIVE_SRC = "active-src";
   const MAP_ACTIVE_LAYER = "active-layer";
   const MAP_ACTIVE_HALO = "active-halo";
 
+  // Stops
   const MAP_STOPS_SRC = "stops-src";
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
+  // Fenêtre active (gardés)
+  const ACTIVE_AHEAD_METERS = 520;
+  const ACTIVE_MAX_POINTS = 140;
   const ACTIVE_MIN_POINTS = 12;
 
+  // Join / snapping (anti-croisements)
   const JOIN_DIST_M = 35;
   const SNAP_MAX_DIST_M = 55;
   const SNAP_AHEAD_PTS = 240;
   const SNAP_BACK_PTS = 12;
 
+  // Manual zoom lock
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
 
@@ -637,6 +534,7 @@ export default function NavLive() {
     return { type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: coords } };
   }
 
+  // ✅ SEGMENT STRICT : Départ→1, puis 1→2, 2→3...
   function buildActiveSegmentGeoJSON(line: [number, number][], startIdx: number, endIdx: number) {
     if (!line || line.length < 2) return buildLineGeoJSON([]);
     const s = clamp(Math.floor(startIdx), 0, line.length - 1);
@@ -651,18 +549,12 @@ export default function NavLive() {
     return buildLineGeoJSON(slice);
   }
 
-  function buildStopsGeoJSON(pts: StopPoint[], activeIdx: number) {
+  function buildStopsGeoJSON(pts: { lat: number; lng: number; label?: string | null }[], activeIdx: number) {
     return {
       type: "FeatureCollection" as const,
       features: pts.map((p, i) => ({
         type: "Feature" as const,
-        properties: {
-          idx: i,
-          num: String(i + 1),
-          label: p.label ?? "",
-          active: i === activeIdx ? 1 : 0,
-          t: stopTypeOrDefault(p.stop_type),
-        },
+        properties: { idx: i, num: String(i + 1), label: p.label ?? "", active: i === activeIdx ? 1 : 0 },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
@@ -713,6 +605,10 @@ export default function NavLive() {
     return out;
   }, [hasOfficial, officialLine, points]);
 
+  // ✅ Indices segment actif (règle demandée)
+  // targetIdx=0: Départ -> arrêt 1
+  // targetIdx=1: arrêt 1 -> arrêt 2
+  // etc.
   function getActiveSegmentIdxs(fullLineLen: number) {
     const last = Math.max(0, fullLineLen - 1);
 
@@ -780,7 +676,7 @@ export default function NavLive() {
       }
     }
 
-    // TRACE ACTIVE
+    // TRACE ACTIVE = segment strict
     if (fullLine && fullLine.length >= 2) {
       try {
         const { start, end } = getActiveSegmentIdxs(fullLine.length);
@@ -818,26 +714,7 @@ export default function NavLive() {
           id: MAP_STOPS_LAYER,
           type: "circle",
           source: MAP_STOPS_SRC,
-          paint: {
-            "circle-radius": 16,
-            "circle-color": [
-              "match",
-              ["get", "t"],
-              "school",
-              "#ef4444",
-              "school_uturn",
-              "#f97316",
-              "uturn",
-              "#a855f7",
-              "transfer",
-              "#06b6d4",
-              "ecole",
-              "#22c55e",
-              "#ef4444",
-            ],
-            "circle-stroke-width": 6,
-            "circle-stroke-color": "#ffffff",
-          },
+          paint: { "circle-radius": 16, "circle-color": "#ff0000", "circle-stroke-width": 6, "circle-stroke-color": "#ffffff" },
         });
 
         m.addLayer({
@@ -879,6 +756,7 @@ export default function NavLive() {
     }
   }
 
+  // throttle: update active si targetIdx change OU >250ms
   const lastActiveUpdateRef = useRef<{ t: number; targetIdx: number }>({ t: 0, targetIdx: -1 });
 
   function upsertActiveLineOnMap() {
@@ -909,15 +787,6 @@ export default function NavLive() {
       } else {
         applyOverlays();
       }
-
-      const t = stopTypeOrDefault(target?.stop_type);
-      const halo = haloColorForType(t);
-      const lineCol = activeLineColorForType(t);
-
-      try {
-        if (m.getLayer(MAP_ACTIVE_HALO)) m.setPaintProperty(MAP_ACTIVE_HALO, "line-color", halo);
-        if (m.getLayer(MAP_ACTIVE_LAYER)) m.setPaintProperty(MAP_ACTIVE_LAYER, "line-color", lineCol);
-      } catch {}
     } catch (e) {
       console.error("upsertActiveLineOnMap failed:", e);
       applyOverlays();
@@ -1007,6 +876,7 @@ export default function NavLive() {
     return yOff;
   }
 
+  // ✅ Recentrer = jump immédiat + reprise follow “instant”
   function recenter() {
     followRef.current = true;
 
@@ -1040,51 +910,11 @@ export default function NavLive() {
   }
 
   function enableAudio() {
-    if (audioOn) return; // ✅ idempotent
+    // DOIT rester sync (tap => unlock iOS)
     sfx.unlock();
     sfx.preloadAll();
     sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
     setAudioOn(true);
-  }
-
-  function clearNoteNow() {
-    if (noteHideTimerRef.current) {
-      window.clearTimeout(noteHideTimerRef.current);
-      noteHideTimerRef.current = null;
-    }
-    setActiveNote(null);
-  }
-
-  function showNoteTimed(note: string, ms = 9500) {
-    if (noteHideTimerRef.current) {
-      window.clearTimeout(noteHideTimerRef.current);
-      noteHideTimerRef.current = null;
-    }
-    setActiveNote(note);
-    noteHideTimerRef.current = window.setTimeout(() => {
-      setActiveNote(null);
-      noteHideTimerRef.current = null;
-    }, ms) as any;
-  }
-
-  function speakNoteTTS(text: string) {
-    try {
-      if (!(window as any).speechSynthesis) return;
-      const s = (window as any).speechSynthesis as SpeechSynthesis;
-      try {
-        s.cancel();
-      } catch {}
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "fr-CA";
-      u.rate = 1.0;
-      u.pitch = 1.0;
-      s.speak(u);
-    } catch {}
-  }
-
-  function resumeAfterNote() {
-    setPaused(false);
-    clearNoteNow();
   }
 
   function stop() {
@@ -1101,9 +931,6 @@ export default function NavLive() {
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
 
-    setPaused(false);
-    clearNoteNow();
-
     nav("/");
   }
 
@@ -1115,17 +942,7 @@ export default function NavLive() {
     if (!circuitId) throw new Error("Circuit manquant.");
 
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
-    const pts: StopPoint[] = r.points.map((p) => ({
-      lat: p.lat,
-      lng: p.lng,
-      label: p.label ?? null,
-
-      stop_type: (p.stop_type ?? "school") as StopType,
-      note: p.note ?? null,
-      note_mode: (p.note_mode ?? "none") as NoteMode,
-      note_trigger_m: p.note_trigger_m ?? null,
-      note_once: p.note_once ?? null,
-    }));
+    const pts = r.points.map((p) => ({ lat: p.lat, lng: p.lng, label: p.label ?? null }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
@@ -1140,6 +957,7 @@ export default function NavLive() {
 
     setFinished(false);
 
+    // ✅ IMPORTANT: au chargement, on démarre TOUJOURS au début de la trace
     traceIdxRef.current = 0;
     joinedTraceRef.current = false;
     lastActiveUpdateRef.current = { t: 0, targetIdx: -1 };
@@ -1156,11 +974,6 @@ export default function NavLive() {
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
-    setPaused(false);
-    clearNoteNow();
-    noteShownForIdxRef.current = new Set();
-    noteLastShowAtRef.current = {};
-
     lineRef.current = line;
     stopsRef.current = pts;
 
@@ -1168,7 +981,6 @@ export default function NavLive() {
     if (m) {
       applyOverlays();
       ensureMeMarker();
-      upsertActiveLineOnMap();
     }
   }
 
@@ -1305,7 +1117,7 @@ export default function NavLive() {
         };
 
         const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp == null ? true : sp >= 0.6; // m/s
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -1324,6 +1136,7 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
+          // Join trace (pour off-route / stabilité)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
 
@@ -1333,8 +1146,7 @@ export default function NavLive() {
                 joinedTraceRef.current = true;
 
                 const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
-                  nearestLineIndex(next, line);
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
                   traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
@@ -1361,6 +1173,7 @@ export default function NavLive() {
             }
           }
 
+          // ✅ Active line update (segment strict)
           upsertActiveLineOnMap();
 
           if (m.isStyleLoaded()) {
@@ -1409,21 +1222,19 @@ export default function NavLive() {
   }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
 
   /* =========================
-     Quand le targetIdx change
+     Quand le targetIdx change: maj visuelle stops + active line
   ========================= */
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
     upsertActiveLineOnMap();
-
-    setPaused(false);
-    clearNoteNow();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
   /* =========================
      Distance à la trace (info)
   ========================= */
+
   useEffect(() => {
     if (!running) return;
     const p = animPosRef.current ?? me;
@@ -1435,8 +1246,9 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + sons + skip + notes (DB)
+     Stops + bandeau + sons + skip
   ========================= */
+
   useEffect(() => {
     if (!running) return;
     const p = animPosRef.current ?? me;
@@ -1447,101 +1259,16 @@ export default function NavLive() {
     lastMeRef.current = p;
 
     if (initialDistToTargetRef.current == null && target) {
-      initialDistToTargetRef.current = haversineMeters(p, target as any);
+      initialDistToTargetRef.current = haversineMeters(p, target);
     }
 
-    const t = stopTypeOrDefault(target.stop_type);
-    const dStop = haversineMeters(p, target as any);
+    const dStop = haversineMeters(p, target);
     const rawStopM = Math.round(dStop);
 
     const dynamicMax = warnStopMeters();
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 40, 1200);
-
-    // Bandeau
-    if (rawStopM > WARN_STOP_M) {
-      if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
-      stopBannerLastMRef.current = null;
-    }
-
-    if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
-      const prevShown = stopBannerLastMRef.current;
-      let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
-      shown = Math.round(shown / 5) * 5;
-      stopBannerLastMRef.current = shown;
-
-      setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
-    }
-
-    // ✅ Audio d’approche: dès qu’on ENTRE dans la zone WARN (1 fois)
-    if (audioOn && stopWarnRef.current !== targetIdx) {
-      if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
-        stopWarnRef.current = targetIdx;
-        const key = audioKeyForStopType(t);
-        sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
-      }
-    }
-
-    // Ding proche
-    if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
-      if (stopDingRef.current !== targetIdx) {
-        stopDingRef.current = targetIdx;
-        sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
-      }
-    }
-
-    // NOTES (DB)
-    const mode = (target.note_mode ?? "none") as NoteMode;
-    const noteRaw = String(target.note ?? "").trim();
-    const hasNote = mode !== "none" && !!noteRaw;
-
-    const inNoteZone = rawStopM <= noteTriggerM && rawStopM > ARRIVE_STOP_M;
-
-    if (hasNote && inNoteZone) {
-      const once = Boolean(target.note_once ?? true);
-      const alreadyOnce = noteShownForIdxRef.current.has(targetIdx);
-
-      const now = Date.now();
-      const last = noteLastShowAtRef.current[targetIdx] ?? 0;
-      const cooldownOk = now - last >= NOTE_REPEAT_COOLDOWN_MS;
-
-      const canShow = once ? !alreadyOnce : cooldownOk;
-
-      if (canShow) {
-        noteLastShowAtRef.current[targetIdx] = now;
-        if (once) noteShownForIdxRef.current.add(targetIdx);
-
-        if (isBlockingType(t)) {
-          setPaused(true);
-          setActiveNote(noteRaw);
-
-          if (audioOn && mode === "tts") {
-            speakNoteTTS(noteRaw);
-          }
-        } else {
-          showNoteTimed(noteRaw, 9500);
-
-          if (audioOn && mode === "tts") {
-            speakNoteTTS(noteRaw);
-          } else if (audioOn && mode === "show") {
-            sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
-          }
-        }
-      }
-    }
-
-    if (!inNoteZone) {
-      if (!pausedRef.current) {
-        clearNoteNow();
-      }
-    }
-
-    // Paused => on bloque skip/arrive
-    if (pausedRef.current) return;
-
-    // SKIP arrêt manqué
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
 
@@ -1576,7 +1303,43 @@ export default function NavLive() {
       }
     }
 
-    // ARRIVÉE
+    // ✅ AUDIO "Ralentissez..." un peu AVANT le bandeau jaune:
+    // - 2 sec avant pour 150m
+    // - 4 sec avant pour 200m
+    if (audioOn && stopWarnRef.current !== targetIdx) {
+      const sp = speedRef.current ?? 0; // m/s
+      const earlySeconds = WARN_STOP_M >= 200 ? 4 : 2;
+      const earlyMeters = clamp(sp * earlySeconds, 0, 140);
+      const audioTriggerM = WARN_STOP_M + earlyMeters;
+
+      // seulement AVANT le bandeau (donc > WARN_STOP_M)
+      if (rawStopM <= audioTriggerM && rawStopM > WARN_STOP_M) {
+        stopWarnRef.current = targetIdx;
+        sfx.play("stopWarning", { volume: 1.0, cooldownMs: 2500 });
+      }
+    }
+
+    if (rawStopM > WARN_STOP_M) {
+      if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
+      stopBannerLastMRef.current = null;
+    }
+
+    if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
+      const prevShown = stopBannerLastMRef.current;
+      let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
+      shown = Math.round(shown / 5) * 5;
+      stopBannerLastMRef.current = shown;
+
+      setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
+    }
+
+    if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
+      if (stopDingRef.current !== targetIdx) {
+        stopDingRef.current = targetIdx;
+        sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
+      }
+    }
+
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1588,7 +1351,7 @@ export default function NavLive() {
       if (nextIdx < points.length) {
         travelSinceTargetSetRef.current = 0;
         const nextTarget = points[nextIdx] ?? null;
-        initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget as any) : null;
+        initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget) : null;
 
         if (audioOn) sfx.play("stopReached", { volume: 1.0, cooldownMs: 1200 });
         setTargetIdx(nextIdx);
@@ -1600,8 +1363,6 @@ export default function NavLive() {
 
         stopTouchedRef.current = false;
         stopMinDistRef.current = Infinity;
-
-        clearNoteNow();
       } else {
         travelSinceTargetSetRef.current = 0;
         initialDistToTargetRef.current = null;
@@ -1616,8 +1377,6 @@ export default function NavLive() {
 
         stopTouchedRef.current = false;
         stopMinDistRef.current = Infinity;
-
-        clearNoteNow();
       }
     }
   }, [
@@ -1652,6 +1411,8 @@ export default function NavLive() {
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
+
+    // ✅ iOS: empêcher Safari de “voler” le tap / double-tap zoom
     touchAction: "none",
     WebkitTapHighlightColor: "transparent",
     WebkitTouchCallout: "none",
@@ -1692,112 +1453,9 @@ export default function NavLive() {
     pointerEvents: "auto",
   };
 
-  const noteOverlayWrap: React.CSSProperties = {
-    position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: "calc(env(safe-area-inset-bottom) + 12px)",
-    zIndex: 24000,
-    pointerEvents: "auto",
-  };
-
-  const noteCard: React.CSSProperties = {
-    background: "rgba(17,24,39,.92)",
-    color: "#fff",
-    border: "1px solid rgba(255,255,255,.10)",
-    borderRadius: 18,
-    padding: "12px 14px",
-    boxShadow: "0 16px 34px rgba(0,0,0,.28)",
-    display: "grid",
-    gap: 10,
-  };
-
-  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
-  const noteBadge: React.CSSProperties = {
-    width: 36,
-    height: 36,
-    borderRadius: 14,
-    background: paused ? "#FBBF24" : "rgba(255,255,255,.14)",
-    color: paused ? "#111827" : "#fff",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 18,
-    fontWeight: 900,
-    flex: "0 0 auto",
-  };
-
-  const noteBtn: React.CSSProperties = {
-    width: "100%",
-    height: 44,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "#FBBF24",
-    color: "#111827",
-    fontWeight: 950,
-    cursor: "pointer",
-    touchAction: "none",
-    WebkitTapHighlightColor: "transparent",
-  };
-
-  const t = stopTypeOrDefault(target?.stop_type);
-
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
-
-      {/* Note overlay (bloquante pour transfert/ecole) */}
-      {activeNote ? (
-        <div style={noteOverlayWrap}>
-          <div style={noteCard}>
-            <div style={noteHeaderRow}>
-              <div style={noteBadge} aria-hidden>
-                {paused ? "⏸️" : "📝"}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 950, fontSize: 16, lineHeight: 1.15 }}>{paused ? "Note (pause)" : "Note"}</div>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>
-                  {t === "transfer"
-                    ? "Transfert"
-                    : t === "ecole"
-                      ? "École"
-                      : t === "uturn"
-                        ? "Demi-tour"
-                        : t === "school_uturn"
-                          ? "Scolaire + demi-tour"
-                          : "Scolaire"}
-                </div>
-              </div>
-
-              {!paused ? (
-                <button
-                  style={{ ...overlayBtn, width: 42, height: 42, borderRadius: 14, fontSize: 18 }}
-                  onPointerDown={tapHandler(clearNoteNow)}
-                  onTouchStart={tapHandler(clearNoteNow)}
-                  onClick={tapHandler(clearNoteNow)}
-                  aria-label="Fermer note"
-                  title="Fermer"
-                >
-                  ✕
-                </button>
-              ) : null}
-            </div>
-
-            <div style={{ fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>{activeNote}</div>
-
-            {paused ? (
-              <button
-                style={noteBtn}
-                onPointerDown={tapHandler(resumeAfterNote)}
-                onTouchStart={tapHandler(resumeAfterNote)}
-                onClick={tapHandler(resumeAfterNote)}
-              >
-                Continuer
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
 
       <div style={topStack}>
         {stopBanner.show &&
@@ -1806,10 +1464,6 @@ export default function NavLive() {
             const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
-
-            const tt = stopTypeOrDefault(target?.stop_type);
-            const title = bannerTitleForType(tt);
-            const icon = bannerIconForType(tt);
 
             return (
               <div
@@ -1842,13 +1496,11 @@ export default function NavLive() {
                     }}
                     aria-hidden
                   >
-                    {icon}
+                    🧒
                   </div>
 
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 950, fontSize: 20 }}>
-                      {title} {m} m
-                    </div>
+                    <div style={{ fontWeight: 950, fontSize: 20 }}>Arrêt scolaire dans {m} m</div>
                     <div style={{ fontSize: 13, opacity: 0.9 }}>{stopBanner.label ?? "Zone d’embarquement / débarquement"}</div>
                   </div>
                 </div>
@@ -1921,9 +1573,9 @@ export default function NavLive() {
                 border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
                 boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
               }}
-              onPointerDown={tapHandler(enableAudio)}
-              onTouchStart={tapHandler(enableAudio)}
-              onClick={tapHandler(enableAudio)}
+              onPointerDown={tapHandler(() => enableAudio())}
+              onTouchStart={tapHandler(() => enableAudio())}
+              onClick={tapHandler(() => enableAudio())}
               aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
               title={audioOn ? "Audio activé" : "Activer l'audio"}
             >
