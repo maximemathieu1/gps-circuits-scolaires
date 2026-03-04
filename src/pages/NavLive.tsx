@@ -160,11 +160,83 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
 }
 
 /* =========================
+   PRO: distance "le long de la trace"
+========================= */
+
+function cumulativeDistancesMeters(line: [number, number][]) {
+  const cum: number[] = [0];
+  for (let i = 1; i < line.length; i++) {
+    const a = { lat: line[i - 1][0], lng: line[i - 1][1] };
+    const b = { lat: line[i][0], lng: line[i][1] };
+    cum[i] = cum[i - 1] + haversineMeters(a, b);
+  }
+  return cum;
+}
+
+function distPointToSegmentWithT(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
+  const P = projectMeters(originLat, p);
+  const A = projectMeters(originLat, a);
+  const B = projectMeters(originLat, b);
+
+  const ABx = B.x - A.x;
+  const ABy = B.y - A.y;
+  const APx = P.x - A.x;
+  const APy = P.y - A.y;
+
+  const denom = ABx * ABx + ABy * ABy;
+  if (denom <= 1e-9) {
+    return { dist: Math.hypot(P.x - A.x, P.y - A.y), t: 0 };
+  }
+
+  const t = clamp((APx * ABx + APy * ABy) / denom, 0, 1);
+  const cx = A.x + t * ABx;
+  const cy = A.y + t * ABy;
+  return { dist: Math.hypot(P.x - cx, P.y - cy), t };
+}
+
+function projectOnPolylineAlongMeters(me: LatLng, line: [number, number][], cum: number[]) {
+  if (!line || line.length < 2) return null;
+
+  const originLat = me.lat;
+  let bestDist = Infinity;
+  let bestI = 0;
+  let bestT = 0;
+
+  for (let i = 0; i < line.length - 1; i++) {
+    const a = { lat: line[i][0], lng: line[i][1] };
+    const b = { lat: line[i + 1][0], lng: line[i + 1][1] };
+    const r = distPointToSegmentWithT(originLat, me, a, b);
+    if (r.dist < bestDist) {
+      bestDist = r.dist;
+      bestI = i;
+      bestT = r.t;
+    }
+  }
+
+  const segLen = Math.max(
+    0.0001,
+    haversineMeters(
+      { lat: line[bestI][0], lng: line[bestI][1] },
+      { lat: line[bestI + 1][0], lng: line[bestI + 1][1] }
+    )
+  );
+
+  const along = (cum[bestI] ?? 0) + bestT * segLen;
+
+  return { alongM: along, offM: bestDist, segIdx: bestI, t: bestT };
+}
+
+function stopAlongMetersOnPolyline(stop: LatLng, line: [number, number][], cum: number[]) {
+  return projectOnPolylineAlongMeters(stop, line, cum);
+}
+
+/* =========================
    UI / Type mapping
 ========================= */
 
 function stopTypeOrDefault(t?: StopType | null): StopType {
-  return (t ?? "school") as StopType;
+  const x = (t ?? "school") as StopType;
+  return x;
 }
 
 function isBlockingType(t: StopType) {
@@ -236,7 +308,7 @@ function bannerIconForType(t: StopType) {
 }
 
 /* =========================
-   MP3 SFX
+   MP3 SFX (Safari iOS + Fully Android)
 ========================= */
 
 const SOUND_URLS = {
@@ -257,6 +329,7 @@ type SoundKey = keyof typeof SOUND_URLS;
 
 function useSfx() {
   const unlockedRef = useRef(false);
+
   const poolRef = useRef<Record<string, HTMLAudioElement[]>>({});
   const poolPtrRef = useRef<Record<string, number>>({});
   const lastPlayAtRef = useRef<Record<string, number>>({});
@@ -299,6 +372,7 @@ function useSfx() {
       const a = getFromPool("audioOn");
       a.volume = 0.001;
       a.currentTime = 0;
+
       const p = a.play();
       Promise.resolve(p)
         .then(() => {
@@ -358,7 +432,7 @@ function audioKeyForStopType(t: StopType): SoundKey {
 }
 
 /* =========================
-   Fullscreen
+   Fullscreen helpers (best-effort web)
 ========================= */
 
 async function tryEnterFullscreen() {
@@ -390,7 +464,7 @@ function installAutoFullscreenOnce() {
 }
 
 /* =========================
-   Bearing
+   Bearing helpers
 ========================= */
 
 function wrap360(deg: number) {
@@ -421,7 +495,7 @@ function smoothAngle(prev: number, next: number) {
 }
 
 /* =========================
-   iOS tap helper
+   iOS tap helper (évite le “double tap”)
 ========================= */
 
 function tapHandler(fn: () => void) {
@@ -471,15 +545,15 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Notes
+  // Notes (DB-driven)
   const [activeNote, setActiveNote] = useState<string | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
-  // Anti re-pop après Continuer tant qu’on reste dans la zone
+  // ✅ Anti re-pop après "Continuer" si le conducteur reste dans la zone
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
-  const NOTE_SUPPRESS_HYSTERESIS_M = 12; // sortie = trigger + 12m
+  const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
   // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
@@ -512,35 +586,8 @@ export default function NavLive() {
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx)
-  const traceIdxRef = useRef<number>(0);
-
   // join logique
   const joinedTraceRef = useRef<boolean>(false);
-
-  // Cumul distances trace pour distance “le long de la ligne”
-  const cumDistRef = useRef<number[]>([]);
-
-  function buildCumDistances(line: [number, number][]) {
-    const cum: number[] = new Array(line.length).fill(0);
-    for (let i = 1; i < line.length; i++) {
-      const a = { lat: line[i - 1][0], lng: line[i - 1][1] };
-      const b = { lat: line[i][0], lng: line[i][1] };
-      cum[i] = cum[i - 1] + haversineMeters(a, b);
-    }
-    return cum;
-  }
-
-  function distAlongTraceAheadMeters(curIdx: number, targetTraceIdx: number) {
-    const line = lineRef.current;
-    const cum = cumDistRef.current;
-    if (!line || line.length < 2 || !cum || cum.length !== line.length) return null;
-
-    const a = clamp(curIdx, 0, line.length - 1);
-    const b = clamp(targetTraceIdx, 0, line.length - 1);
-    if (b <= a) return 0;
-    return Math.max(0, cum[b] - cum[a]);
-  }
 
   // Anti-finish si arrêts trop proches
   const lastMeRef = useRef<LatLng | null>(null);
@@ -595,8 +642,6 @@ export default function NavLive() {
 
   const JOIN_DIST_M = 35;
   const SNAP_MAX_DIST_M = 55;
-  const SNAP_AHEAD_PTS = 240;
-  const SNAP_BACK_PTS = 12;
 
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
@@ -1091,9 +1136,7 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
-    // bloque le repop tant qu’on est encore dans la zone (avec hysteresis)
     noteSuppressForIdxRef.current.add(targetIdx);
-
     setPaused(false);
     clearNoteNow();
   }
@@ -1110,13 +1153,21 @@ export default function NavLive() {
     initialDistToTargetRef.current = null;
 
     joinedTraceRef.current = false;
-    traceIdxRef.current = 0;
 
     setPaused(false);
     clearNoteNow();
 
     nav("/");
   }
+
+  /* =========================
+     PRO: refs distance "le long de la trace"
+  ========================= */
+
+  const cumRef = useRef<number[]>([]);
+  const meAlongRef = useRef<number | null>(null);
+  const meOffRef = useRef<number | null>(null);
+  const stopAlongRef = useRef<number[]>([]);
 
   /* =========================
      Load circuit
@@ -1143,19 +1194,28 @@ export default function NavLive() {
     const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
     if (line.length < 2) throw new Error("Trace officielle introuvable (aucun trail).");
 
+    // PRO: cumul + stopAlong
+    const cum = cumulativeDistancesMeters(line);
+    cumRef.current = cum;
+
+    const stopAlong: number[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const pr = stopAlongMetersOnPolyline({ lat: pts[i].lat, lng: pts[i].lng }, line, cum);
+      stopAlong[i] = pr?.alongM ?? (stopAlong[i - 1] ?? 0);
+    }
+    stopAlongRef.current = stopAlong;
+
+    meAlongRef.current = null;
+    meOffRef.current = null;
+
     setPoints(pts);
     setTargetIdx(0);
 
     setOfficialLine(line);
     setHasOfficial(true);
 
-    // cum distances
-    cumDistRef.current = buildCumDistances(line);
-
     setFinished(false);
 
-    traceIdxRef.current = 0;
-    joinedTraceRef.current = false;
     lastActiveUpdateRef.current = { t: 0, targetIdx: -1 };
 
     stopWarnRef.current = null;
@@ -1321,6 +1381,7 @@ export default function NavLive() {
 
         const sp = speedRef.current ?? null;
         const movingEnough = sp == null ? true : sp >= 0.6;
+
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
           if (d >= 1.2) {
@@ -1339,39 +1400,24 @@ export default function NavLive() {
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
 
+          // PRO: projection continue sur la trace (distance le long de la polyline)
           if (hasOfficial && lineRef.current.length >= 2) {
             const line = lineRef.current;
+            const cum = cumRef.current;
+            const pr = projectOnPolylineAlongMeters(next, line, cum);
 
-            if (!joinedTraceRef.current) {
-              const d = minDistanceToPolylineMeters(next, line);
-              if (d != null && d <= JOIN_DIST_M) {
-                joinedTraceRef.current = true;
+            if (pr) {
+              meAlongRef.current = pr.alongM;
+              meOffRef.current = pr.offM;
 
-                const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
-
-                if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                  traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
-                } else {
-                  traceIdxRef.current = 0;
-                }
+              if (!joinedTraceRef.current) {
+                if (pr.offM <= JOIN_DIST_M) joinedTraceRef.current = true;
               } else {
-                traceIdxRef.current = 0;
+                if (pr.offM > SNAP_MAX_DIST_M * 1.8) joinedTraceRef.current = false;
               }
             } else {
-              const curIdx = traceIdxRef.current;
-              const start = Math.max(0, curIdx - SNAP_BACK_PTS);
-              const end = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
-
-              const pick =
-                nearestLineIndexWindow(next, line, start, end) ??
-                nearestLineIndexWindow(next, line, curIdx, Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS));
-
-              if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                const minAllowed = Math.max(0, curIdx - 3);
-                const maxAllowed = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
-                traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
-              }
+              meAlongRef.current = null;
+              meOffRef.current = null;
             }
           }
 
@@ -1433,9 +1479,7 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
 
-    // reset suppression pour ce nouvel arrêt
     noteSuppressForIdxRef.current.delete(targetIdx);
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1448,12 +1492,13 @@ export default function NavLive() {
     if (!p) return;
     if (!hasOfficial || officialLine.length < 2) return;
 
-    const dLine = minDistanceToPolylineMeters(p, officialLine);
-    setOffRouteM(dLine);
+    // PRO: off-route stable
+    const off = meOffRef.current ?? minDistanceToPolylineMeters(p, officialLine);
+    setOffRouteM(off);
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + sons + skip + notes
+     Stops + bandeau + sons + skip + notes (PRO)
   ========================= */
   useEffect(() => {
     if (!running) return;
@@ -1469,31 +1514,32 @@ export default function NavLive() {
     }
 
     const t = stopTypeOrDefault(target.stop_type);
+
+    // ✅ notes: proximité réelle au point (haversine) => trigger exact (20m = 20m)
     const dStop = haversineMeters(p, target as any);
     const rawStopM = Math.round(dStop);
+
+    // ✅ bandeau/warn: distance "sur trace" (polyline)
+    const meAlong = meAlongRef.current;
+    const stopAlong = stopAlongRef.current[targetIdx] ?? null;
+
+    let traceAheadM: number | null = null;
+    if (meAlong != null && stopAlong != null) {
+      traceAheadM = Math.max(0, stopAlong - meAlong);
+    }
+
+    const distForBanner = traceAheadM != null ? Math.round(traceAheadM) : rawStopM;
+    const distForWarn = distForBanner;
+    const distForNotes = rawStopM;
 
     const dynamicMax = warnStopMeters();
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ✅ distance bandeau / notes basée sur la trace si possible
-    const targetTraceIdx = stopIdxOnTrace[targetIdx];
-    const traceDist =
-      hasOfficial && joinedTraceRef.current && typeof targetTraceIdx === "number"
-        ? distAlongTraceAheadMeters(traceIdxRef.current, targetTraceIdx)
-        : null;
+    // ✅ IMPORTANT: aucun minimum imposé (2m/5m/20m ok)
+    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
 
-    const distForUI = Math.round(traceDist != null ? traceDist : dStop); // fallback proximité
-    const distForBanner = distForUI;
-    const distForNotes = distForUI;
-    const distForWarn = distForUI;
-
-    // ✅ NO MINIMUM: tu peux mettre 2m, 0m, 500m etc.
-    let noteTriggerM = Number(target.note_trigger_m ?? WARN_STOP_M);
-    if (!Number.isFinite(noteTriggerM)) noteTriggerM = WARN_STOP_M;
-    noteTriggerM = clamp(noteTriggerM, 0, 20000);
-
-    // Bandeau (basé sur trace distance si join, sinon proximité)
+    // Bandeau
     if (distForBanner > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
@@ -1508,7 +1554,7 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    // Audio d’approche: entrer dans la zone WARN (1 fois)
+    // ✅ Audio d’approche: dès qu’on ENTRE dans la zone WARN (1 fois)
     if (audioOn && stopWarnRef.current !== targetIdx) {
       if (distForWarn <= WARN_STOP_M && distForWarn > ARRIVE_STOP_M) {
         stopWarnRef.current = targetIdx;
@@ -1517,8 +1563,8 @@ export default function NavLive() {
       }
     }
 
-    // Ding proche (proximité réelle, on garde RAW pour éviter ding trop tôt selon trace)
-    if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
+    // Ding proche (proximité au point)
+    if (audioOn && distForNotes <= DING_AT_M && distForNotes > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
         sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
@@ -1527,10 +1573,10 @@ export default function NavLive() {
 
     /* =========================
        NOTES
-       - École/Transfert: overlay + pause + Continuer (même si note_mode=none)
+       - École/Transfert: overlay + pause + bouton Continuer (même si note_mode = none)
        - Autres: TTS seulement
-       - Trigger DB respecté (2m OK)
-       - Anti repop après Continuer tant qu'on reste dans la zone
+       - Trigger respecté
+       - Anti repop: après "Continuer", ne réaffiche pas tant qu'on reste dans la zone
     ========================= */
 
     const noteRaw = String(target.note ?? "").trim();
@@ -1538,7 +1584,7 @@ export default function NavLive() {
 
     const inNoteZone = distForNotes <= noteTriggerM;
 
-    // libère suppression après sortie (trigger + hysteresis)
+    // libère suppression quand on sort du rayon (+ hysteresis)
     if (noteSuppressForIdxRef.current.has(targetIdx) && distForNotes > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
       noteSuppressForIdxRef.current.delete(targetIdx);
     }
@@ -1571,7 +1617,7 @@ export default function NavLive() {
     // Paused => on bloque skip/arrive
     if (pausedRef.current) return;
 
-    // SKIP arrêt manqué
+    // SKIP arrêt manqué (conservé tel quel, basé sur traceIdxOnTrace)
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
 
@@ -1581,8 +1627,17 @@ export default function NavLive() {
       const stopTraceIdx = stopIdxOnTrace[targetIdx] ?? 0;
 
       const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
-      const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
+
+      // (on garde un critère simple: si on s'éloigne beaucoup après avoir touché)
       const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
+
+      // fallback: si stopIdxOnTrace existe, on peut estimer un “past” en comparant distance sur trace
+      let clearlyPastStopOnTrace = false;
+      if (meAlong != null && stopAlong != null) {
+        clearlyPastStopOnTrace = meAlong >= stopAlong + 35; // 35m après le stop le long de la trace
+      } else {
+        clearlyPastStopOnTrace = stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS <= (stopIdxOnTrace[targetIdx] ?? stopTraceIdx);
+      }
 
       if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
         const nextIdx = targetIdx + 1;
@@ -1604,12 +1659,13 @@ export default function NavLive() {
 
           clearNoteNow();
           setPaused(false);
+
           return;
         }
       }
     }
 
-    // ARRIVÉE (on garde la proximité réelle pour être sûr)
+    // ARRIVÉE (proximité point)
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1655,7 +1711,19 @@ export default function NavLive() {
         setPaused(false);
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn]);
+  }, [
+    running,
+    me,
+    target,
+    targetIdx,
+    points,
+    finished,
+    stopBanner.show,
+    hasOfficial,
+    officialLine,
+    stopIdxOnTrace,
+    audioOn,
+  ]);
 
   /* =========================
      UI
@@ -1715,7 +1783,7 @@ export default function NavLive() {
     pointerEvents: "auto",
   };
 
-  // ✅ NOTE overlay centré + gros texte
+  // ✅ overlay note centré + gros texte
   const noteOverlayWrap: React.CSSProperties = {
     position: "absolute",
     inset: 0,
@@ -1741,11 +1809,11 @@ export default function NavLive() {
     textAlign: "center",
   };
 
-  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 12 };
+  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
 
   const noteBadge: React.CSSProperties = {
-    width: 44,
-    height: 44,
+    width: 46,
+    height: 46,
     borderRadius: 16,
     background: paused ? "#FBBF24" : "rgba(255,255,255,.14)",
     color: paused ? "#111827" : "#fff",
@@ -1760,7 +1828,7 @@ export default function NavLive() {
   const noteBtn: React.CSSProperties = {
     width: "100%",
     height: 64,
-    fontSize: 20,
+    fontSize: 22,
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,.12)",
     background: "#FBBF24",
@@ -1771,7 +1839,7 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
-  const tt = stopTypeOrDefault(target?.stop_type);
+  const t = stopTypeOrDefault(target?.stop_type);
 
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
@@ -1789,22 +1857,21 @@ export default function NavLive() {
               <div style={{ flex: 1, textAlign: "left" }}>
                 <div style={{ fontWeight: 950, fontSize: 18, lineHeight: 1.15 }}>{paused ? "Note (pause)" : "Note"}</div>
                 <div style={{ fontSize: 13, opacity: 0.85 }}>
-                  {tt === "transfer"
+                  {t === "transfer"
                     ? "Transfert"
-                    : tt === "ecole"
+                    : t === "ecole"
                       ? "École"
-                      : tt === "uturn"
+                      : t === "uturn"
                         ? "Demi-tour"
-                        : tt === "school_uturn"
+                        : t === "school_uturn"
                           ? "Scolaire + demi-tour"
                           : "Scolaire"}
                 </div>
               </div>
 
-              {/* X caché si paused => on force Continuer */}
               {!paused ? (
                 <button
-                  style={{ ...overlayBtn, width: 44, height: 44, borderRadius: 16, fontSize: 18 }}
+                  style={{ ...overlayBtn, width: 46, height: 46, borderRadius: 16, fontSize: 18 }}
                   onPointerDown={tapHandler(clearNoteNow)}
                   onTouchStart={tapHandler(clearNoteNow)}
                   onClick={tapHandler(clearNoteNow)}
@@ -1818,11 +1885,11 @@ export default function NavLive() {
 
             <div
               style={{
-                fontSize: 38, // ✅ gros (double du header minimum)
-                fontWeight: 900,
-                lineHeight: 1.25,
+                fontSize: 42,
+                fontWeight: 950,
+                lineHeight: 1.22,
                 whiteSpace: "pre-wrap",
-                letterSpacing: 0.3,
+                letterSpacing: 0.2,
               }}
             >
               {activeNote}
@@ -1850,6 +1917,7 @@ export default function NavLive() {
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
 
+            const tt = stopTypeOrDefault(target?.stop_type);
             const title = bannerTitleForType(tt);
             const icon = bannerIconForType(tt);
 
