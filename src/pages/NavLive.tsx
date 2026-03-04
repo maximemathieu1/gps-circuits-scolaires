@@ -12,15 +12,15 @@ import { useWakeLock } from "@/lib/useWakeLock";
 ========================= */
 
 type StopType = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
-type NoteMode = "none" | "show" | "tts";
 
 type StopPoint = {
   lat: number;
   lng: number;
   label?: string | null;
   stop_type?: StopType | null;
+
+  // Notes
   note?: string | null;
-  note_mode?: NoteMode | null;
   note_trigger_m?: number | null;
   note_once?: boolean | null;
 };
@@ -34,8 +34,8 @@ type PointsResp = {
     label?: string | null;
 
     stop_type?: StopType | null;
+
     note?: string | null;
-    note_mode?: NoteMode | null;
     note_trigger_m?: number | null;
     note_once?: boolean | null;
   }[];
@@ -480,10 +480,21 @@ export default function NavLive() {
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
-  // ✅ Anti re-pop après "Continuer" si le conducteur reste à 10-20m
+  // ✅ Anti re-pop après "Continuer" OU auto-hide tant que le conducteur reste dans la zone
   // On supprime le blocage seulement quand il est sorti du rayon trigger (+hysteresis).
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
   const NOTE_SUPPRESS_HYSTERESIS_M = 12;
+
+  // ✅ Auto-hide overlay (non-bloquant) après 5 secondes
+  const noteTimerRef = useRef<number | null>(null);
+  const NOTE_AUTO_HIDE_MS = 5000;
+
+  function clearNoteTimer() {
+    if (noteTimerRef.current != null) {
+      window.clearTimeout(noteTimerRef.current);
+      noteTimerRef.current = null;
+    }
+  }
 
   // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
@@ -507,9 +518,12 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
-    { show: false, meters: 0, label: null, max: 150 }
-  );
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
+    show: false,
+    meters: 0,
+    label: null,
+    max: 150,
+  });
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
@@ -914,9 +928,9 @@ export default function NavLive() {
         applyOverlays();
       }
 
-      const t = stopTypeOrDefault(target?.stop_type);
-      const halo = haloColorForType(t);
-      const lineCol = activeLineColorForType(t);
+      const tt = stopTypeOrDefault(target?.stop_type);
+      const halo = haloColorForType(tt);
+      const lineCol = activeLineColorForType(tt);
 
       try {
         if (m.getLayer(MAP_ACTIVE_HALO)) m.setPaintProperty(MAP_ACTIVE_HALO, "line-color", halo);
@@ -1052,6 +1066,7 @@ export default function NavLive() {
   }
 
   function clearNoteNow() {
+    clearNoteTimer();
     setActiveNote(null);
   }
 
@@ -1113,7 +1128,6 @@ export default function NavLive() {
 
       stop_type: (p.stop_type ?? "school") as StopType,
       note: p.note ?? null,
-      note_mode: (p.note_mode ?? "none") as NoteMode,
       note_trigger_m: p.note_trigger_m ?? null,
       note_once: p.note_once ?? null,
     }));
@@ -1454,8 +1468,8 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ✅ IMPORTANT: permet 20m / 10m etc.
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 5, 1200);
+    // ✅ aucun minimum: 0m
+    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
 
     // Bandeau
     if (rawStopM > WARN_STOP_M) {
@@ -1490,17 +1504,15 @@ export default function NavLive() {
     }
 
     /* =========================
-       ✅ NOTES (règle demandée)
-       - École/Transfert: overlay + pause + bouton Continuer (même si note_mode = none)
-       - Autres: TTS seulement
-       - Trigger DB respecté (ex: école à 20m)
-       - Anti repop: après "Continuer", ne réaffiche pas tant qu'on reste dans la zone
+       ✅ NOTES (règle finale)
+       - École/Transfert: overlay bloquant + bouton Continuer
+       - Autres: overlay 5s, puis disparaît automatiquement (sans Continuer)
+       - Trigger DB respecté (note_trigger_m), sans minimum
+       - Anti re-pop: dès qu'on montre une note, on bloque tant qu'on reste dans la zone (+hysteresis)
     ========================= */
 
     const noteRaw = String(target.note ?? "").trim();
     const hasNote = noteRaw.length > 0;
-
-    // ✅ zone note: uniquement <= trigger (pas de condition > ARRIVE_STOP_M)
     const inNoteZone = rawStopM <= noteTriggerM;
 
     // ✅ libère la suppression quand on est sorti du rayon (avec hysteresis)
@@ -1518,23 +1530,31 @@ export default function NavLive() {
 
       const canShow = once ? !alreadyOnce : cooldownOk;
 
-      // ✅ anti-repop: si on a "Continuer" et qu'on est encore dans la zone => block
       const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
 
       if (canShow && !suppressed) {
         noteLastShowAtRef.current[targetIdx] = now;
         if (once) noteShownForIdxRef.current.add(targetIdx);
 
+        // bloque les repop tant qu'on n'est pas sorti de la zone (+hysteresis)
+        noteSuppressForIdxRef.current.add(targetIdx);
+
         if (isBlockingType(t)) {
-          // ✅ École / Transfert => overlay + pause (pas de timer)
+          // École / Transfert => overlay bloquant, pas de timer
+          clearNoteTimer();
           setPaused(true);
           setActiveNote(noteRaw);
-
-          // Optionnel: si audio activé, on parle la note aussi
           if (audioOn) speakNoteTTS(noteRaw);
         } else {
-          // ✅ Autres => TTS seulement
+          // Autres => overlay 5 secondes, non bloquant, pas de Continuer
+          clearNoteTimer();
+          setPaused(false);
+          setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
+
+          noteTimerRef.current = window.setTimeout(() => {
+            clearNoteNow();
+          }, NOTE_AUTO_HIDE_MS);
         }
       }
     }
@@ -1627,20 +1647,7 @@ export default function NavLive() {
         setPaused(false);
       }
     }
-  }, [
-    running,
-    me,
-    target,
-    targetIdx,
-    points,
-    finished,
-    stopBanner.show,
-    hasOfficial,
-    officialLine,
-    stopIdxOnTrace,
-    audioOn,
-  ]);
-
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn]);
 
   /* =========================
      UI
@@ -1701,49 +1708,34 @@ export default function NavLive() {
   };
 
   const noteOverlayWrap: React.CSSProperties = {
-  position: "absolute",
-  inset: 0,
-  zIndex: 24000,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 24,
-  background: "rgba(0,0,0,.45)",
-  pointerEvents: "auto",
-};
-
-  const noteCard: React.CSSProperties = {
-  width: "min(92vw, 900px)",
-  background: "rgba(17,24,39,.96)",
-  color: "#fff",
-  border: "2px solid rgba(255,255,255,.15)",
-  borderRadius: 24,
-  padding: "28px 32px",
-  boxShadow: "0 30px 80px rgba(0,0,0,.55)",
-  display: "grid",
-  gap: 22,
-  textAlign: "center",
-};
-
-  const noteHeaderRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
-  const noteBadge: React.CSSProperties = {
-    width: 36,
-    height: 36,
-    borderRadius: 14,
-    background: paused ? "#FBBF24" : "rgba(255,255,255,.14)",
-    color: paused ? "#111827" : "#fff",
+    position: "absolute",
+    inset: 0,
+    zIndex: 24000,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: 18,
-    fontWeight: 900,
-    flex: "0 0 auto",
+    padding: 24,
+    background: "rgba(0,0,0,.45)",
+    pointerEvents: "auto",
+  };
+
+  const noteCard: React.CSSProperties = {
+    width: "min(92vw, 900px)",
+    background: "rgba(17,24,39,.96)",
+    color: "#fff",
+    border: "2px solid rgba(255,255,255,.15)",
+    borderRadius: 24,
+    padding: "30px 32px",
+    boxShadow: "0 30px 80px rgba(0,0,0,.55)",
+    display: "grid",
+    gap: 22,
+    textAlign: "center",
   };
 
   const noteBtn: React.CSSProperties = {
     width: "100%",
     height: 64,
-fontSize: 20,
+    fontSize: 20,
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.12)",
     background: "#FBBF24",
@@ -1754,61 +1746,25 @@ fontSize: 20,
     WebkitTapHighlightColor: "transparent",
   };
 
-  const t = stopTypeOrDefault(target?.stop_type);
-
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* Note overlay (bloquante pour transfert/ecole) */}
+      {/* Note overlay: SANS ENTÊTE (seulement texte + Continuer si pause) */}
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
-            <div style={noteHeaderRow}>
-              <div style={noteBadge} aria-hidden>
-                {paused ? "⏸️" : "📝"}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 950, fontSize: 16, lineHeight: 1.15 }}>{paused ? "Note (pause)" : "Note"}</div>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>
-                  {t === "transfer"
-                    ? "Transfert"
-                    : t === "ecole"
-                      ? "École"
-                      : t === "uturn"
-                        ? "Demi-tour"
-                        : t === "school_uturn"
-                          ? "Scolaire + demi-tour"
-                          : "Scolaire"}
-                </div>
-              </div>
-
-              {/* ici on garde le X caché si paused => on force "Continuer" */}
-              {!paused ? (
-                <button
-                  style={{ ...overlayBtn, width: 42, height: 42, borderRadius: 14, fontSize: 18 }}
-                  onPointerDown={tapHandler(clearNoteNow)}
-                  onTouchStart={tapHandler(clearNoteNow)}
-                  onClick={tapHandler(clearNoteNow)}
-                  aria-label="Fermer note"
-                  title="Fermer"
-                >
-                  ✕
-                </button>
-              ) : null}
-            </div>
-
             <div
-  style={{
-    fontSize: 38,
-    fontWeight: 900,
-    lineHeight: 1.25,
-    whiteSpace: "pre-wrap",
-    letterSpacing: 0.3,
-  }}
->
-  {activeNote}
-</div>
+              style={{
+                fontSize: 38,
+                fontWeight: 900,
+                lineHeight: 1.25,
+                whiteSpace: "pre-wrap",
+                letterSpacing: 0.3,
+              }}
+            >
+              {activeNote}
+            </div>
 
             {paused ? (
               <button
