@@ -438,6 +438,22 @@ function tapHandler(fn: () => void) {
 }
 
 /* =========================
+   Crash-resume (localStorage)
+========================= */
+
+type NavLiveSavedState = {
+  v: 1;
+  circuit_id: string;
+  saved_at: number; // ms
+  target_idx: number;
+  trace_idx: number;
+};
+
+function lsKeyForCircuit(circuitId: string) {
+  return `navlive_state_v1:${circuitId || "none"}`;
+}
+
+/* =========================
    Main
 ========================= */
 
@@ -492,6 +508,30 @@ export default function NavLive() {
   const noteHoldUntilRef = useRef<number>(0);
   const noteHoldIdxRef = useRef<number>(-1);
 
+  // ✅ Overlay "Toutes les notes"
+  const [showAllNotes, setShowAllNotes] = useState(false);
+  const allNotes = useMemo(() => {
+    return points
+      .map((p, i) => {
+        const txt = String(p.note ?? "").trim();
+        if (!txt) return null;
+        return {
+          idx: i,
+          type: stopTypeOrDefault(p.stop_type),
+          label: p.label ?? null,
+          triggerM: p.note_trigger_m ?? null,
+          text: txt,
+        };
+      })
+      .filter(Boolean) as {
+      idx: number;
+      type: StopType;
+      label: string | null;
+      triggerM: number | null;
+      text: string;
+    }[];
+  }, [points]);
+
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
       window.clearTimeout(noteTimerRef.current);
@@ -499,12 +539,19 @@ export default function NavLive() {
     }
   }
 
-  // Pause (transfert/ecole)
+  // Pause (transfert/ecole) + blocage reprise popup
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
+
+  // ✅ Reprise après plantage
+  const [resumePrompt, setResumePrompt] = useState<{ show: boolean; saved: NavLiveSavedState | null }>({
+    show: false,
+    saved: null,
+  });
+  const RESUME_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h
 
   // Trace officielle
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
@@ -521,12 +568,12 @@ export default function NavLive() {
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
-    show: false,
-    meters: 0,
-    label: null,
-    max: 150,
-  });
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
+  useEffect(() => {
+    // init safe
+    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
 
   // Mode intelligent (skip arrêt manqué)
@@ -558,7 +605,7 @@ export default function NavLive() {
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    return kmh >= 80 ? 200 : 150;
+    return kmh >= 70 ? 300 : 175;
   }
 
   // Arrêt manqué
@@ -1092,10 +1139,60 @@ export default function NavLive() {
     } catch {}
   }
 
+  function resetStopGates() {
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+    travelSinceTargetSetRef.current = 0;
+    const p = animPosRef.current ?? me;
+    const curTarget = points[targetIdx] ?? null;
+    initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
+  }
+
   function resumeAfterNote() {
+    // éviter que la note se redéclenche
     noteSuppressForIdxRef.current.add(targetIdx);
+
+    // fermer la note
     setPaused(false);
     clearNoteNow();
+
+    // ✅ avancer au prochain arrêt comme si on l’avait atteint
+    const nextIdx = targetIdx + 1;
+
+    // reset skip trackers + gates
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+    // reset travel gate
+    travelSinceTargetSetRef.current = 0;
+
+    if (nextIdx < points.length) {
+      const p = animPosRef.current ?? me;
+      const nextTarget = points[nextIdx] ?? null;
+      initialDistToTargetRef.current = p && nextTarget ? haversineMeters(p, nextTarget as any) : null;
+      setTargetIdx(nextIdx);
+    } else {
+      if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
+      setFinished(true);
+    }
+  }
+
+  function clearSavedState() {
+    try {
+      if (!circuitId) return;
+      localStorage.removeItem(lsKeyForCircuit(circuitId));
+    } catch {}
   }
 
   function stop() {
@@ -1114,6 +1211,10 @@ export default function NavLive() {
 
     setPaused(false);
     clearNoteNow();
+    setShowAllNotes(false);
+    setResumePrompt({ show: false, saved: null });
+
+    clearSavedState();
 
     nav("/");
   }
@@ -1167,6 +1268,8 @@ export default function NavLive() {
 
     setPaused(false);
     clearNoteNow();
+    setShowAllNotes(false);
+
     noteShownForIdxRef.current = new Set();
     noteLastShowAtRef.current = {};
     noteSuppressForIdxRef.current = new Set();
@@ -1185,6 +1288,106 @@ export default function NavLive() {
   /* =========================
      AUTO START
   ========================= */
+
+  function readSavedState(): NavLiveSavedState | null {
+    try {
+      if (!circuitId) return null;
+      const raw = localStorage.getItem(lsKeyForCircuit(circuitId));
+      if (!raw) return null;
+      const obj = JSON.parse(raw) as NavLiveSavedState;
+      if (!obj || obj.v !== 1) return null;
+      if (obj.circuit_id !== circuitId) return null;
+      if (!Number.isFinite(obj.saved_at)) return null;
+
+      const age = Date.now() - obj.saved_at;
+      if (age > RESUME_MAX_AGE_MS) return null;
+
+      return obj;
+    } catch {
+      return null;
+    }
+  }
+
+  function openResumePromptIfAny() {
+    const saved = readSavedState();
+    if (!saved) return false;
+
+    // bloque l’auto-avancement pendant la décision
+    setPaused(true);
+    setResumePrompt({ show: true, saved });
+    return true;
+  }
+
+  function applyResume(saved: NavLiveSavedState) {
+    const idx = clamp(Math.floor(saved.target_idx ?? 0), 0, Math.max(0, points.length - 1));
+
+    // fermer overlays
+    setResumePrompt({ show: false, saved: null });
+    setShowAllNotes(false);
+    clearNoteNow();
+
+    // set progression
+    setTargetIdx(idx);
+
+    // best effort restore trace
+    traceIdxRef.current = clamp(Math.floor(saved.trace_idx ?? 0), 0, Math.max(0, (lineRef.current?.length ?? 1) - 1));
+    joinedTraceRef.current = true;
+
+    // reset gates
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+    // travel gate
+    travelSinceTargetSetRef.current = 0;
+    const p = animPosRef.current ?? me;
+    const curTarget = points[idx] ?? null;
+    initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
+
+    // reprendre
+    setPaused(false);
+
+    try {
+      recenter();
+    } catch {}
+  }
+
+  function applyRestart() {
+    // clear saved (sinon on le revoit)
+    clearSavedState();
+
+    // fermer prompt
+    setResumePrompt({ show: false, saved: null });
+
+    // repartir stop 1
+    setTargetIdx(0);
+
+    // reset trace join
+    traceIdxRef.current = 0;
+    joinedTraceRef.current = false;
+
+    // reset gates
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+
+    travelSinceTargetSetRef.current = 0;
+    initialDistToTargetRef.current = null;
+
+    setPaused(false);
+
+    try {
+      recenter();
+    } catch {}
+  }
 
   async function startAuto() {
     setErr(null);
@@ -1240,6 +1443,9 @@ export default function NavLive() {
         (m as any).jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] });
       }
     } catch {}
+
+    // ✅ après chargement: proposer reprise si session récente
+    openResumePromptIfAny();
   }
 
   useEffect(() => {
@@ -1252,6 +1458,33 @@ export default function NavLive() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circuitId]);
+
+  /* =========================
+     Sauvegarde locale périodique (anti-crash)
+  ========================= */
+  useEffect(() => {
+    if (!running) return;
+    if (!circuitId) return;
+    if (finished) return;
+
+    const id = window.setInterval(() => {
+      try {
+        // si popup reprise affiché, on ne spam pas
+        if (resumePrompt.show) return;
+
+        const obj: NavLiveSavedState = {
+          v: 1,
+          circuit_id: circuitId,
+          saved_at: Date.now(),
+          target_idx: clamp(targetIdx, 0, Math.max(0, points.length - 1)),
+          trace_idx: clamp(traceIdxRef.current ?? 0, 0, Math.max(0, (lineRef.current?.length ?? 1) - 1)),
+        };
+        localStorage.setItem(lsKeyForCircuit(circuitId), JSON.stringify(obj));
+      } catch {}
+    }, 5000);
+
+    return () => window.clearInterval(id);
+  }, [running, circuitId, finished, targetIdx, points.length, resumePrompt.show]);
 
   /* =========================
      GPS tracking
@@ -1425,8 +1658,11 @@ export default function NavLive() {
     upsertStopsOnMap();
     upsertActiveLineOnMap();
 
-    setPaused(false);
-    clearNoteNow();
+    // ⚠️ si prompt reprise affiché, on ne force pas paused=false
+    if (!resumePrompt.show) {
+      setPaused(false);
+      clearNoteNow();
+    }
 
     noteSuppressForIdxRef.current.delete(targetIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1453,6 +1689,9 @@ export default function NavLive() {
     const p = animPosRef.current ?? me;
     if (!p || !target) return;
     if (finished) return;
+
+    // ✅ pendant le prompt reprise, on bloque tout
+    if (resumePrompt.show) return;
 
     if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
     lastMeRef.current = p;
@@ -1490,9 +1729,9 @@ export default function NavLive() {
     }
 
     // ✅✅ Audio d’approche PLUS TÔT (≈ 4 sec avant le bandeau, selon la vitesse)
-    const VOICE_LEAD_SEC = 4.0; // +1-2 sec
+    const VOICE_LEAD_SEC = 4.0;
     const spNow = speedRef.current ?? null;
-    const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10; // ~36 km/h si inconnu
+    const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
     const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
     const VOICE_TRIGGER_M = WARN_STOP_M + leadM;
 
@@ -1513,9 +1752,7 @@ export default function NavLive() {
     }
 
     /* =========================
-       ✅ NOTES
-       Fix critique: si note bloquante déclenchée, on RETURN immédiatement
-       pour éviter skip/arrivée dans le même tick.
+       NOTES
     ========================= */
 
     let didShowBlockingNoteThisTick = false;
@@ -1558,7 +1795,7 @@ export default function NavLive() {
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
 
-          // ✅ HOLD anti-arrivée jusqu’à la fin du timer
+          // HOLD anti-arrivée
           noteHoldIdxRef.current = targetIdx;
           noteHoldUntilRef.current = Date.now() + NOTE_AUTO_HIDE_MS;
 
@@ -1662,6 +1899,9 @@ export default function NavLive() {
 
         clearNoteNow();
         setPaused(false);
+
+        // ✅ fin => on efface la reprise
+        clearSavedState();
       }
     }
   }, [
@@ -1671,12 +1911,13 @@ export default function NavLive() {
     targetIdx,
     points,
     finished,
-    stopBanner.show,
+    stopBanner?.show,
     hasOfficial,
     officialLine,
     stopIdxOnTrace,
     audioOn,
     activeNote,
+    resumePrompt.show,
   ]);
 
   /* =========================
@@ -1710,7 +1951,7 @@ export default function NavLive() {
     boxShadow: "0 16px 34px rgba(0,0,0,.22)",
   };
 
-  const hasBanner = !!stopBanner.show;
+  const hasBanner = !!stopBanner?.show;
 
   const topStack: React.CSSProperties = {
     position: "absolute",
@@ -1776,11 +2017,150 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
+  // Overlay all notes styles
+  const notesOverlayWrap: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    zIndex: 24500,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+    background: "rgba(0,0,0,.55)",
+    pointerEvents: "auto",
+  };
+
+  const notesCard: React.CSSProperties = {
+    width: "min(92vw, 980px)",
+    maxHeight: "min(82vh, 820px)",
+    background: "rgba(17,24,39,.97)",
+    color: "#fff",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: 22,
+    boxShadow: "0 30px 80px rgba(0,0,0,.55)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  };
+
+  const notesHeader: React.CSSProperties = {
+    padding: "14px 16px",
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  };
+
+  const notesList: React.CSSProperties = {
+    padding: 14,
+    overflowY: "auto",
+    WebkitOverflowScrolling: "touch",
+    display: "grid",
+    gap: 12,
+  };
+
+  const notesItem: React.CSSProperties = {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    padding: "12px 12px",
+    background: "rgba(255,255,255,.04)",
+    display: "grid",
+    gap: 8,
+  };
+
+  const notesCloseBtn: React.CSSProperties = {
+    height: 44,
+    padding: "0 14px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+  };
+
+  // ✅ overlay reprise
+  const resumeCard: React.CSSProperties = {
+    width: "min(92vw, 760px)",
+    background: "rgba(17,24,39,.97)",
+    color: "#fff",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: 24,
+    boxShadow: "0 30px 90px rgba(0,0,0,.65)",
+    padding: "18px 18px",
+    display: "grid",
+    gap: 12,
+    textAlign: "center",
+  };
+
+  const resumeBtnPrimary: React.CSSProperties = {
+    height: 60,
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,.10)",
+    background: "#FBBF24",
+    color: "#111827",
+    fontWeight: 950,
+    fontSize: 18,
+    cursor: "pointer",
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+  };
+
+  const resumeBtnGhost: React.CSSProperties = {
+    height: 60,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.16)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    fontSize: 16,
+    cursor: "pointer",
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+  };
+
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* Note overlay */}
+      {/* ✅ Prompt reprise après crash */}
+      {resumePrompt.show && resumePrompt.saved ? (
+        <div style={noteOverlayWrap}>
+          <div style={resumeCard}>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>Reprendre le trajet ?</div>
+            <div style={{ opacity: 0.92, lineHeight: 1.3 }}>
+              Une session récente a été trouvée.
+              <br />
+              Dernier arrêt: <b>#{(resumePrompt.saved.target_idx ?? 0) + 1}</b>
+            </div>
+
+            <div style={{ display: "grid", gap: 10, marginTop: 6 }}>
+              <button
+                style={resumeBtnPrimary}
+                onPointerDown={tapHandler(() => applyResume(resumePrompt.saved!))}
+                onTouchStart={tapHandler(() => applyResume(resumePrompt.saved!))}
+                onClick={tapHandler(() => applyResume(resumePrompt.saved!))}
+              >
+                Reprendre où j’étais
+              </button>
+
+              <button
+                style={resumeBtnGhost}
+                onPointerDown={tapHandler(applyRestart)}
+                onTouchStart={tapHandler(applyRestart)}
+                onClick={tapHandler(applyRestart)}
+              >
+                Recommencer au début
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Note overlay (note courante) */}
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
@@ -1810,8 +2190,55 @@ export default function NavLive() {
         </div>
       ) : null}
 
+      {/* Overlay: toutes les notes */}
+      {showAllNotes ? (
+        <div style={notesOverlayWrap}>
+          <div style={notesCard}>
+            <div style={notesHeader}>
+              <div style={{ display: "grid", gap: 2 }}>
+                <div style={{ fontWeight: 950, fontSize: 18 }}>Notes du trajet</div>
+                <div style={{ opacity: 0.85, fontSize: 12 }}>
+                  {allNotes.length ? `${allNotes.length} note(s)` : "Aucune note sur ce trajet"}
+                </div>
+              </div>
+
+              <button
+                style={notesCloseBtn}
+                onPointerDown={tapHandler(() => setShowAllNotes(false))}
+                onTouchStart={tapHandler(() => setShowAllNotes(false))}
+                onClick={tapHandler(() => setShowAllNotes(false))}
+              >
+                Fermer
+              </button>
+            </div>
+
+            <div style={notesList}>
+              {allNotes.length ? (
+                allNotes.map((n) => (
+                  <div key={n.idx} style={notesItem}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 950 }}>
+                        Arrêt #{n.idx + 1} — {n.label ?? "(sans nom)"}
+                      </div>
+
+                      <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>
+                        {isBlockingType(n.type) ? "Bloquante" : "Auto 5s"} {n.triggerM != null ? `• ${Math.round(n.triggerM)} m` : ""}
+                      </div>
+                    </div>
+
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div style={topStack}>
-        {stopBanner.show &&
+        {stopBanner?.show &&
           (() => {
             const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
             const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
@@ -1894,9 +2321,9 @@ export default function NavLive() {
           <div style={zoomCol}>
             <button
               style={overlayBtn}
-              onPointerDown={tapHandler(zoomIn)}
-              onTouchStart={tapHandler(zoomIn)}
-              onClick={tapHandler(zoomIn)}
+              onPointerDown={tapHandler(() => (mapRef.current ? zoomIn() : void 0))}
+              onTouchStart={tapHandler(() => (mapRef.current ? zoomIn() : void 0))}
+              onClick={tapHandler(() => (mapRef.current ? zoomIn() : void 0))}
               aria-label="Zoom in"
               title="Zoom +"
             >
@@ -1904,9 +2331,9 @@ export default function NavLive() {
             </button>
             <button
               style={overlayBtn}
-              onPointerDown={tapHandler(zoomOut)}
-              onTouchStart={tapHandler(zoomOut)}
-              onClick={tapHandler(zoomOut)}
+              onPointerDown={tapHandler(() => (mapRef.current ? zoomOut() : void 0))}
+              onTouchStart={tapHandler(() => (mapRef.current ? zoomOut() : void 0))}
+              onClick={tapHandler(() => (mapRef.current ? zoomOut() : void 0))}
               aria-label="Zoom out"
               title="Zoom -"
             >
@@ -1940,6 +2367,24 @@ export default function NavLive() {
             >
               🔊
             </button>
+
+            {/* ✅ bouton Notes */}
+            <button
+              style={{
+                ...overlayBtn,
+                fontSize: 16,
+                background: showAllNotes ? "#111827" : "#ffffff",
+                color: showAllNotes ? "#FBBF24" : "#111827",
+                border: showAllNotes ? "1px solid rgba(251,191,36,.28)" : "1px solid rgba(0,0,0,.12)",
+              }}
+              onPointerDown={tapHandler(() => setShowAllNotes(true))}
+              onTouchStart={tapHandler(() => setShowAllNotes(true))}
+              onClick={tapHandler(() => setShowAllNotes(true))}
+              aria-label="Voir toutes les notes"
+              title="Voir toutes les notes"
+            >
+              📝
+            </button>
           </div>
         </div>
       </div>
@@ -1963,6 +2408,30 @@ export default function NavLive() {
           }}
         >
           {err}
+        </div>
+      ) : null}
+
+      {/* debug off-route (optionnel) */}
+      {offRouteM != null && running ? (
+        <div
+          style={{
+            position: "absolute",
+            left: 12,
+            bottom: "calc(env(safe-area-inset-bottom) + 12px)",
+            zIndex: 25000,
+            background: "rgba(17,24,39,.75)",
+            border: "1px solid rgba(255,255,255,.10)",
+            borderRadius: 14,
+            padding: "8px 10px",
+            boxShadow: "0 12px 26px rgba(0,0,0,.22)",
+            fontSize: 12,
+            fontWeight: 900,
+            color: "#fff",
+            pointerEvents: "none",
+            opacity: 0.0, // mets à 1.0 si tu veux l’afficher
+          }}
+        >
+          Hors-trace: {Math.round(offRouteM)} m
         </div>
       ) : null}
     </div>
