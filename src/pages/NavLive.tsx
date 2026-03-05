@@ -6,12 +6,45 @@ import mapboxgl from "mapbox-gl";
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
 import { useWakeLock } from "@/lib/useWakeLock";
+import { getDispatchNavSettings } from "@/lib/gpsDispatchApi";
 
 /* =========================
    Types (alignés DB)
 ========================= */
 
 type StopType = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
+
+// Settings core types (table dispatch_nav_settings)
+type StopTypeCore = "school" | "school_uturn" | "uturn" | "transfer";
+type StopDisplayMode = "manual" | "auto";
+
+type DispatchNavSettings = {
+  banner_speed_split_kmh: number;
+  banner_m_low: number;
+  banner_m_high: number;
+
+  tts_speed_split_kmh: number;
+  tts_offset_low: Record<StopTypeCore, number>;
+  tts_offset_high: Record<StopTypeCore, number>;
+
+  // ✅ NEW (globaux DB)
+  stop_display_mode: Record<StopTypeCore, StopDisplayMode>; // manual => bouton Continuer, auto => timer
+  stop_display_duration: Record<StopTypeCore, number>; // secondes (1..60)
+};
+
+const DEFAULT_NAV_SETTINGS: DispatchNavSettings = {
+  banner_speed_split_kmh: 80,
+  banner_m_low: 150,
+  banner_m_high: 200,
+
+  tts_speed_split_kmh: 80,
+  tts_offset_low: { uturn: 5, school: 5, transfer: 5, school_uturn: 5 },
+  tts_offset_high: { uturn: 5, school: 5, transfer: 5, school_uturn: 5 },
+
+  // ✅ NEW defaults
+  stop_display_mode: { school: "manual", school_uturn: "manual", uturn: "auto", transfer: "auto" },
+  stop_display_duration: { school: 6, school_uturn: 6, uturn: 6, transfer: 6 },
+};
 
 type StopPoint = {
   lat: number;
@@ -23,6 +56,10 @@ type StopPoint = {
   note?: string | null;
   note_trigger_m?: number | null;
   note_once?: boolean | null;
+
+  // ✅ NEW (dispatch stop note UI)
+  note_blocking?: boolean | null; // override global
+  note_timer_s?: number | null; // override global
 };
 
 type PointsResp = {
@@ -38,6 +75,10 @@ type PointsResp = {
     note?: string | null;
     note_trigger_m?: number | null;
     note_once?: boolean | null;
+
+    // ✅ NEW
+    note_blocking?: boolean | null;
+    note_timer_s?: number | null;
   }[];
 };
 
@@ -79,6 +120,123 @@ function watchPos(
 
 function clamp(v: number, a: number, b: number) {
   return Math.max(a, Math.min(b, v));
+}
+
+function clampNum(v: any, min: number, max: number, fallback: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function readJsonObj(v: any): any {
+  try {
+    if (!v) return {};
+    if (typeof v === "string") return JSON.parse(v);
+    if (typeof v === "object") return v; // jsonb arrive souvent déjà en objet
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * ✅ FIX CRITIQUE :
+ * Gère tous les formats possibles renvoyés par Supabase / Edge Function :
+ * - row direct
+ * - { data: row }
+ * - { data: [row] }
+ * - [row]
+ * - { settings: row } (ancien format)
+ */
+function normalizeNavSettings(raw: any): DispatchNavSettings {
+  let s: any = raw;
+
+  // unwrap { data: ... }
+  if (s && typeof s === "object" && "data" in s) s = (s as any).data;
+
+  // unwrap array
+  if (Array.isArray(s)) s = s[0];
+
+  // unwrap { settings: ... }
+  if (s && typeof s === "object" && "settings" in s) s = (s as any).settings;
+
+  s = s ?? {};
+
+  const low = readJsonObj(s.tts_offset_low);
+  const high = readJsonObj(s.tts_offset_high);
+
+  const offsets = (src: any): Record<StopTypeCore, number> => ({
+    school: clampNum(src?.school, 0, 30, 5),
+    school_uturn: clampNum(src?.school_uturn, 0, 30, 5),
+    uturn: clampNum(src?.uturn, 0, 30, 5),
+    transfer: clampNum(src?.transfer, 0, 30, 5),
+  });
+
+  const modeRaw = readJsonObj(s.stop_display_mode);
+  const durationRaw = readJsonObj(s.stop_display_duration);
+
+  const pickMode = (v: any, fb: StopDisplayMode) => {
+    const x = String(v ?? "").toLowerCase().trim();
+    return x === "manual" || x === "auto" ? (x as StopDisplayMode) : fb;
+  };
+
+  const modes: Record<StopTypeCore, StopDisplayMode> = {
+    school: pickMode(modeRaw?.school, DEFAULT_NAV_SETTINGS.stop_display_mode.school),
+    school_uturn: pickMode(modeRaw?.school_uturn, DEFAULT_NAV_SETTINGS.stop_display_mode.school_uturn),
+    uturn: pickMode(modeRaw?.uturn, DEFAULT_NAV_SETTINGS.stop_display_mode.uturn),
+    transfer: pickMode(modeRaw?.transfer, DEFAULT_NAV_SETTINGS.stop_display_mode.transfer),
+  };
+
+  const durations: Record<StopTypeCore, number> = {
+    school: clampNum(durationRaw?.school, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.school),
+    school_uturn: clampNum(durationRaw?.school_uturn, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.school_uturn),
+    uturn: clampNum(durationRaw?.uturn, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.uturn),
+    transfer: clampNum(durationRaw?.transfer, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.transfer),
+  };
+
+  return {
+    banner_speed_split_kmh: clampNum(s.banner_speed_split_kmh, 0, 130, 80),
+    banner_m_low: clampNum(s.banner_m_low, 10, 1200, 150),
+    banner_m_high: clampNum(s.banner_m_high, 10, 1200, 200),
+
+    tts_speed_split_kmh: clampNum(s.tts_speed_split_kmh, 0, 130, 80),
+    tts_offset_low: offsets(low),
+    tts_offset_high: offsets(high),
+
+    // ✅ NEW
+    stop_display_mode: modes,
+    stop_display_duration: durations,
+  };
+}
+
+function mapStopTypeToCore(t: StopType): StopTypeCore {
+  if (t === "ecole") return "school";
+  return t as StopTypeCore;
+}
+
+/* ✅ NEW: heuristique "École" par label (si stop_type legacy) */
+function looksLikeEcole(label?: string | null) {
+  const s = String(label ?? "").toLowerCase();
+  return s.includes("école") || s.includes("ecole");
+}
+
+/* ✅ NEW: normalise stop_type (priorité: DB -> label) */
+function normalizeStopType(raw: any, label?: string | null): StopType {
+  const t = String(raw ?? "school").toLowerCase().trim();
+
+  // si DB envoie déjà ecole => parfait
+  if (t === "ecole") return "ecole";
+
+  // si DB envoie un type core valide => ok
+  if (t === "school" || t === "school_uturn" || t === "uturn" || t === "transfer") {
+    // fallback "alignement": si label dit École, on force ecole (sans toucher DB)
+    if (t === "school" && looksLikeEcole(label)) return "ecole";
+    return t as StopType;
+  }
+
+  // type inconnu: fallback school, mais si label École => ecole
+  if (looksLikeEcole(label)) return "ecole";
+  return "school";
 }
 
 function projectMeters(originLat: number, p: LatLng) {
@@ -166,10 +324,6 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
 function stopTypeOrDefault(t?: StopType | null): StopType {
   const x = (t ?? "school") as StopType;
   return x;
-}
-
-function isBlockingType(t: StopType) {
-  return t === "transfer" || t === "ecole";
 }
 
 function haloColorForType(t: StopType) {
@@ -451,6 +605,19 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
+  // ✅ Global Nav settings
+  const [navSettings, setNavSettings] = useState<DispatchNavSettings>(DEFAULT_NAV_SETTINGS);
+
+  async function loadNavSettings() {
+    try {
+      const data = await getDispatchNavSettings();
+      const normalized = normalizeNavSettings(data);
+      setNavSettings(normalized);
+    } catch {
+      setNavSettings(DEFAULT_NAV_SETTINGS);
+    }
+  }
+
   // Audio state
   const [audioOn, setAudioOn] = useState(false);
 
@@ -480,14 +647,11 @@ export default function NavLive() {
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
-  // ✅ Anti re-pop après "Continuer" OU auto-hide tant que le conducteur reste dans la zone
-  // On supprime le blocage seulement quand il est sorti du rayon trigger (+hysteresis).
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
   const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
-  // ✅ Auto-hide overlay (non-bloquant) après 5 secondes
   const noteTimerRef = useRef<number | null>(null);
-  const NOTE_AUTO_HIDE_MS = 5000;
+  const NOTE_AUTO_HIDE_DEFAULT_MS = 5000;
 
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
@@ -496,7 +660,7 @@ export default function NavLive() {
     }
   }
 
-  // Pause (transfert/ecole)
+  // Pause (notes bloquantes)
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   useEffect(() => {
@@ -511,11 +675,12 @@ export default function NavLive() {
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
 
   // Wake lock
-  const { supported: wlSupported, active: wlActive } = useWakeLock(running);
+  useWakeLock(running);
 
   // Bandeau stop + sons
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
+  const stopAudioMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>({
@@ -553,10 +718,31 @@ export default function NavLive() {
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    return kmh >= 80 ? 200 : 150;
+
+    const split = navSettings.banner_speed_split_kmh ?? 80;
+    const low = navSettings.banner_m_low ?? 150;
+    const high = navSettings.banner_m_high ?? 200;
+
+    return kmh > split ? high : low;
   }
 
-  // Arrêt manqué
+  function warnAudioMetersForType(t: StopType) {
+    const v = speedRef.current ?? null;
+    const kmh = v != null ? v * 3.6 : 0;
+    const speedMps = Math.max(0, v ?? 0);
+
+    const core = mapStopTypeToCore(t);
+    const split = navSettings.tts_speed_split_kmh ?? 80;
+
+    const offsets = kmh > split ? navSettings.tts_offset_high : navSettings.tts_offset_low;
+    const offsetSec = clampNum(offsets?.[core], 0, 30, 5);
+
+    const base = warnStopMeters();
+    const extraM = clamp(speedMps * offsetSec, 0, 450);
+
+    return Math.round(base + extraM);
+  }
+
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
   const STOP_SKIP_MIN_SPEED = 1.2; // m/s
@@ -1058,7 +1244,7 @@ export default function NavLive() {
   }
 
   function enableAudio() {
-    if (audioOn) return; // ✅ idempotent
+    if (audioOn) return;
     sfx.unlock();
     sfx.preloadAll();
     sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
@@ -1086,9 +1272,7 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
-    // ✅ évite repop tant qu'on reste dans la zone
     noteSuppressForIdxRef.current.add(targetIdx);
-
     setPaused(false);
     clearNoteNow();
   }
@@ -1121,16 +1305,24 @@ export default function NavLive() {
     if (!circuitId) throw new Error("Circuit manquant.");
 
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
-    const pts: StopPoint[] = r.points.map((p) => ({
-      lat: p.lat,
-      lng: p.lng,
-      label: p.label ?? null,
 
-      stop_type: (p.stop_type ?? "school") as StopType,
-      note: p.note ?? null,
-      note_trigger_m: p.note_trigger_m ?? null,
-      note_once: p.note_once ?? null,
-    }));
+    const pts: StopPoint[] = r.points.map((p) => {
+      const st = normalizeStopType(p.stop_type, p.label ?? null); // ✅ alignement école
+      return {
+        lat: p.lat,
+        lng: p.lng,
+        label: p.label ?? null,
+
+        stop_type: st,
+        note: p.note ?? null,
+        note_trigger_m: p.note_trigger_m ?? null,
+        note_once: p.note_once ?? null,
+
+        note_blocking: (p as any).note_blocking ?? null,
+        note_timer_s: (p as any).note_timer_s ?? null,
+      };
+    });
+
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
@@ -1151,9 +1343,10 @@ export default function NavLive() {
 
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
+    stopAudioMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
     stopTouchedRef.current = false;
     stopMinDistRef.current = Infinity;
@@ -1191,6 +1384,9 @@ export default function NavLive() {
     }
 
     setRunning(true);
+
+    // ✅ charge settings globaux au démarrage
+    loadNavSettings().catch(() => {});
 
     tryEnterFullscreen();
     installAutoFullscreenOnce();
@@ -1425,9 +1621,7 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
 
-    // reset suppression pour ce nouvel arrêt
     noteSuppressForIdxRef.current.delete(targetIdx);
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1468,10 +1662,12 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ✅ aucun minimum: 0m
+    const dynamicAudioMax = warnAudioMetersForType(t);
+    if (stopAudioMaxRef.current == null) stopAudioMaxRef.current = dynamicAudioMax;
+    const WARN_AUDIO_M = stopAudioMaxRef.current ?? dynamicAudioMax;
+
     const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
 
-    // Bandeau
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
@@ -1486,16 +1682,14 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    // ✅ Audio d’approche: dès qu’on ENTRE dans la zone WARN (1 fois)
     if (audioOn && stopWarnRef.current !== targetIdx) {
-      if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
+      if (rawStopM <= WARN_AUDIO_M && rawStopM > ARRIVE_STOP_M) {
         stopWarnRef.current = targetIdx;
         const key = audioKeyForStopType(t);
         sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
       }
     }
 
-    // Ding proche
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
@@ -1503,19 +1697,10 @@ export default function NavLive() {
       }
     }
 
-    /* =========================
-       ✅ NOTES (règle finale)
-       - École/Transfert: overlay bloquant + bouton Continuer
-       - Autres: overlay 5s, puis disparaît automatiquement (sans Continuer)
-       - Trigger DB respecté (note_trigger_m), sans minimum
-       - Anti re-pop: dès qu'on montre une note, on bloque tant qu'on reste dans la zone (+hysteresis)
-    ========================= */
-
     const noteRaw = String(target.note ?? "").trim();
     const hasNote = noteRaw.length > 0;
     const inNoteZone = rawStopM <= noteTriggerM;
 
-    // ✅ libère la suppression quand on est sorti du rayon (avec hysteresis)
     if (noteSuppressForIdxRef.current.has(targetIdx) && rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
       noteSuppressForIdxRef.current.delete(targetIdx);
     }
@@ -1529,24 +1714,37 @@ export default function NavLive() {
       const cooldownOk = now - last >= NOTE_REPEAT_COOLDOWN_MS;
 
       const canShow = once ? !alreadyOnce : cooldownOk;
-
       const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
 
       if (canShow && !suppressed) {
         noteLastShowAtRef.current[targetIdx] = now;
         if (once) noteShownForIdxRef.current.add(targetIdx);
 
-        // bloque les repop tant qu'on n'est pas sorti de la zone (+hysteresis)
         noteSuppressForIdxRef.current.add(targetIdx);
 
-        if (isBlockingType(t)) {
-          // École / Transfert => overlay bloquant, pas de timer
+        // ✅ NOUVEAU: mode/durée globaux DB + override par stop
+        const core = mapStopTypeToCore(t);
+
+        const blocking =
+          typeof target.note_blocking === "boolean"
+            ? target.note_blocking
+            : (navSettings.stop_display_mode?.[core] ?? DEFAULT_NAV_SETTINGS.stop_display_mode[core]) === "manual";
+
+        const secGlobal = navSettings.stop_display_duration?.[core] ?? DEFAULT_NAV_SETTINGS.stop_display_duration[core];
+
+        const sec =
+          target.note_timer_s != null && Number.isFinite(Number(target.note_timer_s))
+            ? clampNum(target.note_timer_s, 1, 60, secGlobal)
+            : clampNum(secGlobal, 1, 60, 6);
+
+        const ms = blocking ? null : Math.max(800, Math.round(sec * 1000));
+
+        if (blocking) {
           clearNoteTimer();
           setPaused(true);
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
         } else {
-          // Autres => overlay 5 secondes, non bloquant, pas de Continuer
           clearNoteTimer();
           setPaused(false);
           setActiveNote(noteRaw);
@@ -1554,15 +1752,13 @@ export default function NavLive() {
 
           noteTimerRef.current = window.setTimeout(() => {
             clearNoteNow();
-          }, NOTE_AUTO_HIDE_MS);
+          }, ms ?? NOTE_AUTO_HIDE_DEFAULT_MS);
         }
       }
     }
 
-    // Paused => on bloque skip/arrive
     if (pausedRef.current) return;
 
-    // SKIP arrêt manqué
     if (hasOfficial && officialLine.length >= 2) {
       const speedNow = speedRef.current ?? null;
 
@@ -1589,6 +1785,7 @@ export default function NavLive() {
 
           stopWarnRef.current = null;
           stopWarnMaxRef.current = null;
+          stopAudioMaxRef.current = null;
           stopDingRef.current = null;
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
@@ -1601,7 +1798,6 @@ export default function NavLive() {
       }
     }
 
-    // ARRIVÉE
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1620,6 +1816,7 @@ export default function NavLive() {
 
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
+        stopAudioMaxRef.current = null;
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
@@ -1637,6 +1834,7 @@ export default function NavLive() {
 
         stopWarnRef.current = null;
         stopWarnMaxRef.current = null;
+        stopAudioMaxRef.current = null;
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
@@ -1647,7 +1845,7 @@ export default function NavLive() {
         setPaused(false);
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn]);
+  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn, navSettings]);
 
   /* =========================
      UI
@@ -1750,19 +1948,10 @@ export default function NavLive() {
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* Note overlay: SANS ENTÊTE (seulement texte + Continuer si pause) */}
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
-            <div
-              style={{
-                fontSize: 38,
-                fontWeight: 900,
-                lineHeight: 1.25,
-                whiteSpace: "pre-wrap",
-                letterSpacing: 0.3,
-              }}
-            >
+            <div style={{ fontSize: 38, fontWeight: 900, lineHeight: 1.25, whiteSpace: "pre-wrap", letterSpacing: 0.3 }}>
               {activeNote}
             </div>
 
@@ -1835,15 +2024,7 @@ export default function NavLive() {
                 </div>
 
                 <div style={{ height: 12, borderRadius: 999, background: "rgba(0,0,0,.18)", overflow: "hidden" }}>
-                  <div
-                    style={{
-                      height: "100%",
-                      width: `${pct}%`,
-                      background: "#111827",
-                      borderRadius: 999,
-                      transition: "width 140ms linear",
-                    }}
-                  />
+                  <div style={{ height: "100%", width: `${pct}%`, background: "#111827", borderRadius: 999, transition: "width 140ms linear" }} />
                 </div>
               </div>
             );
@@ -1862,24 +2043,10 @@ export default function NavLive() {
           </button>
 
           <div style={zoomCol}>
-            <button
-              style={overlayBtn}
-              onPointerDown={tapHandler(zoomIn)}
-              onTouchStart={tapHandler(zoomIn)}
-              onClick={tapHandler(zoomIn)}
-              aria-label="Zoom in"
-              title="Zoom +"
-            >
+            <button style={overlayBtn} onPointerDown={tapHandler(zoomIn)} onTouchStart={tapHandler(zoomIn)} onClick={tapHandler(zoomIn)} title="Zoom +">
               +
             </button>
-            <button
-              style={overlayBtn}
-              onPointerDown={tapHandler(zoomOut)}
-              onTouchStart={tapHandler(zoomOut)}
-              onClick={tapHandler(zoomOut)}
-              aria-label="Zoom out"
-              title="Zoom -"
-            >
+            <button style={overlayBtn} onPointerDown={tapHandler(zoomOut)} onTouchStart={tapHandler(zoomOut)} onClick={tapHandler(zoomOut)} title="Zoom -">
               −
             </button>
             <button
@@ -1887,7 +2054,6 @@ export default function NavLive() {
               onPointerDown={tapHandler(recenter)}
               onTouchStart={tapHandler(recenter)}
               onClick={tapHandler(recenter)}
-              aria-label="Recentrer"
               title="Recentrer"
             >
               🎯

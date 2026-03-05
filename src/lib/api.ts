@@ -26,7 +26,7 @@ function fnUrl(name: string) {
  * NOTE: on garde tes headers x-app-key + apikey.
  */
 export async function callFn<T>(
-  fnName: "circuits-api" | "nav-api",
+  fnName: "circuits-api" | "nav-api" | "dispatch-update-settings",
   payload: any
 ): Promise<T> {
   const { data } = await supabase.auth.getSession();
@@ -59,4 +59,3 @@ export async function callFn<T>(
 
   return dataJson as T;
 }
-
