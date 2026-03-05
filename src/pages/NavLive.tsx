@@ -81,20 +81,6 @@ function clamp(v: number, a: number, b: number) {
   return Math.max(a, Math.min(b, v));
 }
 
-// ✅ note_trigger_m: aucun minimum (0 ok), juste un cap safe
-function clampTriggerM(v: any, fallback = 200) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(0, Math.min(5000, Math.round(n)));
-}
-
-// ✅ “annonces 2 sec avant le bandeau jaune”
-const ANNOUNCE_LEAD_SEC = 2;
-function leadDistanceM(speedMps: number | null) {
-  const s = Number.isFinite(speedMps as any) && (speedMps as number) >= 0 ? (speedMps as number) : 8; // fallback ~29km/h
-  return Math.max(0, s * ANNOUNCE_LEAD_SEC);
-}
-
 function projectMeters(originLat: number, p: LatLng) {
   const R = 6371000;
   const lat = (p.lat * Math.PI) / 180;
@@ -455,16 +441,6 @@ function tapHandler(fn: () => void) {
    Main
 ========================= */
 
-type ActiveNoteState =
-  | null
-  | {
-      text: string;
-      blocking: boolean;
-      stopIdx: number;
-      untilMs: number | null; // null = pas de timer (bloquant)
-      createdAt: number;
-    };
-
 export default function NavLive() {
   const q = useQuery();
   const nav = useNavigate();
@@ -498,19 +474,13 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // ✅ Notes (state indépendant du target pour éviter disparition après avoir “passé” l’arrêt)
-  const [activeNote, setActiveNote] = useState<ActiveNoteState>(null);
-  const activeNoteRef = useRef<ActiveNoteState>(null);
-  useEffect(() => {
-    activeNoteRef.current = activeNote;
-  }, [activeNote]);
-
+  // Notes (DB-driven)
+  const [activeNote, setActiveNote] = useState<string | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
   const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
   // ✅ Anti re-pop après "Continuer" OU auto-hide tant que le conducteur reste dans la zone
-  // On supprime le blocage seulement quand il est sorti du rayon trigger (+hysteresis).
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
   const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
@@ -522,37 +492,6 @@ export default function NavLive() {
     if (noteTimerRef.current != null) {
       window.clearTimeout(noteTimerRef.current);
       noteTimerRef.current = null;
-    }
-  }
-
-  function clearNoteNow() {
-    clearNoteTimer();
-    setActiveNote(null);
-  }
-
-  function showNoteNow(opts: { text: string; blocking: boolean; stopIdx: number }) {
-    clearNoteTimer();
-
-    const now = Date.now();
-    const state: ActiveNoteState = {
-      text: opts.text,
-      blocking: opts.blocking,
-      stopIdx: opts.stopIdx,
-      untilMs: opts.blocking ? null : now + NOTE_AUTO_HIDE_MS,
-      createdAt: now,
-    };
-
-    setActiveNote(state);
-
-    if (!opts.blocking) {
-      noteTimerRef.current = window.setTimeout(() => {
-        // ✅ ne dépend pas du target; expire par timer
-        setActiveNote((cur) => {
-          if (!cur) return null;
-          if (cur.stopIdx !== opts.stopIdx) return cur; // une autre note a pris la place
-          return null;
-        });
-      }, NOTE_AUTO_HIDE_MS);
     }
   }
 
@@ -571,7 +510,7 @@ export default function NavLive() {
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
 
   // Wake lock
-  const { supported: wlSupported, active: wlActive } = useWakeLock(running);
+  useWakeLock(running);
 
   // Bandeau stop + sons
   const stopWarnRef = useRef<number | null>(null);
@@ -1118,11 +1057,16 @@ export default function NavLive() {
   }
 
   function enableAudio() {
-    if (audioOn) return; // ✅ idempotent
+    if (audioOn) return;
     sfx.unlock();
     sfx.preloadAll();
     sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
     setAudioOn(true);
+  }
+
+  function clearNoteNow() {
+    clearNoteTimer();
+    setActiveNote(null);
   }
 
   function speakNoteTTS(text: string) {
@@ -1141,9 +1085,7 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
-    // ✅ évite repop tant qu'on reste dans la zone
     noteSuppressForIdxRef.current.add(targetIdx);
-
     setPaused(false);
     clearNoteNow();
   }
@@ -1180,7 +1122,6 @@ export default function NavLive() {
       lat: p.lat,
       lng: p.lng,
       label: p.label ?? null,
-
       stop_type: (p.stop_type ?? "school") as StopType,
       note: p.note ?? null,
       note_trigger_m: p.note_trigger_m ?? null,
@@ -1394,8 +1335,7 @@ export default function NavLive() {
                 joinedTraceRef.current = true;
 
                 const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ??
-                  nearestLineIndex(next, line);
+                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
 
                 if (pick && pick.dist <= SNAP_MAX_DIST_M) {
                   traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
@@ -1477,12 +1417,10 @@ export default function NavLive() {
     upsertStopsOnMap();
     upsertActiveLineOnMap();
 
-    // ✅ IMPORTANT: on NE clear PAS la note ici (sinon elle disparaît quand on “passe” l’arrêt)
     setPaused(false);
+    clearNoteNow();
 
-    // reset suppression pour ce nouvel arrêt
     noteSuppressForIdxRef.current.delete(targetIdx);
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdx, running]);
 
@@ -1523,11 +1461,8 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
-    // ✅ lead distance pour sons/annonces
-    const leadM = leadDistanceM(speedRef.current ?? null);
-
-    // ✅ note trigger sans minimum (0m ok)
-    const noteTriggerM = clampTriggerM(target.note_trigger_m ?? WARN_STOP_M, WARN_STOP_M);
+    // ✅ aucun minimum: 0m
+    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
 
     // Bandeau
     if (rawStopM > WARN_STOP_M) {
@@ -1544,10 +1479,15 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    // ✅ Audio d’approche: 2 sec AVANT l’entrée dans la zone WARN
+    // ✅✅ Audio d’approche PLUS TÔT (≈ 4 sec avant le bandeau, selon la vitesse)
+    const VOICE_LEAD_SEC = 4.0; // <-- +1-2 sec demandé
+    const spNow = speedRef.current ?? null;
+    const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10; // ~36 km/h si inconnu
+    const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
+    const VOICE_TRIGGER_M = WARN_STOP_M + leadM;
+
     if (audioOn && stopWarnRef.current !== targetIdx) {
-      const inPreWarn = rawStopM <= WARN_STOP_M + leadM && rawStopM > ARRIVE_STOP_M;
-      if (inPreWarn) {
+      if (rawStopM <= VOICE_TRIGGER_M && rawStopM > ARRIVE_STOP_M) {
         stopWarnRef.current = targetIdx;
         const key = audioKeyForStopType(t);
         sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
@@ -1563,25 +1503,22 @@ export default function NavLive() {
     }
 
     /* =========================
-       ✅ NOTES (règle finale corrigée)
-       Fix #1: si note_trigger_m < ARRIVE_STOP_M, la note doit pouvoir se déclencher
-               (et ne pas être “effacée” par l’avancement du target).
-       Fix #2: la note “timer” ne disparaît pas juste parce qu’on a passé l’arrêt.
-       Fix #3: TTS (note) démarre ~2 sec avant l’affichage (lead distance).
+       ✅ NOTES
+       Fix critique: si note bloquante déclenchée, on RETURN immédiatement
+       pour éviter skip/arrivée dans le même tick (sinon note disparaît).
     ========================= */
+
+    let didShowBlockingNoteThisTick = false;
 
     const noteRaw = String(target.note ?? "").trim();
     const hasNote = noteRaw.length > 0;
-
     const inNoteZone = rawStopM <= noteTriggerM;
-    const inNotePreZone = rawStopM <= noteTriggerM + leadM;
 
-    // ✅ libère la suppression quand on est sorti du rayon (avec hysteresis)
     if (noteSuppressForIdxRef.current.has(targetIdx) && rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M) {
       noteSuppressForIdxRef.current.delete(targetIdx);
     }
 
-    if (hasNote) {
+    if (hasNote && inNoteZone) {
       const once = Boolean(target.note_once ?? true);
       const alreadyOnce = noteShownForIdxRef.current.has(targetIdx);
 
@@ -1592,45 +1529,34 @@ export default function NavLive() {
       const canShow = once ? !alreadyOnce : cooldownOk;
       const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
 
-      // ✅ TTS 2 sec avant la zone (une fois, et seulement si audioOn)
-      // On l’associe au “canShow && !suppressed” pour rester cohérent.
-      if (audioOn && canShow && !suppressed && inNotePreZone) {
-        // on “réserve” l’annonce dès le pre-trigger pour éviter double
+      if (canShow && !suppressed) {
         noteLastShowAtRef.current[targetIdx] = now;
         if (once) noteShownForIdxRef.current.add(targetIdx);
-        noteSuppressForIdxRef.current.add(targetIdx);
 
-        // TTS d’avance
-        speakNoteTTS(noteRaw);
-
-        // puis, si on est déjà dans la zone, on affiche tout de suite,
-        // sinon on attend d’entrer dans la zone (via les prochaines itérations)
-        if (inNoteZone) {
-          if (isBlockingType(t)) {
-            setPaused(true);
-            showNoteNow({ text: noteRaw, blocking: true, stopIdx: targetIdx });
-          } else {
-            setPaused(false);
-            showNoteNow({ text: noteRaw, blocking: false, stopIdx: targetIdx });
-          }
-        }
-      } else if (canShow && !suppressed && inNoteZone) {
-        // ✅ cas sans audio / ou déjà dans zone sans pre-trigger
-        noteLastShowAtRef.current[targetIdx] = now;
-        if (once) noteShownForIdxRef.current.add(targetIdx);
         noteSuppressForIdxRef.current.add(targetIdx);
 
         if (isBlockingType(t)) {
+          clearNoteTimer();
           setPaused(true);
-          showNoteNow({ text: noteRaw, blocking: true, stopIdx: targetIdx });
+          setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
+
+          // ✅ FIX: stoppe le reste (sinon "arrivée/skip" peut avancer l’arrêt et effacer la note)
+          didShowBlockingNoteThisTick = true;
         } else {
+          clearNoteTimer();
           setPaused(false);
-          showNoteNow({ text: noteRaw, blocking: false, stopIdx: targetIdx });
+          setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
+
+          noteTimerRef.current = window.setTimeout(() => {
+            clearNoteNow();
+          }, NOTE_AUTO_HIDE_MS);
         }
       }
     }
+
+    if (didShowBlockingNoteThisTick) return;
 
     // Paused => on bloque skip/arrive
     if (pausedRef.current) return;
@@ -1666,6 +1592,7 @@ export default function NavLive() {
           stopBannerLastMRef.current = null;
           setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
+          clearNoteNow();
           setPaused(false);
 
           return;
@@ -1698,6 +1625,7 @@ export default function NavLive() {
         stopTouchedRef.current = false;
         stopMinDistRef.current = Infinity;
 
+        clearNoteNow();
         setPaused(false);
       } else {
         travelSinceTargetSetRef.current = 0;
@@ -1714,6 +1642,7 @@ export default function NavLive() {
         stopTouchedRef.current = false;
         stopMinDistRef.current = Infinity;
 
+        clearNoteNow();
         setPaused(false);
       }
     }
@@ -1820,7 +1749,7 @@ export default function NavLive() {
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* Note overlay: SANS ENTÊTE (seulement texte + Continuer si pause) */}
+      {/* Note overlay */}
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
@@ -1833,7 +1762,7 @@ export default function NavLive() {
                 letterSpacing: 0.3,
               }}
             >
-              {activeNote.text}
+              {activeNote}
             </div>
 
             {paused ? (
