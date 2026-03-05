@@ -14,8 +14,9 @@ import { getDispatchNavSettings } from "@/lib/gpsDispatchApi";
 
 type StopType = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
 
-// Settings core types (table dispatch_nav_settings)
-type StopTypeCore = "school" | "school_uturn" | "uturn" | "transfer";
+// ✅ IMPORTANT: ton DB renvoie maintenant "ecole" dans les JSON settings.
+// On le supporte directement ici.
+type StopTypeCore = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
 type StopDisplayMode = "manual" | "auto";
 
 type DispatchNavSettings = {
@@ -27,9 +28,8 @@ type DispatchNavSettings = {
   tts_offset_low: Record<StopTypeCore, number>;
   tts_offset_high: Record<StopTypeCore, number>;
 
-  // ✅ NEW (globaux DB)
-  stop_display_mode: Record<StopTypeCore, StopDisplayMode>; // manual => bouton Continuer, auto => timer
-  stop_display_duration: Record<StopTypeCore, number>; // secondes (1..60)
+  stop_display_mode: Record<StopTypeCore, StopDisplayMode>;
+  stop_display_duration: Record<StopTypeCore, number>;
 };
 
 const DEFAULT_NAV_SETTINGS: DispatchNavSettings = {
@@ -38,12 +38,11 @@ const DEFAULT_NAV_SETTINGS: DispatchNavSettings = {
   banner_m_high: 200,
 
   tts_speed_split_kmh: 80,
-  tts_offset_low: { uturn: 5, school: 5, transfer: 5, school_uturn: 5 },
-  tts_offset_high: { uturn: 5, school: 5, transfer: 5, school_uturn: 5 },
+  tts_offset_low: { uturn: 5, school: 5, ecole: 5, transfer: 5, school_uturn: 5 },
+  tts_offset_high: { uturn: 5, school: 5, ecole: 5, transfer: 5, school_uturn: 5 },
 
-  // ✅ NEW defaults
-  stop_display_mode: { school: "manual", school_uturn: "manual", uturn: "auto", transfer: "auto" },
-  stop_display_duration: { school: 6, school_uturn: 6, uturn: 6, transfer: 6 },
+  stop_display_mode: { school: "manual", ecole: "manual", school_uturn: "manual", uturn: "auto", transfer: "auto" },
+  stop_display_duration: { school: 6, ecole: 6, school_uturn: 6, uturn: 6, transfer: 6 },
 };
 
 type StopPoint = {
@@ -57,9 +56,9 @@ type StopPoint = {
   note_trigger_m?: number | null;
   note_once?: boolean | null;
 
-  // ✅ NEW (dispatch stop note UI)
-  note_blocking?: boolean | null; // override global
-  note_timer_s?: number | null; // override global
+  // dispatch override
+  note_blocking?: boolean | null;
+  note_timer_s?: number | null;
 };
 
 type PointsResp = {
@@ -76,7 +75,6 @@ type PointsResp = {
     note_trigger_m?: number | null;
     note_once?: boolean | null;
 
-    // ✅ NEW
     note_blocking?: boolean | null;
     note_timer_s?: number | null;
   }[];
@@ -132,7 +130,7 @@ function readJsonObj(v: any): any {
   try {
     if (!v) return {};
     if (typeof v === "string") return JSON.parse(v);
-    if (typeof v === "object") return v; // jsonb arrive souvent déjà en objet
+    if (typeof v === "object") return v;
     return {};
   } catch {
     return {};
@@ -140,24 +138,17 @@ function readJsonObj(v: any): any {
 }
 
 /**
- * ✅ FIX CRITIQUE :
- * Gère tous les formats possibles renvoyés par Supabase / Edge Function :
+ * Normalise settings - supporte:
  * - row direct
- * - { data: row }
- * - { data: [row] }
+ * - { data: row } / { data: [row] }
  * - [row]
- * - { settings: row } (ancien format)
+ * - { settings: row }
  */
 function normalizeNavSettings(raw: any): DispatchNavSettings {
   let s: any = raw;
 
-  // unwrap { data: ... }
   if (s && typeof s === "object" && "data" in s) s = (s as any).data;
-
-  // unwrap array
   if (Array.isArray(s)) s = s[0];
-
-  // unwrap { settings: ... }
   if (s && typeof s === "object" && "settings" in s) s = (s as any).settings;
 
   s = s ?? {};
@@ -165,12 +156,17 @@ function normalizeNavSettings(raw: any): DispatchNavSettings {
   const low = readJsonObj(s.tts_offset_low);
   const high = readJsonObj(s.tts_offset_high);
 
-  const offsets = (src: any): Record<StopTypeCore, number> => ({
-    school: clampNum(src?.school, 0, 30, 5),
-    school_uturn: clampNum(src?.school_uturn, 0, 30, 5),
-    uturn: clampNum(src?.uturn, 0, 30, 5),
-    transfer: clampNum(src?.transfer, 0, 30, 5),
-  });
+  // ✅ Support "ecole" en fallback sur "school" si absent
+  const offsets = (src: any): Record<StopTypeCore, number> => {
+    const ecoleFallback = src?.ecole ?? src?.school;
+    return {
+      school: clampNum(src?.school, 0, 30, 5),
+      ecole: clampNum(ecoleFallback, 0, 30, 5),
+      school_uturn: clampNum(src?.school_uturn, 0, 30, 5),
+      uturn: clampNum(src?.uturn, 0, 30, 5),
+      transfer: clampNum(src?.transfer, 0, 30, 5),
+    };
+  };
 
   const modeRaw = readJsonObj(s.stop_display_mode);
   const durationRaw = readJsonObj(s.stop_display_duration);
@@ -182,6 +178,7 @@ function normalizeNavSettings(raw: any): DispatchNavSettings {
 
   const modes: Record<StopTypeCore, StopDisplayMode> = {
     school: pickMode(modeRaw?.school, DEFAULT_NAV_SETTINGS.stop_display_mode.school),
+    ecole: pickMode(modeRaw?.ecole ?? modeRaw?.school, DEFAULT_NAV_SETTINGS.stop_display_mode.ecole),
     school_uturn: pickMode(modeRaw?.school_uturn, DEFAULT_NAV_SETTINGS.stop_display_mode.school_uturn),
     uturn: pickMode(modeRaw?.uturn, DEFAULT_NAV_SETTINGS.stop_display_mode.uturn),
     transfer: pickMode(modeRaw?.transfer, DEFAULT_NAV_SETTINGS.stop_display_mode.transfer),
@@ -189,6 +186,7 @@ function normalizeNavSettings(raw: any): DispatchNavSettings {
 
   const durations: Record<StopTypeCore, number> = {
     school: clampNum(durationRaw?.school, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.school),
+    ecole: clampNum(durationRaw?.ecole ?? durationRaw?.school, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.ecole),
     school_uturn: clampNum(durationRaw?.school_uturn, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.school_uturn),
     uturn: clampNum(durationRaw?.uturn, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.uturn),
     transfer: clampNum(durationRaw?.transfer, 1, 60, DEFAULT_NAV_SETTINGS.stop_display_duration.transfer),
@@ -203,38 +201,31 @@ function normalizeNavSettings(raw: any): DispatchNavSettings {
     tts_offset_low: offsets(low),
     tts_offset_high: offsets(high),
 
-    // ✅ NEW
     stop_display_mode: modes,
     stop_display_duration: durations,
   };
 }
 
 function mapStopTypeToCore(t: StopType): StopTypeCore {
-  if (t === "ecole") return "school";
+  // ✅ maintenant "ecole" est un core à part entière
   return t as StopTypeCore;
 }
 
-/* ✅ NEW: heuristique "École" par label (si stop_type legacy) */
 function looksLikeEcole(label?: string | null) {
   const s = String(label ?? "").toLowerCase();
   return s.includes("école") || s.includes("ecole");
 }
 
-/* ✅ NEW: normalise stop_type (priorité: DB -> label) */
 function normalizeStopType(raw: any, label?: string | null): StopType {
   const t = String(raw ?? "school").toLowerCase().trim();
 
-  // si DB envoie déjà ecole => parfait
   if (t === "ecole") return "ecole";
 
-  // si DB envoie un type core valide => ok
   if (t === "school" || t === "school_uturn" || t === "uturn" || t === "transfer") {
-    // fallback "alignement": si label dit École, on force ecole (sans toucher DB)
     if (t === "school" && looksLikeEcole(label)) return "ecole";
     return t as StopType;
   }
 
-  // type inconnu: fallback school, mais si label École => ecole
   if (looksLikeEcole(label)) return "ecole";
   return "school";
 }
@@ -605,7 +596,6 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
-  // ✅ Global Nav settings
   const [navSettings, setNavSettings] = useState<DispatchNavSettings>(DEFAULT_NAV_SETTINGS);
 
   async function loadNavSettings() {
@@ -618,17 +608,14 @@ export default function NavLive() {
     }
   }
 
-  // Audio state
   const [audioOn, setAudioOn] = useState(false);
 
-  // GPS (état affichage)
   const [me, setMe] = useState<LatLng | null>(null);
   const [acc, setAcc] = useState<number | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // GPS refs (animation fluide)
   const targetPosRef = useRef<LatLng | null>(null);
   const animPosRef = useRef<LatLng | null>(null);
   const accRef = useRef<number | null>(null);
@@ -636,15 +623,14 @@ export default function NavLive() {
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
 
-  // Stops
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
-  // Notes (DB-driven)
+  // Notes
   const [activeNote, setActiveNote] = useState<string | null>(null);
-  const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
-  const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
+  const noteShownForIdxRef = useRef<Set<number>>(new Set());
+  const noteLastShowAtRef = useRef<Record<number, number>>({});
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
@@ -660,24 +646,19 @@ export default function NavLive() {
     }
   }
 
-  // Pause (notes bloquantes)
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
 
-  // Trace officielle
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
-  // Distance à la polyline (info)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
 
-  // Wake lock
   useWakeLock(running);
 
-  // Bandeau stop + sons
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopAudioMaxRef = useRef<number | null>(null);
@@ -691,27 +672,21 @@ export default function NavLive() {
   });
   const stopBannerLastMRef = useRef<number | null>(null);
 
-  // Mode intelligent (skip arrêt manqué)
   const stopTouchedRef = useRef(false);
   const stopMinDistRef = useRef<number>(Infinity);
 
-  // Progression sur trace (idx)
   const traceIdxRef = useRef<number>(0);
-
-  // join logique
   const joinedTraceRef = useRef<boolean>(false);
 
-  // Anti-finish si arrêts trop proches
   const lastMeRef = useRef<LatLng | null>(null);
   const travelSinceTargetSetRef = useRef(0);
   const initialDistToTargetRef = useRef<number | null>(null);
   const MIN_TRAVEL_AFTER_TARGET_SET_M = 12;
   const ARRIVE_EPS_M = 5;
 
-  // Follow mode
   const followRef = useRef(true);
 
-  // ====== Tuning ======
+  // Tuning
   const ARRIVE_STOP_M = 45;
   const DING_AT_M = 10;
 
@@ -722,6 +697,18 @@ export default function NavLive() {
     const split = navSettings.banner_speed_split_kmh ?? 80;
     const low = navSettings.banner_m_low ?? 150;
     const high = navSettings.banner_m_high ?? 200;
+
+    return kmh > split ? high : low;
+  }
+
+  // ✅ FIX #2: défaut stable (ne dépend pas des sliders du bandeau)
+  function noteDefaultMeters() {
+    const v = speedRef.current ?? null;
+    const kmh = v != null ? v * 3.6 : 0;
+
+    const split = DEFAULT_NAV_SETTINGS.banner_speed_split_kmh ?? 80;
+    const low = DEFAULT_NAV_SETTINGS.banner_m_low ?? 150;
+    const high = DEFAULT_NAV_SETTINGS.banner_m_high ?? 200;
 
     return kmh > split ? high : low;
   }
@@ -745,7 +732,7 @@ export default function NavLive() {
 
   const STOP_TOUCH_M = 35;
   const STOP_SKIP_CONFIRM_M = 90;
-  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
+  const STOP_SKIP_MIN_SPEED = 1.2;
   const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
@@ -958,7 +945,6 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
-    // TRACE COMPLETE
     if (fullLine && fullLine.length >= 2) {
       try {
         const geo = buildLineGeoJSON(fullLine);
@@ -984,7 +970,6 @@ export default function NavLive() {
       }
     }
 
-    // TRACE ACTIVE
     if (fullLine && fullLine.length >= 2) {
       try {
         const { start, end } = getActiveSegmentIdxs(fullLine.length);
@@ -1012,7 +997,6 @@ export default function NavLive() {
       }
     }
 
-    // STOPS
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
@@ -1307,7 +1291,7 @@ export default function NavLive() {
     const r = await callFn<PointsResp>("circuits-api", { action: "get_active_points", circuit_id: circuitId });
 
     const pts: StopPoint[] = r.points.map((p) => {
-      const st = normalizeStopType(p.stop_type, p.label ?? null); // ✅ alignement école
+      const st = normalizeStopType(p.stop_type, p.label ?? null);
       return {
         lat: p.lat,
         lng: p.lng,
@@ -1385,7 +1369,6 @@ export default function NavLive() {
 
     setRunning(true);
 
-    // ✅ charge settings globaux au démarrage
     loadNavSettings().catch(() => {});
 
     tryEnterFullscreen();
@@ -1666,7 +1649,8 @@ export default function NavLive() {
     if (stopAudioMaxRef.current == null) stopAudioMaxRef.current = dynamicAudioMax;
     const WARN_AUDIO_M = stopAudioMaxRef.current ?? dynamicAudioMax;
 
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
+    // ✅ FIX #2 ici: défaut noteTriggerM stable
+    const noteTriggerM = clamp(Number(target.note_trigger_m ?? noteDefaultMeters()), 0, 1200);
 
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
@@ -1722,7 +1706,6 @@ export default function NavLive() {
 
         noteSuppressForIdxRef.current.add(targetIdx);
 
-        // ✅ NOUVEAU: mode/durée globaux DB + override par stop
         const core = mapStopTypeToCore(t);
 
         const blocking =
