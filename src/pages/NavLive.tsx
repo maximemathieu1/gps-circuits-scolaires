@@ -488,6 +488,10 @@ export default function NavLive() {
   const noteTimerRef = useRef<number | null>(null);
   const NOTE_AUTO_HIDE_MS = 5000;
 
+  // ✅ HOLD anti-ARRIVÉE pendant note non-bloquante (évite qu'elle se ferme à 45m)
+  const noteHoldUntilRef = useRef<number>(0);
+  const noteHoldIdxRef = useRef<number>(-1);
+
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
       window.clearTimeout(noteTimerRef.current);
@@ -546,7 +550,9 @@ export default function NavLive() {
   const followRef = useRef(true);
 
   // ====== Tuning ======
-  const ARRIVE_STOP_M = 45;
+  const ARRIVE_STOP_M_DEFAULT = 45;
+  const ARRIVE_STOP_M_BLOCKING = 8;
+
   const DING_AT_M = 10;
 
   function warnStopMeters() {
@@ -1067,6 +1073,8 @@ export default function NavLive() {
   function clearNoteNow() {
     clearNoteTimer();
     setActiveNote(null);
+    noteHoldIdxRef.current = -1;
+    noteHoldUntilRef.current = 0;
   }
 
   function speakNoteTTS(text: string) {
@@ -1454,6 +1462,8 @@ export default function NavLive() {
     }
 
     const t = stopTypeOrDefault(target.stop_type);
+    const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
+
     const dStop = haversineMeters(p, target as any);
     const rawStopM = Math.round(dStop);
 
@@ -1470,7 +1480,7 @@ export default function NavLive() {
       stopBannerLastMRef.current = null;
     }
 
-    if (rawStopM <= WARN_STOP_M && rawStopM > ARRIVE_STOP_M) {
+    if (rawStopM <= WARN_STOP_M && rawStopM > arriveM) {
       const prevShown = stopBannerLastMRef.current;
       let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
       shown = Math.round(shown / 5) * 5;
@@ -1480,14 +1490,14 @@ export default function NavLive() {
     }
 
     // ✅✅ Audio d’approche PLUS TÔT (≈ 4 sec avant le bandeau, selon la vitesse)
-    const VOICE_LEAD_SEC = 4.0; // <-- +1-2 sec demandé
+    const VOICE_LEAD_SEC = 4.0; // +1-2 sec
     const spNow = speedRef.current ?? null;
     const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10; // ~36 km/h si inconnu
     const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
     const VOICE_TRIGGER_M = WARN_STOP_M + leadM;
 
     if (audioOn && stopWarnRef.current !== targetIdx) {
-      if (rawStopM <= VOICE_TRIGGER_M && rawStopM > ARRIVE_STOP_M) {
+      if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
         stopWarnRef.current = targetIdx;
         const key = audioKeyForStopType(t);
         sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
@@ -1505,7 +1515,7 @@ export default function NavLive() {
     /* =========================
        ✅ NOTES
        Fix critique: si note bloquante déclenchée, on RETURN immédiatement
-       pour éviter skip/arrivée dans le même tick (sinon note disparaît).
+       pour éviter skip/arrivée dans le même tick.
     ========================= */
 
     let didShowBlockingNoteThisTick = false;
@@ -1541,13 +1551,16 @@ export default function NavLive() {
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
 
-          // ✅ FIX: stoppe le reste (sinon "arrivée/skip" peut avancer l’arrêt et effacer la note)
           didShowBlockingNoteThisTick = true;
         } else {
           clearNoteTimer();
           setPaused(false);
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
+
+          // ✅ HOLD anti-arrivée jusqu’à la fin du timer
+          noteHoldIdxRef.current = targetIdx;
+          noteHoldUntilRef.current = Date.now() + NOTE_AUTO_HIDE_MS;
 
           noteTimerRef.current = window.setTimeout(() => {
             clearNoteNow();
@@ -1560,6 +1573,11 @@ export default function NavLive() {
 
     // Paused => on bloque skip/arrive
     if (pausedRef.current) return;
+
+    // ✅ Ne pas avancer l’arrêt pendant qu’une note non-bloquante est affichée (timer)
+    if (!isBlockingType(t) && activeNote && noteHoldIdxRef.current === targetIdx) {
+      if (Date.now() < (noteHoldUntilRef.current || 0)) return;
+    }
 
     // SKIP arrêt manqué
     if (hasOfficial && officialLine.length >= 2) {
@@ -1603,9 +1621,9 @@ export default function NavLive() {
     // ARRIVÉE
     const initD = initialDistToTargetRef.current;
     const allowArrive =
-      initD == null || initD > ARRIVE_STOP_M + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+      initD == null || initD > arriveM + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
 
-    if (dStop <= ARRIVE_STOP_M && allowArrive) {
+    if (dStop <= arriveM && allowArrive) {
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
       const nextIdx = targetIdx + 1;
@@ -1646,7 +1664,20 @@ export default function NavLive() {
         setPaused(false);
       }
     }
-  }, [running, me, target, targetIdx, points, finished, stopBanner.show, hasOfficial, officialLine, stopIdxOnTrace, audioOn]);
+  }, [
+    running,
+    me,
+    target,
+    targetIdx,
+    points,
+    finished,
+    stopBanner.show,
+    hasOfficial,
+    officialLine,
+    stopIdxOnTrace,
+    audioOn,
+    activeNote,
+  ]);
 
   /* =========================
      UI
