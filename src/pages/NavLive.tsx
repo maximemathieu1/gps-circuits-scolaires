@@ -438,22 +438,6 @@ function tapHandler(fn: () => void) {
 }
 
 /* =========================
-   Crash-resume (localStorage)
-========================= */
-
-type NavLiveSavedState = {
-  v: 1;
-  circuit_id: string;
-  saved_at: number; // ms
-  target_idx: number;
-  trace_idx: number;
-};
-
-function lsKeyForCircuit(circuitId: string) {
-  return `navlive_state_v1:${circuitId || "none"}`;
-}
-
-/* =========================
    Main
 ========================= */
 
@@ -539,19 +523,15 @@ export default function NavLive() {
     }
   }
 
-  // Pause (transfert/ecole) + blocage reprise popup
+  // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
 
-  // ✅ Reprise après plantage
-  const [resumePrompt, setResumePrompt] = useState<{ show: boolean; saved: NavLiveSavedState | null }>({
-    show: false,
-    saved: null,
-  });
-  const RESUME_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h
+  // ✅ Prompt simple au démarrage (2 boutons)
+  const [startPrompt, setStartPrompt] = useState(false);
 
   // Trace officielle
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
@@ -570,7 +550,6 @@ export default function NavLive() {
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
-    // init safe
     setStopBanner({ show: false, meters: 0, label: null, max: 150 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1139,7 +1118,7 @@ export default function NavLive() {
     } catch {}
   }
 
-  function resetStopGates() {
+  function resetStopGatesFor(idx: number) {
     stopTouchedRef.current = false;
     stopMinDistRef.current = Infinity;
     stopWarnRef.current = null;
@@ -1149,8 +1128,9 @@ export default function NavLive() {
     setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
     travelSinceTargetSetRef.current = 0;
+
     const p = animPosRef.current ?? me;
-    const curTarget = points[targetIdx] ?? null;
+    const curTarget = points[idx] ?? null;
     initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
   }
 
@@ -1165,34 +1145,13 @@ export default function NavLive() {
     // ✅ avancer au prochain arrêt comme si on l’avait atteint
     const nextIdx = targetIdx + 1;
 
-    // reset skip trackers + gates
-    stopTouchedRef.current = false;
-    stopMinDistRef.current = Infinity;
-    stopWarnRef.current = null;
-    stopWarnMaxRef.current = null;
-    stopDingRef.current = null;
-    stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
-
-    // reset travel gate
-    travelSinceTargetSetRef.current = 0;
-
     if (nextIdx < points.length) {
-      const p = animPosRef.current ?? me;
-      const nextTarget = points[nextIdx] ?? null;
-      initialDistToTargetRef.current = p && nextTarget ? haversineMeters(p, nextTarget as any) : null;
       setTargetIdx(nextIdx);
+      resetStopGatesFor(nextIdx);
     } else {
       if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
       setFinished(true);
     }
-  }
-
-  function clearSavedState() {
-    try {
-      if (!circuitId) return;
-      localStorage.removeItem(lsKeyForCircuit(circuitId));
-    } catch {}
   }
 
   function stop() {
@@ -1212,11 +1171,108 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
-    setResumePrompt({ show: false, saved: null });
 
-    clearSavedState();
+    setStartPrompt(false);
 
     nav("/");
+  }
+
+  /* =========================
+     Reprise “où je suis” (sur trace)
+     - ignore la distance au prochain arrêt
+     - choisit le premier arrêt “devant” sur la polyline
+  ========================= */
+
+  function pickTargetIdxAheadFromTrace(traceIdxNow: number) {
+    const stops = stopIdxOnTrace;
+    if (!stops || !stops.length) return 0;
+
+    const AHEAD_MARGIN_PTS = 8;
+    const minTrace = traceIdxNow + AHEAD_MARGIN_PTS;
+
+    for (let i = 0; i < stops.length; i++) {
+      const sIdx = Number(stops[i]);
+      if (Number.isFinite(sIdx) && sIdx > minTrace) return i;
+    }
+
+    return Math.max(0, stops.length - 1);
+  }
+
+  function tryJoinAndSnapNow(): { ok: boolean; traceIdx: number } {
+    const p = animPosRef.current ?? me;
+    const line = lineRef.current;
+
+    if (!p || !line || line.length < 2) return { ok: false, traceIdx: 0 };
+
+    // 1) distance à la polyline
+    const d = minDistanceToPolylineMeters(p, line);
+    if (d == null) return { ok: false, traceIdx: 0 };
+
+    // tolérance: si t’es proche on “join”
+    if (d <= SNAP_MAX_DIST_M) {
+      joinedTraceRef.current = true;
+
+      // snap index (fenêtre raisonnable)
+      const pick =
+        nearestLineIndexWindow(p, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(p, line);
+
+      const idx = clamp(Math.floor(pick?.idx ?? 0), 0, line.length - 1);
+      traceIdxRef.current = idx;
+      return { ok: true, traceIdx: idx };
+    }
+
+    return { ok: false, traceIdx: 0 };
+  }
+
+  function resumeWhereIAmOnTrace() {
+    if (!hasOfficial || lineRef.current.length < 2 || !points.length || !stopIdxOnTrace.length) {
+      setErr("Reprise indisponible (trace officielle manquante).");
+      return;
+    }
+
+    const joinedOk = joinedTraceRef.current || tryJoinAndSnapNow().ok;
+    if (!joinedOk) {
+      setErr("Trop loin de la route. Rapproche-toi de la trace puis réessaie.");
+      return;
+    }
+
+    const lineLen = lineRef.current.length;
+    const traceIdxNow = clamp(Math.floor(traceIdxRef.current ?? 0), 0, lineLen - 1);
+
+    const idx = pickTargetIdxAheadFromTrace(traceIdxNow);
+
+    // fermer prompt + reprendre
+    setStartPrompt(false);
+    clearNoteNow();
+    setShowAllNotes(false);
+
+    setTargetIdx(idx);
+    resetStopGatesFor(idx);
+
+    setPaused(false);
+
+    try {
+      recenter();
+    } catch {}
+  }
+
+  function restartFromBeginning() {
+    setStartPrompt(false);
+
+    setTargetIdx(0);
+
+    // reset trace join (on laisse l’auto-join normal dans la loop)
+    joinedTraceRef.current = false;
+    traceIdxRef.current = 0;
+
+    resetStopGatesFor(0);
+
+    clearNoteNow();
+    setPaused(false);
+
+    try {
+      recenter();
+    } catch {}
   }
 
   /* =========================
@@ -1238,17 +1294,30 @@ export default function NavLive() {
     }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
+    // trace officielle (si dispo)
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
     const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
-    if (line.length < 2) throw new Error("Trace officielle introuvable (aucun trail).");
 
     setPoints(pts);
     setTargetIdx(0);
-
-    setOfficialLine(line);
-    setHasOfficial(true);
-
     setFinished(false);
+
+    noteShownForIdxRef.current = new Set();
+    noteLastShowAtRef.current = {};
+    noteSuppressForIdxRef.current = new Set();
+
+    stopsRef.current = pts;
+
+    // si pas de trace officielle: on continue, mais la reprise “où je suis” sera disabled
+    if (line.length >= 2) {
+      setOfficialLine(line);
+      setHasOfficial(true);
+      lineRef.current = line;
+    } else {
+      setOfficialLine([]);
+      setHasOfficial(false);
+      lineRef.current = [];
+    }
 
     traceIdxRef.current = 0;
     joinedTraceRef.current = false;
@@ -1270,13 +1339,6 @@ export default function NavLive() {
     clearNoteNow();
     setShowAllNotes(false);
 
-    noteShownForIdxRef.current = new Set();
-    noteLastShowAtRef.current = {};
-    noteSuppressForIdxRef.current = new Set();
-
-    lineRef.current = line;
-    stopsRef.current = pts;
-
     const m = ensureMap();
     if (m) {
       applyOverlays();
@@ -1288,106 +1350,6 @@ export default function NavLive() {
   /* =========================
      AUTO START
   ========================= */
-
-  function readSavedState(): NavLiveSavedState | null {
-    try {
-      if (!circuitId) return null;
-      const raw = localStorage.getItem(lsKeyForCircuit(circuitId));
-      if (!raw) return null;
-      const obj = JSON.parse(raw) as NavLiveSavedState;
-      if (!obj || obj.v !== 1) return null;
-      if (obj.circuit_id !== circuitId) return null;
-      if (!Number.isFinite(obj.saved_at)) return null;
-
-      const age = Date.now() - obj.saved_at;
-      if (age > RESUME_MAX_AGE_MS) return null;
-
-      return obj;
-    } catch {
-      return null;
-    }
-  }
-
-  function openResumePromptIfAny() {
-    const saved = readSavedState();
-    if (!saved) return false;
-
-    // bloque l’auto-avancement pendant la décision
-    setPaused(true);
-    setResumePrompt({ show: true, saved });
-    return true;
-  }
-
-  function applyResume(saved: NavLiveSavedState) {
-    const idx = clamp(Math.floor(saved.target_idx ?? 0), 0, Math.max(0, points.length - 1));
-
-    // fermer overlays
-    setResumePrompt({ show: false, saved: null });
-    setShowAllNotes(false);
-    clearNoteNow();
-
-    // set progression
-    setTargetIdx(idx);
-
-    // best effort restore trace
-    traceIdxRef.current = clamp(Math.floor(saved.trace_idx ?? 0), 0, Math.max(0, (lineRef.current?.length ?? 1) - 1));
-    joinedTraceRef.current = true;
-
-    // reset gates
-    stopTouchedRef.current = false;
-    stopMinDistRef.current = Infinity;
-    stopWarnRef.current = null;
-    stopWarnMaxRef.current = null;
-    stopDingRef.current = null;
-    stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
-
-    // travel gate
-    travelSinceTargetSetRef.current = 0;
-    const p = animPosRef.current ?? me;
-    const curTarget = points[idx] ?? null;
-    initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
-
-    // reprendre
-    setPaused(false);
-
-    try {
-      recenter();
-    } catch {}
-  }
-
-  function applyRestart() {
-    // clear saved (sinon on le revoit)
-    clearSavedState();
-
-    // fermer prompt
-    setResumePrompt({ show: false, saved: null });
-
-    // repartir stop 1
-    setTargetIdx(0);
-
-    // reset trace join
-    traceIdxRef.current = 0;
-    joinedTraceRef.current = false;
-
-    // reset gates
-    stopTouchedRef.current = false;
-    stopMinDistRef.current = Infinity;
-    stopWarnRef.current = null;
-    stopWarnMaxRef.current = null;
-    stopDingRef.current = null;
-    stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
-
-    travelSinceTargetSetRef.current = 0;
-    initialDistToTargetRef.current = null;
-
-    setPaused(false);
-
-    try {
-      recenter();
-    } catch {}
-  }
 
   async function startAuto() {
     setErr(null);
@@ -1444,8 +1406,9 @@ export default function NavLive() {
       }
     } catch {}
 
-    // ✅ après chargement: proposer reprise si session récente
-    openResumePromptIfAny();
+    // ✅ prompt simple (2 boutons)
+    setPaused(true);
+    setStartPrompt(true);
   }
 
   useEffect(() => {
@@ -1458,33 +1421,6 @@ export default function NavLive() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circuitId]);
-
-  /* =========================
-     Sauvegarde locale périodique (anti-crash)
-  ========================= */
-  useEffect(() => {
-    if (!running) return;
-    if (!circuitId) return;
-    if (finished) return;
-
-    const id = window.setInterval(() => {
-      try {
-        // si popup reprise affiché, on ne spam pas
-        if (resumePrompt.show) return;
-
-        const obj: NavLiveSavedState = {
-          v: 1,
-          circuit_id: circuitId,
-          saved_at: Date.now(),
-          target_idx: clamp(targetIdx, 0, Math.max(0, points.length - 1)),
-          trace_idx: clamp(traceIdxRef.current ?? 0, 0, Math.max(0, (lineRef.current?.length ?? 1) - 1)),
-        };
-        localStorage.setItem(lsKeyForCircuit(circuitId), JSON.stringify(obj));
-      } catch {}
-    }, 5000);
-
-    return () => window.clearInterval(id);
-  }, [running, circuitId, finished, targetIdx, points.length, resumePrompt.show]);
 
   /* =========================
      GPS tracking
@@ -1658,8 +1594,8 @@ export default function NavLive() {
     upsertStopsOnMap();
     upsertActiveLineOnMap();
 
-    // ⚠️ si prompt reprise affiché, on ne force pas paused=false
-    if (!resumePrompt.show) {
+    // ⚠️ si prompt démarrage affiché, on ne force pas paused=false
+    if (!startPrompt) {
       setPaused(false);
       clearNoteNow();
     }
@@ -1690,8 +1626,8 @@ export default function NavLive() {
     if (!p || !target) return;
     if (finished) return;
 
-    // ✅ pendant le prompt reprise, on bloque tout
-    if (resumePrompt.show) return;
+    // ✅ pendant le prompt démarrage, on bloque tout
+    if (startPrompt) return;
 
     if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
     lastMeRef.current = p;
@@ -1835,17 +1771,7 @@ export default function NavLive() {
           if (audioOn) sfx.play("stopMissed", { volume: 1.0, cooldownMs: 1200 });
           setTargetIdx(nextIdx);
 
-          travelSinceTargetSetRef.current = 0;
-          initialDistToTargetRef.current = null;
-
-          stopTouchedRef.current = false;
-          stopMinDistRef.current = Infinity;
-
-          stopWarnRef.current = null;
-          stopWarnMaxRef.current = null;
-          stopDingRef.current = null;
-          stopBannerLastMRef.current = null;
-          setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
+          resetStopGatesFor(nextIdx);
 
           clearNoteNow();
           setPaused(false);
@@ -1865,10 +1791,6 @@ export default function NavLive() {
 
       const nextIdx = targetIdx + 1;
       if (nextIdx < points.length) {
-        travelSinceTargetSetRef.current = 0;
-        const nextTarget = points[nextIdx] ?? null;
-        initialDistToTargetRef.current = nextTarget ? haversineMeters(p, nextTarget as any) : null;
-
         if (audioOn) sfx.play("stopReached", { volume: 1.0, cooldownMs: 1200 });
         setTargetIdx(nextIdx);
 
@@ -1882,10 +1804,9 @@ export default function NavLive() {
 
         clearNoteNow();
         setPaused(false);
-      } else {
-        travelSinceTargetSetRef.current = 0;
-        initialDistToTargetRef.current = null;
 
+        resetStopGatesFor(nextIdx);
+      } else {
         if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
         setFinished(true);
 
@@ -1899,9 +1820,6 @@ export default function NavLive() {
 
         clearNoteNow();
         setPaused(false);
-
-        // ✅ fin => on efface la reprise
-        clearSavedState();
       }
     }
   }, [
@@ -1917,7 +1835,7 @@ export default function NavLive() {
     stopIdxOnTrace,
     audioOn,
     activeNote,
-    resumePrompt.show,
+    startPrompt,
   ]);
 
   /* =========================
@@ -2082,8 +2000,8 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
-  // ✅ overlay reprise
-  const resumeCard: React.CSSProperties = {
+  // ✅ prompt démarrage (2 boutons)
+  const startCard: React.CSSProperties = {
     width: "min(92vw, 760px)",
     background: "rgba(17,24,39,.97)",
     color: "#fff",
@@ -2096,7 +2014,7 @@ export default function NavLive() {
     textAlign: "center",
   };
 
-  const resumeBtnPrimary: React.CSSProperties = {
+  const startBtnPrimary: React.CSSProperties = {
     height: 60,
     borderRadius: 14,
     border: "1px solid rgba(0,0,0,.10)",
@@ -2109,7 +2027,13 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
-  const resumeBtnGhost: React.CSSProperties = {
+  const startBtnPrimaryDisabled: React.CSSProperties = {
+    ...startBtnPrimary,
+    opacity: 0.45,
+    cursor: "not-allowed",
+  };
+
+  const startBtnGhost: React.CSSProperties = {
     height: 60,
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.16)",
@@ -2122,38 +2046,51 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
+  const canResumeOnTrace = hasOfficial && officialLine.length >= 2 && stopIdxOnTrace.length > 0;
+
   return (
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
-      {/* ✅ Prompt reprise après crash */}
-      {resumePrompt.show && resumePrompt.saved ? (
+      {/* ✅ Prompt simple (2 boutons) */}
+      {startPrompt ? (
         <div style={noteOverlayWrap}>
-          <div style={resumeCard}>
-            <div style={{ fontSize: 22, fontWeight: 950 }}>Reprendre le trajet ?</div>
-            <div style={{ opacity: 0.92, lineHeight: 1.3 }}>
-              Une session récente a été trouvée.
+          <div style={startCard}>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>Démarrer le trajet</div>
+            <div style={{ opacity: 0.92, lineHeight: 1.35, fontSize: 14 }}>
+              Choisis :
               <br />
-              Dernier arrêt: <b>#{(resumePrompt.saved.target_idx ?? 0) + 1}</b>
+              <b>Reprendre où je suis</b> (si tu es sur la route)
+              <br />
+              ou <b>Départ du début</b>.
             </div>
+
+            {!canResumeOnTrace ? (
+              <div style={{ opacity: 0.82, fontSize: 12, lineHeight: 1.35 }}>
+                Reprise indisponible : trace officielle manquante.
+                <br />
+                (Le départ du début fonctionne quand même.)
+              </div>
+            ) : null}
 
             <div style={{ display: "grid", gap: 10, marginTop: 6 }}>
               <button
-                style={resumeBtnPrimary}
-                onPointerDown={tapHandler(() => applyResume(resumePrompt.saved!))}
-                onTouchStart={tapHandler(() => applyResume(resumePrompt.saved!))}
-                onClick={tapHandler(() => applyResume(resumePrompt.saved!))}
+                style={canResumeOnTrace ? startBtnPrimary : startBtnPrimaryDisabled}
+                disabled={!canResumeOnTrace}
+                onPointerDown={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
+                onTouchStart={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
+                onClick={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
               >
-                Reprendre où j’étais
+                Reprendre où je suis
               </button>
 
               <button
-                style={resumeBtnGhost}
-                onPointerDown={tapHandler(applyRestart)}
-                onTouchStart={tapHandler(applyRestart)}
-                onClick={tapHandler(applyRestart)}
+                style={startBtnGhost}
+                onPointerDown={tapHandler(restartFromBeginning)}
+                onTouchStart={tapHandler(restartFromBeginning)}
+                onClick={tapHandler(restartFromBeginning)}
               >
-                Recommencer au début
+                Départ du début
               </button>
             </div>
           </div>
@@ -2307,14 +2244,7 @@ export default function NavLive() {
           })()}
 
         <div style={topButtonsRow}>
-          <button
-            style={dangerBtn}
-            onPointerDown={tapHandler(stop)}
-            onTouchStart={tapHandler(stop)}
-            onClick={tapHandler(stop)}
-            title="Terminer"
-            aria-label="Terminer"
-          >
+          <button style={dangerBtn} onPointerDown={tapHandler(stop)} onTouchStart={tapHandler(stop)} onClick={tapHandler(stop)} title="Terminer">
             ✕
           </button>
 
