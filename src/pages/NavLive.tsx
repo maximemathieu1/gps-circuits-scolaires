@@ -539,7 +539,7 @@ export default function NavLive() {
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 175 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
@@ -555,14 +555,14 @@ export default function NavLive() {
 
   const followRef = useRef(true);
 
-  const ARRIVE_STOP_M_DEFAULT = 45;
+  const ARRIVE_STOP_M_DEFAULT = 20;
   const ARRIVE_STOP_M_BLOCKING = 8;
-  const DING_AT_M = 10;
+  const DING_AT_M = 5;
 
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    return kmh >= 70 ? 300 : 175;
+    return kmh >= 68 ? 175 : 50;
   }
 
   /* =========================
@@ -679,6 +679,7 @@ export default function NavLive() {
       features: pts.map((p, i) => ({
         type: "Feature" as const,
         properties: {
+          stopId: String(i),
           idx: i,
           num: String(i + 1),
           label: p.label ?? "",
@@ -688,6 +689,67 @@ export default function NavLive() {
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
     };
+  }
+
+  function computeStopIdsToHideNearActive(m: mapboxgl.Map, pts: StopPoint[], activeIdx: number) {
+    if (!pts.length) return [];
+
+    const active = pts[activeIdx];
+    if (!active) return [];
+
+    const zoom = m.getZoom();
+
+    const hidePx = zoom >= 18 ? 18 : zoom >= 17 ? 22 : zoom >= 16 ? 28 : zoom >= 15 ? 36 : 44;
+
+    const activePt = m.project([active.lng, active.lat]);
+    const toHide: string[] = [];
+
+    for (let i = 0; i < pts.length; i++) {
+      if (i === activeIdx) continue;
+
+      const p = pts[i];
+      const pt = m.project([p.lng, p.lat]);
+
+      const dx = pt.x - activePt.x;
+      const dy = pt.y - activePt.y;
+      const d = Math.hypot(dx, dy);
+
+      if (d < hidePx) {
+        toHide.push(String(i));
+      }
+    }
+
+    return toHide;
+  }
+
+  function applyActiveStopPriorityFilter() {
+    const m = mapRef.current;
+    if (!m || !m.isStyleLoaded()) return;
+    if (!stopsRef.current.length) return;
+
+    const hideIds = computeStopIdsToHideNearActive(m, stopsRef.current, targetIdx);
+
+    try {
+      if (hideIds.length > 0) {
+        const filter = ["!", ["in", ["get", "stopId"], ["literal", hideIds]]];
+
+        if (m.getLayer(MAP_STOPS_LAYER)) {
+          m.setFilter(MAP_STOPS_LAYER, filter as any);
+        }
+        if (m.getLayer(MAP_STOPS_NUM_LAYER)) {
+          m.setFilter(MAP_STOPS_NUM_LAYER, filter as any);
+        }
+      } else {
+        if (m.getLayer(MAP_STOPS_LAYER)) {
+          m.setFilter(MAP_STOPS_LAYER, null as any);
+        }
+        if (m.getLayer(MAP_STOPS_NUM_LAYER)) {
+          m.setFilter(MAP_STOPS_NUM_LAYER, null as any);
+        }
+      }
+    } catch (e) {
+      console.error("applyActiveStopPriorityFilter failed:", e);
+    }
   }
 
   const FULL_LINE_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 3.8, 15, 5.0, 17, 6.3, 19, 7.4];
@@ -892,7 +954,12 @@ export default function NavLive() {
           type: "circle",
           source: MAP_STOPS_SRC,
           paint: {
-            "circle-radius": 16,
+            "circle-radius": [
+              "case",
+              ["==", ["get", "active"], 1],
+              18,
+              16,
+            ],
             "circle-color": [
               "match",
               ["get", "t"],
@@ -908,7 +975,12 @@ export default function NavLive() {
               "#22c55e",
               "#ef4444",
             ],
-            "circle-stroke-width": 6,
+            "circle-stroke-width": [
+              "case",
+              ["==", ["get", "active"], 1],
+              7,
+              6,
+            ],
             "circle-stroke-color": "#ffffff",
           },
         });
@@ -919,13 +991,24 @@ export default function NavLive() {
           source: MAP_STOPS_SRC,
           layout: {
             "text-field": ["get", "num"],
-            "text-size": 16,
+            "text-size": [
+              "case",
+              ["==", ["get", "active"], 1],
+              17,
+              16,
+            ],
             "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
             "text-allow-overlap": true,
             "text-ignore-placement": true,
           },
-          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(0,0,0,0.55)",
+            "text-halo-width": 1.6,
+          },
         });
+
+        applyActiveStopPriorityFilter();
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
       }
@@ -946,9 +1029,12 @@ export default function NavLive() {
       } else {
         applyOverlays();
       }
+
+      applyActiveStopPriorityFilter();
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
       applyOverlays();
+      applyActiveStopPriorityFilter();
     }
   }
 
@@ -1026,12 +1112,19 @@ export default function NavLive() {
 
     m.on("load", () => {
       applyOverlays();
+      applyActiveStopPriorityFilter();
       try {
         m.resize();
       } catch {}
     });
 
-    m.on("style.load", () => applyOverlays());
+    m.on("style.load", () => {
+      applyOverlays();
+      applyActiveStopPriorityFilter();
+    });
+
+    m.on("move", () => applyActiveStopPriorityFilter());
+    m.on("zoom", () => applyActiveStopPriorityFilter());
 
     return m;
   }
@@ -1342,7 +1435,7 @@ export default function NavLive() {
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 175 });
 
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
@@ -1701,7 +1794,7 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    const VOICE_LEAD_SEC = 4.0;
+    const VOICE_LEAD_SEC = 2.5;
     const spNow = speedRef.current ?? null;
     const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
     const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
@@ -2190,7 +2283,7 @@ export default function NavLive() {
       <div style={topStack}>
         {stopBanner?.show &&
           (() => {
-            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
+            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 175;
             const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
