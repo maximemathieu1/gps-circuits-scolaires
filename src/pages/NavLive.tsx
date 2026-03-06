@@ -27,6 +27,7 @@ type StopPoint = {
 
 type PointsResp = {
   version_id: string;
+  general_note_start?: string | null;
   points: {
     idx: number;
     lat: number;
@@ -469,6 +470,9 @@ export default function NavLive() {
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
+  const [generalStartNote, setGeneralStartNote] = useState<string | null>(null);
+  const [showGeneralStartNote, setShowGeneralStartNote] = useState(false);
+
   const [activeNote, setActiveNote] = useState<string | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set());
   const noteLastShowAtRef = useRef<Record<number, number>>({});
@@ -505,7 +509,7 @@ export default function NavLive() {
       text: string;
     }[];
   }, [points]);
-  const hasAnyNotes = allNotes.length > 0;
+  const hasAnyNotes = allNotes.length > 0 || !!String(generalStartNote ?? "").trim();
 
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
@@ -1152,6 +1156,11 @@ export default function NavLive() {
     initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
   }
 
+  function continueAfterGeneralStartNote() {
+    setShowGeneralStartNote(false);
+    setPaused(false);
+  }
+
   function resumeAfterNote() {
     noteSuppressForIdxRef.current.add(targetIdx);
 
@@ -1183,6 +1192,7 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
+    setShowGeneralStartNote(false);
     setStartPrompt(false);
 
     nav("/");
@@ -1248,6 +1258,7 @@ export default function NavLive() {
     const idx = pickTargetIdxAheadFromTrace(traceIdxNow);
 
     setStartPrompt(false);
+    setShowGeneralStartNote(false);
     clearNoteNow();
     setShowAllNotes(false);
 
@@ -1297,10 +1308,13 @@ export default function NavLive() {
     }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
+    const generalNote = String(r.general_note_start ?? "").trim() || null;
+
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
     const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
 
     setPoints(pts);
+    setGeneralStartNote(generalNote);
     setTargetIdx(0);
     setFinished(false);
 
@@ -1336,6 +1350,7 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
+    setShowGeneralStartNote(false);
 
     const m = ensureMap();
     if (m) {
@@ -1344,7 +1359,7 @@ export default function NavLive() {
       upsertActiveLineOnMap();
     }
 
-    return { pts, line };
+    return { pts, line, generalNote };
   }
 
   /* =========================
@@ -1395,7 +1410,7 @@ export default function NavLive() {
       ensureMeMarker();
     }, 0);
 
-    const { pts, line } = await loadCircuit();
+    const { pts, line, generalNote } = await loadCircuit();
 
     try {
       const m = mapRef.current;
@@ -1417,11 +1432,19 @@ export default function NavLive() {
     if (offerResume) {
       setPaused(true);
       setStartPrompt(true);
+      setShowGeneralStartNote(false);
     } else {
-      setPaused(false);
       setStartPrompt(false);
       setTargetIdx(0);
       resetStopGatesFor(0);
+
+      if (generalNote) {
+        setPaused(true);
+        setShowGeneralStartNote(true);
+      } else {
+        setPaused(false);
+        setShowGeneralStartNote(false);
+      }
     }
   }
 
@@ -1609,14 +1632,14 @@ export default function NavLive() {
     upsertStopsOnMap();
     upsertActiveLineOnMap();
 
-    if (!startPrompt) {
+    if (!startPrompt && !showGeneralStartNote) {
       setPaused(false);
       clearNoteNow();
     }
 
     noteSuppressForIdxRef.current.delete(targetIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetIdx, running]);
+  }, [targetIdx, running, showGeneralStartNote]);
 
   /* =========================
      Distance à la trace
@@ -1643,6 +1666,7 @@ export default function NavLive() {
     if (finished) return;
 
     if (startPrompt) return;
+    if (showGeneralStartNote) return;
 
     if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
     lastMeRef.current = p;
@@ -1802,6 +1826,7 @@ export default function NavLive() {
     audioOn,
     activeNote,
     startPrompt,
+    showGeneralStartNote,
   ]);
 
   /* =========================
@@ -2047,6 +2072,33 @@ export default function NavLive() {
         </div>
       ) : null}
 
+      {showGeneralStartNote ? (
+        <div style={noteOverlayWrap}>
+          <div style={noteCard}>
+            <div
+              style={{
+                fontSize: 38,
+                fontWeight: 900,
+                lineHeight: 1.25,
+                whiteSpace: "pre-wrap",
+                letterSpacing: 0.3,
+              }}
+            >
+              {generalStartNote}
+            </div>
+
+            <button
+              style={noteBtn}
+              onPointerDown={tapHandler(continueAfterGeneralStartNote)}
+              onTouchStart={tapHandler(continueAfterGeneralStartNote)}
+              onClick={tapHandler(continueAfterGeneralStartNote)}
+            >
+              Continuer
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
@@ -2083,7 +2135,9 @@ export default function NavLive() {
               <div style={{ display: "grid", gap: 2 }}>
                 <div style={{ fontWeight: 950, fontSize: 18 }}>Notes du trajet</div>
                 <div style={{ opacity: 0.85, fontSize: 12 }}>
-                  {allNotes.length ? `${allNotes.length} note(s)` : "Aucune note sur ce trajet"}
+                  {(String(generalStartNote ?? "").trim() ? 1 : 0) + allNotes.length
+                    ? `${(String(generalStartNote ?? "").trim() ? 1 : 0) + allNotes.length} note(s)`
+                    : "Aucune note sur ce trajet"}
                 </div>
               </div>
 
@@ -2098,6 +2152,17 @@ export default function NavLive() {
             </div>
 
             <div style={notesList}>
+              {String(generalStartNote ?? "").trim() ? (
+                <div style={notesItem}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontWeight: 950 }}>Note générale de départ</div>
+                    <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>Début du trajet</div>
+                  </div>
+
+                  <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{generalStartNote}</div>
+                </div>
+              ) : null}
+
               {allNotes.length ? (
                 allNotes.map((n) => (
                   <div key={n.idx} style={notesItem}>
@@ -2114,9 +2179,9 @@ export default function NavLive() {
                     <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
                   </div>
                 ))
-              ) : (
+              ) : !String(generalStartNote ?? "").trim() ? (
                 <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -2220,7 +2285,7 @@ export default function NavLive() {
             </button>
 
             <button
-              style={{ ...overlayBtn, fontSize: 20 }}
+              style={{ ...overlayBtn, fontSize: 30 }}
               onPointerDown={tapHandler(recenter)}
               onTouchStart={tapHandler(recenter)}
               onClick={tapHandler(recenter)}
@@ -2230,13 +2295,33 @@ export default function NavLive() {
               🎯
             </button>
 
+            <button
+              style={{
+                ...overlayBtn,
+                fontSize: 36,
+                background: hasAnyNotes ? "#dbeafe" : "#ffffff",
+                color: "#111827",
+                border: hasAnyNotes ? "3px solid rgba(37,99,235,.45)" : "1px solid rgba(0,0,0,.12)",
+                boxShadow: hasAnyNotes ? "0 16px 34px rgba(37,99,235,.20)" : (overlayBtn as any).boxShadow,
+              }}
+              onPointerDown={tapHandler(() => setShowAllNotes(true))}
+              onTouchStart={tapHandler(() => setShowAllNotes(true))}
+              onClick={tapHandler(() => setShowAllNotes(true))}
+              aria-label="Voir les notes"
+              title={
+                hasAnyNotes
+                  ? `Voir les notes (${(String(generalStartNote ?? "").trim() ? 1 : 0) + allNotes.length})`
+                  : "Voir les notes"
+              }
+            >
+              📋
+            </button>
+
             {!audioOn ? (
               <button
                 style={{
                   ...overlayBtn,
-                  fontSize: 18,
-                  position: "relative",
-                  overflow: "hidden",
+                  fontSize: 30,
                 }}
                 onPointerDown={tapHandler(enableAudio)}
                 onTouchStart={tapHandler(enableAudio)}
@@ -2244,54 +2329,9 @@ export default function NavLive() {
                 aria-label="Activer l'audio"
                 title="Activer l'audio"
               >
-                <span style={{ position: "relative", zIndex: 1 }}>🔊</span>
-
-                <span
-                  style={{
-                    position: "absolute",
-                    right: 6,
-                    top: 6,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "999px",
-                    background: "#dc2626",
-                    boxShadow: "0 2px 6px rgba(0,0,0,.22)",
-                  }}
-                />
-                <span
-                  style={{
-                    position: "absolute",
-                    right: 8,
-                    top: 14,
-                    width: 14,
-                    height: 2.5,
-                    borderRadius: 999,
-                    background: "#ffffff",
-                    transform: "rotate(-45deg)",
-                    transformOrigin: "center",
-                    boxShadow: "0 1px 2px rgba(0,0,0,.18)",
-                  }}
-                />
+                🔇
               </button>
             ) : null}
-
-            <button
-              style={{
-                ...overlayBtn,
-                fontSize: 22,
-                background: hasAnyNotes ? "#fef3c7" : "#ffffff",
-                color: "#111827",
-                border: hasAnyNotes ? "1px solid rgba(245,158,11,.35)" : "1px solid rgba(0,0,0,.12)",
-                boxShadow: hasAnyNotes ? "0 16px 34px rgba(245,158,11,.20)" : (overlayBtn as any).boxShadow,
-              }}
-              onPointerDown={tapHandler(() => setShowAllNotes(true))}
-              onTouchStart={tapHandler(() => setShowAllNotes(true))}
-              onClick={tapHandler(() => setShowAllNotes(true))}
-              aria-label="Voir les notes"
-              title={hasAnyNotes ? `Voir les notes (${allNotes.length})` : "Voir les notes"}
-            >
-              📋
-            </button>
           </div>
         </div>
       </div>
