@@ -164,7 +164,8 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
 ========================= */
 
 function stopTypeOrDefault(t?: StopType | null): StopType {
-  return (t ?? "school") as StopType;
+  const x = (t ?? "school") as StopType;
+  return x;
 }
 
 function isBlockingType(t: StopType) {
@@ -423,7 +424,7 @@ function smoothAngle(prev: number, next: number) {
 }
 
 /* =========================
-   iOS tap helper
+   iOS tap helper (évite le “double tap”)
 ========================= */
 
 function tapHandler(fn: () => void) {
@@ -450,14 +451,17 @@ export default function NavLive() {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
 
+  // Audio state
   const [audioOn, setAudioOn] = useState(false);
 
+  // GPS (état affichage)
   const [me, setMe] = useState<LatLng | null>(null);
   const [acc, setAcc] = useState<number | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  // GPS refs (animation fluide)
   const targetPosRef = useRef<LatLng | null>(null);
   const animPosRef = useRef<LatLng | null>(null);
   const accRef = useRef<number | null>(null);
@@ -465,24 +469,30 @@ export default function NavLive() {
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
 
+  // Stops
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
 
+  // Notes (DB-driven)
   const [activeNote, setActiveNote] = useState<string | null>(null);
-  const noteShownForIdxRef = useRef<Set<number>>(new Set());
-  const noteLastShowAtRef = useRef<Record<number, number>>({});
+  const noteShownForIdxRef = useRef<Set<number>>(new Set()); // note_once
+  const noteLastShowAtRef = useRef<Record<number, number>>({}); // anti-spam si note_once=false
   const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
+  // ✅ Anti re-pop après "Continuer" OU auto-hide tant que le conducteur reste dans la zone
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
   const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
+  // ✅ Auto-hide overlay (non-bloquant) après 5 secondes
   const noteTimerRef = useRef<number | null>(null);
   const NOTE_AUTO_HIDE_MS = 5000;
 
+  // ✅ HOLD anti-ARRIVÉE pendant note non-bloquante (évite qu'elle se ferme à 45m)
   const noteHoldUntilRef = useRef<number>(0);
   const noteHoldIdxRef = useRef<number>(-1);
 
+  // ✅ Overlay "Toutes les notes"
   const [showAllNotes, setShowAllNotes] = useState(false);
   const allNotes = useMemo(() => {
     return points
@@ -505,7 +515,6 @@ export default function NavLive() {
       text: string;
     }[];
   }, [points]);
-  const hasAnyNotes = allNotes.length > 0;
 
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
@@ -514,21 +523,27 @@ export default function NavLive() {
     }
   }
 
+  // Pause (transfert/ecole)
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
 
+  // ✅ Prompt simple au démarrage (2 boutons)
   const [startPrompt, setStartPrompt] = useState(false);
 
+  // Trace officielle
   const [officialLine, setOfficialLine] = useState<[number, number][]>([]);
   const [hasOfficial, setHasOfficial] = useState(false);
 
+  // Distance à la polyline (info)
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
 
+  // Wake lock
   useWakeLock(running);
 
+  // Bandeau stop + sons
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
@@ -540,19 +555,30 @@ export default function NavLive() {
   }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
 
+  // Mode intelligent (skip arrêt manqué)
+  const stopTouchedRef = useRef(false);
+  const stopMinDistRef = useRef<number>(Infinity);
+
+  // Progression sur trace (idx)
   const traceIdxRef = useRef<number>(0);
+
+  // join logique
   const joinedTraceRef = useRef<boolean>(false);
 
+  // Anti-finish si arrêts trop proches
   const lastMeRef = useRef<LatLng | null>(null);
   const travelSinceTargetSetRef = useRef(0);
   const initialDistToTargetRef = useRef<number | null>(null);
   const MIN_TRAVEL_AFTER_TARGET_SET_M = 12;
   const ARRIVE_EPS_M = 5;
 
+  // Follow mode
   const followRef = useRef(true);
 
+  // ====== Tuning ======
   const ARRIVE_STOP_M_DEFAULT = 45;
   const ARRIVE_STOP_M_BLOCKING = 8;
+
   const DING_AT_M = 10;
 
   function warnStopMeters() {
@@ -560,6 +586,12 @@ export default function NavLive() {
     const kmh = v != null ? v * 3.6 : 0;
     return kmh >= 70 ? 300 : 175;
   }
+
+  // Arrêt manqué
+  const STOP_TOUCH_M = 35;
+  const STOP_SKIP_CONFIRM_M = 90;
+  const STOP_SKIP_MIN_SPEED = 1.2; // m/s
+  const STOP_SKIP_TRACE_AHEAD_PTS = 12;
 
   /* =========================
      Mapbox
@@ -643,7 +675,6 @@ export default function NavLive() {
       if (m.getLayer(id)) m.removeLayer(id);
     } catch {}
   }
-
   function safeRemoveSource(m: mapboxgl.Map, id: string) {
     try {
       if (m.getSource(id)) m.removeSource(id);
@@ -693,7 +724,7 @@ export default function NavLive() {
   const ACTIVE_HALO_WIDTH: any = ["interpolate", ["linear"], ["zoom"], 13, 12.2, 15, 16.8, 17, 22.6, 19, 28.2];
 
   /* =========================
-     Stop index sur trace
+     Stop index sur trace (monotone forward)
   ========================= */
 
   const stopIdxOnTrace = useMemo(() => {
@@ -731,60 +762,6 @@ export default function NavLive() {
     return out;
   }, [hasOfficial, officialLine, points]);
 
-  function computeStopIdxOnTraceFor(line: [number, number][], pts: StopPoint[]) {
-    if (!line.length || line.length < 2 || !pts.length) return [];
-
-    const out: number[] = [];
-    const AHEAD_WINDOW = Math.min(2500, Math.max(400, Math.floor(line.length * 0.25)));
-
-    const first = nearestLineIndex({ lat: pts[0].lat, lng: pts[0].lng }, line);
-    let prevIdx = clamp(first?.idx ?? 0, 0, line.length - 1);
-    out.push(prevIdx);
-
-    for (let i = 1; i < pts.length; i++) {
-      const p = pts[i];
-
-      const near = nearestLineIndexWindow(
-        { lat: p.lat, lng: p.lng },
-        line,
-        prevIdx,
-        Math.min(line.length - 1, prevIdx + AHEAD_WINDOW)
-      );
-
-      const pick = near ?? nearestLineIndex({ lat: p.lat, lng: p.lng }, line);
-      let idx = clamp(pick?.idx ?? prevIdx, 0, line.length - 1);
-
-      if (idx <= prevIdx) idx = Math.min(prevIdx + 1, line.length - 1);
-
-      out.push(idx);
-      prevIdx = idx;
-    }
-
-    return out;
-  }
-
-  function shouldOfferResumeOverlayAtLoad(pos: LatLng, line: [number, number][], pts: StopPoint[]) {
-    if (!line.length || line.length < 2 || !pts.length) return false;
-
-    const dLine = minDistanceToPolylineMeters(pos, line);
-    if (dLine == null || dLine > SNAP_MAX_DIST_M) return false;
-
-    const pick = nearestLineIndex(pos, line);
-    const traceIdxNow = clamp(Math.floor(pick?.idx ?? 0), 0, line.length - 1);
-
-    const stopIdxs = computeStopIdxOnTraceFor(line, pts);
-    const stop1TraceIdx = stopIdxs[0] ?? 0;
-
-    const RESUME_AFTER_STOP1_MARGIN_PTS = 10;
-
-    if (traceIdxNow <= stop1TraceIdx + RESUME_AFTER_STOP1_MARGIN_PTS) return false;
-
-    joinedTraceRef.current = true;
-    traceIdxRef.current = traceIdxNow;
-
-    return true;
-  }
-
   function getActiveSegmentIdxs(fullLineLen: number) {
     const last = Math.max(0, fullLineLen - 1);
 
@@ -798,7 +775,7 @@ export default function NavLive() {
     }
 
     const prevStopTrace = clamp(stopIdxOnTrace[targetIdx - 1] ?? 0, 0, last);
-    const curStopTrace = clamp(stopIdxOnTrace[targetIdx] ?? prevStopTrace + 1, 0, last);
+    const curStopTrace = clamp(stopIdxOnTrace[targetIdx] ?? (prevStopTrace + 1), 0, last);
 
     const start = Math.min(prevStopTrace, curStopTrace);
     const end = Math.max(prevStopTrace, curStopTrace);
@@ -826,6 +803,7 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
 
+    // TRACE COMPLETE
     if (fullLine && fullLine.length >= 2) {
       try {
         const geo = buildLineGeoJSON(fullLine);
@@ -851,6 +829,7 @@ export default function NavLive() {
       }
     }
 
+    // TRACE ACTIVE
     if (fullLine && fullLine.length >= 2) {
       try {
         const { start, end } = getActiveSegmentIdxs(fullLine.length);
@@ -878,6 +857,7 @@ export default function NavLive() {
       }
     }
 
+    // STOPS
     if (pts && pts.length > 0) {
       const fc = buildStopsGeoJSON(pts, targetIdx);
       try {
@@ -1139,6 +1119,8 @@ export default function NavLive() {
   }
 
   function resetStopGatesFor(idx: number) {
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
@@ -1153,11 +1135,14 @@ export default function NavLive() {
   }
 
   function resumeAfterNote() {
+    // éviter que la note se redéclenche
     noteSuppressForIdxRef.current.add(targetIdx);
 
+    // fermer la note
     setPaused(false);
     clearNoteNow();
 
+    // ✅ avancer au prochain arrêt comme si on l’avait atteint
     const nextIdx = targetIdx + 1;
 
     if (nextIdx < points.length) {
@@ -1173,6 +1158,9 @@ export default function NavLive() {
     setRunning(false);
     setFinished(false);
 
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+
     lastMeRef.current = null;
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
@@ -1183,13 +1171,16 @@ export default function NavLive() {
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
+
     setStartPrompt(false);
 
     nav("/");
   }
 
   /* =========================
-     Reprise “où je suis”
+     Reprise “où je suis” (sur trace)
+     - ignore la distance au prochain arrêt
+     - choisit le premier arrêt “devant” sur la polyline
   ========================= */
 
   function pickTargetIdxAheadFromTrace(traceIdxNow: number) {
@@ -1213,12 +1204,15 @@ export default function NavLive() {
 
     if (!p || !line || line.length < 2) return { ok: false, traceIdx: 0 };
 
+    // 1) distance à la polyline
     const d = minDistanceToPolylineMeters(p, line);
     if (d == null) return { ok: false, traceIdx: 0 };
 
+    // tolérance: si t’es proche on “join”
     if (d <= SNAP_MAX_DIST_M) {
       joinedTraceRef.current = true;
 
+      // snap index (fenêtre raisonnable)
       const pick =
         nearestLineIndexWindow(p, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(p, line);
 
@@ -1247,6 +1241,7 @@ export default function NavLive() {
 
     const idx = pickTargetIdxAheadFromTrace(traceIdxNow);
 
+    // fermer prompt + reprendre
     setStartPrompt(false);
     clearNoteNow();
     setShowAllNotes(false);
@@ -1263,8 +1258,10 @@ export default function NavLive() {
 
   function restartFromBeginning() {
     setStartPrompt(false);
+
     setTargetIdx(0);
 
+    // reset trace join (on laisse l’auto-join normal dans la loop)
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
 
@@ -1297,6 +1294,7 @@ export default function NavLive() {
     }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
+    // trace officielle (si dispo)
     const tr = await callFn<TraceResp>("circuits-api", { action: "get_latest_trace", circuit_id: circuitId });
     const line: [number, number][] = (tr.trail ?? []).map((p) => [p.lat, p.lng]);
 
@@ -1310,6 +1308,7 @@ export default function NavLive() {
 
     stopsRef.current = pts;
 
+    // si pas de trace officielle: on continue, mais la reprise “où je suis” sera disabled
     if (line.length >= 2) {
       setOfficialLine(line);
       setHasOfficial(true);
@@ -1330,6 +1329,9 @@ export default function NavLive() {
     stopBannerLastMRef.current = null;
     setStopBanner({ show: false, meters: 0, label: null, max: 150 });
 
+    stopTouchedRef.current = false;
+    stopMinDistRef.current = Infinity;
+
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
 
@@ -1343,8 +1345,6 @@ export default function NavLive() {
       ensureMeMarker();
       upsertActiveLineOnMap();
     }
-
-    return { pts, line };
   }
 
   /* =========================
@@ -1395,34 +1395,20 @@ export default function NavLive() {
       ensureMeMarker();
     }, 0);
 
-    const { pts, line } = await loadCircuit();
+    await loadCircuit();
 
     try {
       const m = mapRef.current;
       if (m) {
         followRef.current = true;
         const yOff = computeFollowOffsetPx(m);
-        (m as any).jumpTo({
-          center: [initial.lng, initial.lat],
-          zoom: 16.1,
-          bearing: 0,
-          pitch: 55,
-          offset: [0, yOff],
-        });
+        (m as any).jumpTo({ center: [initial.lng, initial.lat], zoom: 16.1, bearing: 0, pitch: 55, offset: [0, yOff] });
       }
     } catch {}
 
-    const offerResume = shouldOfferResumeOverlayAtLoad(initial, line, pts);
-
-    if (offerResume) {
-      setPaused(true);
-      setStartPrompt(true);
-    } else {
-      setPaused(false);
-      setStartPrompt(false);
-      setTargetIdx(0);
-      resetStopGatesFor(0);
-    }
+    // ✅ prompt simple (2 boutons)
+    setPaused(true);
+    setStartPrompt(true);
   }
 
   useEffect(() => {
@@ -1603,12 +1589,12 @@ export default function NavLive() {
   /* =========================
      Quand le targetIdx change
   ========================= */
-
   useEffect(() => {
     if (!running) return;
     upsertStopsOnMap();
     upsertActiveLineOnMap();
 
+    // ⚠️ si prompt démarrage affiché, on ne force pas paused=false
     if (!startPrompt) {
       setPaused(false);
       clearNoteNow();
@@ -1619,9 +1605,8 @@ export default function NavLive() {
   }, [targetIdx, running]);
 
   /* =========================
-     Distance à la trace
+     Distance à la trace (info)
   ========================= */
-
   useEffect(() => {
     if (!running) return;
     const p = animPosRef.current ?? me;
@@ -1633,15 +1618,15 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + sons + notes
+     Stops + bandeau + sons + skip + notes (DB)
   ========================= */
-
   useEffect(() => {
     if (!running) return;
     const p = animPosRef.current ?? me;
     if (!p || !target) return;
     if (finished) return;
 
+    // ✅ pendant le prompt démarrage, on bloque tout
     if (startPrompt) return;
 
     if (lastMeRef.current) travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
@@ -1661,8 +1646,10 @@ export default function NavLive() {
     if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
+    // ✅ aucun minimum: 0m
     const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
 
+    // Bandeau
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
       stopBannerLastMRef.current = null;
@@ -1677,6 +1664,7 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
+    // ✅✅ Audio d’approche PLUS TÔT (≈ 4 sec avant le bandeau, selon la vitesse)
     const VOICE_LEAD_SEC = 4.0;
     const spNow = speedRef.current ?? null;
     const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
@@ -1691,12 +1679,17 @@ export default function NavLive() {
       }
     }
 
+    // Ding proche
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
         sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
       }
     }
+
+    /* =========================
+       NOTES
+    ========================= */
 
     let didShowBlockingNoteThisTick = false;
 
@@ -1730,6 +1723,7 @@ export default function NavLive() {
           setPaused(true);
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
+
           didShowBlockingNoteThisTick = true;
         } else {
           clearNoteTimer();
@@ -1737,6 +1731,7 @@ export default function NavLive() {
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
 
+          // HOLD anti-arrivée
           noteHoldIdxRef.current = targetIdx;
           noteHoldUntilRef.current = Date.now() + NOTE_AUTO_HIDE_MS;
 
@@ -1748,12 +1743,45 @@ export default function NavLive() {
     }
 
     if (didShowBlockingNoteThisTick) return;
+
+    // Paused => on bloque skip/arrive
     if (pausedRef.current) return;
 
+    // ✅ Ne pas avancer l’arrêt pendant qu’une note non-bloquante est affichée (timer)
     if (!isBlockingType(t) && activeNote && noteHoldIdxRef.current === targetIdx) {
       if (Date.now() < (noteHoldUntilRef.current || 0)) return;
     }
 
+    // SKIP arrêt manqué
+    if (hasOfficial && officialLine.length >= 2) {
+      const speedNow = speedRef.current ?? null;
+
+      if (rawStopM < stopMinDistRef.current) stopMinDistRef.current = rawStopM;
+      if (stopMinDistRef.current <= STOP_TOUCH_M) stopTouchedRef.current = true;
+
+      const stopTraceIdx = stopIdxOnTrace[targetIdx] ?? 0;
+
+      const movingOk = speedNow == null ? true : speedNow >= STOP_SKIP_MIN_SPEED;
+      const clearlyPastStopOnTrace = traceIdxRef.current >= stopTraceIdx + STOP_SKIP_TRACE_AHEAD_PTS;
+      const clearlyMovingAway = stopTouchedRef.current && rawStopM >= STOP_SKIP_CONFIRM_M;
+
+      if (movingOk && clearlyMovingAway && clearlyPastStopOnTrace) {
+        const nextIdx = targetIdx + 1;
+        if (nextIdx < points.length) {
+          if (audioOn) sfx.play("stopMissed", { volume: 1.0, cooldownMs: 1200 });
+          setTargetIdx(nextIdx);
+
+          resetStopGatesFor(nextIdx);
+
+          clearNoteNow();
+          setPaused(false);
+
+          return;
+        }
+      }
+    }
+
+    // ARRIVÉE
     const initD = initialDistToTargetRef.current;
     const allowArrive =
       initD == null || initD > arriveM + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
@@ -1771,6 +1799,9 @@ export default function NavLive() {
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
 
+        stopTouchedRef.current = false;
+        stopMinDistRef.current = Infinity;
+
         clearNoteNow();
         setPaused(false);
 
@@ -1783,6 +1814,9 @@ export default function NavLive() {
         stopWarnMaxRef.current = null;
         stopDingRef.current = null;
         stopBannerLastMRef.current = null;
+
+        stopTouchedRef.current = false;
+        stopMinDistRef.current = Infinity;
 
         clearNoteNow();
         setPaused(false);
@@ -1901,6 +1935,7 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
+  // Overlay all notes styles
   const notesOverlayWrap: React.CSSProperties = {
     position: "absolute",
     inset: 0,
@@ -1965,6 +2000,7 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
+  // ✅ prompt démarrage (2 boutons)
   const startCard: React.CSSProperties = {
     width: "min(92vw, 760px)",
     background: "rgba(17,24,39,.97)",
@@ -1991,6 +2027,12 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
+  const startBtnPrimaryDisabled: React.CSSProperties = {
+    ...startBtnPrimary,
+    opacity: 0.45,
+    cursor: "not-allowed",
+  };
+
   const startBtnGhost: React.CSSProperties = {
     height: 60,
     borderRadius: 14,
@@ -2010,29 +2052,37 @@ export default function NavLive() {
     <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div ref={mapElRef} style={{ width: "100%", height: "100%" }} />
 
+      {/* ✅ Prompt simple (2 boutons) */}
       {startPrompt ? (
         <div style={noteOverlayWrap}>
           <div style={startCard}>
-            <div style={{ fontSize: 22, fontWeight: 950 }}>Reprendre le trajet ?</div>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>Démarrer le trajet</div>
             <div style={{ opacity: 0.92, lineHeight: 1.35, fontSize: 14 }}>
-              Tu sembles déjà être plus loin sur le trajet.
+              Choisis :
               <br />
-              <b>Reprendre où je suis</b>
+              <b>Reprendre où je suis</b> (si tu es sur la route)
               <br />
               ou <b>Départ du début</b>.
             </div>
 
+            {!canResumeOnTrace ? (
+              <div style={{ opacity: 0.82, fontSize: 12, lineHeight: 1.35 }}>
+                Reprise indisponible : trace officielle manquante.
+                <br />
+                (Le départ du début fonctionne quand même.)
+              </div>
+            ) : null}
+
             <div style={{ display: "grid", gap: 10, marginTop: 6 }}>
-              {canResumeOnTrace ? (
-                <button
-                  style={startBtnPrimary}
-                  onPointerDown={tapHandler(resumeWhereIAmOnTrace)}
-                  onTouchStart={tapHandler(resumeWhereIAmOnTrace)}
-                  onClick={tapHandler(resumeWhereIAmOnTrace)}
-                >
-                  Reprendre où je suis
-                </button>
-              ) : null}
+              <button
+                style={canResumeOnTrace ? startBtnPrimary : startBtnPrimaryDisabled}
+                disabled={!canResumeOnTrace}
+                onPointerDown={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
+                onTouchStart={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
+                onClick={tapHandler(() => (canResumeOnTrace ? resumeWhereIAmOnTrace() : void 0))}
+              >
+                Reprendre où je suis
+              </button>
 
               <button
                 style={startBtnGhost}
@@ -2047,6 +2097,7 @@ export default function NavLive() {
         </div>
       ) : null}
 
+      {/* Note overlay (note courante) */}
       {activeNote ? (
         <div style={noteOverlayWrap}>
           <div style={noteCard}>
@@ -2076,6 +2127,7 @@ export default function NavLive() {
         </div>
       ) : null}
 
+      {/* Overlay: toutes les notes */}
       {showAllNotes ? (
         <div style={notesOverlayWrap}>
           <div style={notesCard}>
@@ -2207,7 +2259,6 @@ export default function NavLive() {
             >
               +
             </button>
-
             <button
               style={overlayBtn}
               onPointerDown={tapHandler(() => (mapRef.current ? zoomOut() : void 0))}
@@ -2218,7 +2269,6 @@ export default function NavLive() {
             >
               −
             </button>
-
             <button
               style={{ ...overlayBtn, fontSize: 20 }}
               onPointerDown={tapHandler(recenter)}
@@ -2230,67 +2280,40 @@ export default function NavLive() {
               🎯
             </button>
 
-            {!audioOn ? (
-              <button
-                style={{
-                  ...overlayBtn,
-                  fontSize: 18,
-                  position: "relative",
-                  overflow: "hidden",
-                }}
-                onPointerDown={tapHandler(enableAudio)}
-                onTouchStart={tapHandler(enableAudio)}
-                onClick={tapHandler(enableAudio)}
-                aria-label="Activer l'audio"
-                title="Activer l'audio"
-              >
-                <span style={{ position: "relative", zIndex: 1 }}>🔊</span>
-
-                <span
-                  style={{
-                    position: "absolute",
-                    right: 6,
-                    top: 6,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "999px",
-                    background: "#dc2626",
-                    boxShadow: "0 2px 6px rgba(0,0,0,.22)",
-                  }}
-                />
-                <span
-                  style={{
-                    position: "absolute",
-                    right: 8,
-                    top: 14,
-                    width: 14,
-                    height: 2.5,
-                    borderRadius: 999,
-                    background: "#ffffff",
-                    transform: "rotate(-45deg)",
-                    transformOrigin: "center",
-                    boxShadow: "0 1px 2px rgba(0,0,0,.18)",
-                  }}
-                />
-              </button>
-            ) : null}
-
             <button
               style={{
                 ...overlayBtn,
-                fontSize: 22,
-                background: hasAnyNotes ? "#fef3c7" : "#ffffff",
-                color: "#111827",
-                border: hasAnyNotes ? "1px solid rgba(245,158,11,.35)" : "1px solid rgba(0,0,0,.12)",
-                boxShadow: hasAnyNotes ? "0 16px 34px rgba(245,158,11,.20)" : (overlayBtn as any).boxShadow,
+                fontSize: 18,
+                background: audioOn ? "#16a34a" : "#ffffff",
+                color: audioOn ? "#fff" : "#111827",
+                border: audioOn ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(0,0,0,.12)",
+                boxShadow: audioOn ? "0 16px 34px rgba(0,0,0,.22)" : (overlayBtn as any).boxShadow,
+              }}
+              onPointerDown={tapHandler(enableAudio)}
+              onTouchStart={tapHandler(enableAudio)}
+              onClick={tapHandler(enableAudio)}
+              aria-label={audioOn ? "Audio activé" : "Activer l'audio"}
+              title={audioOn ? "Audio activé" : "Activer l'audio"}
+            >
+              🔊
+            </button>
+
+            {/* ✅ bouton Notes */}
+            <button
+              style={{
+                ...overlayBtn,
+                fontSize: 16,
+                background: showAllNotes ? "#111827" : "#ffffff",
+                color: showAllNotes ? "#FBBF24" : "#111827",
+                border: showAllNotes ? "1px solid rgba(251,191,36,.28)" : "1px solid rgba(0,0,0,.12)",
               }}
               onPointerDown={tapHandler(() => setShowAllNotes(true))}
               onTouchStart={tapHandler(() => setShowAllNotes(true))}
               onClick={tapHandler(() => setShowAllNotes(true))}
-              aria-label="Voir les notes"
-              title={hasAnyNotes ? `Voir les notes (${allNotes.length})` : "Voir les notes"}
+              aria-label="Voir toutes les notes"
+              title="Voir toutes les notes"
             >
-              📋
+              📝
             </button>
           </div>
         </div>
@@ -2318,6 +2341,7 @@ export default function NavLive() {
         </div>
       ) : null}
 
+      {/* debug off-route (optionnel) */}
       {offRouteM != null && running ? (
         <div
           style={{
@@ -2334,7 +2358,7 @@ export default function NavLive() {
             fontWeight: 900,
             color: "#fff",
             pointerEvents: "none",
-            opacity: 0.0,
+            opacity: 0.0, // mets à 1.0 si tu veux l’afficher
           }}
         >
           Hors-trace: {Math.round(offRouteM)} m
