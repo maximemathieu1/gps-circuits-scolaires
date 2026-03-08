@@ -423,6 +423,18 @@ function smoothAngle(prev: number, next: number) {
   return prev + delta;
 }
 
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * clamp(t, 0, 1);
+}
+
+function angleDeltaDeg(a: number, b: number) {
+  return ((b - a + 540) % 360) - 180;
+}
+
+function lerpAngleDeg(current: number, target: number, t: number) {
+  return wrap360(current + angleDeltaDeg(current, target) * clamp(t, 0, 1));
+}
+
 /* =========================
    iOS tap helper
 ========================= */
@@ -465,6 +477,10 @@ export default function NavLive() {
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
+
+  const rawGpsRef = useRef<LatLng | null>(null);
+  const filteredGpsRef = useRef<LatLng | null>(null);
+  const lastFixAtRef = useRef<number>(0);
 
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
@@ -539,7 +555,7 @@ export default function NavLive() {
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
-    setStopBanner({ show: false, meters: 0, label: null, max: 175 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
@@ -555,14 +571,14 @@ export default function NavLive() {
 
   const followRef = useRef(true);
 
-  const ARRIVE_STOP_M_DEFAULT = 20;
+  const ARRIVE_STOP_M_DEFAULT = 45;
   const ARRIVE_STOP_M_BLOCKING = 8;
   const DING_AT_M = 5;
 
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    return kmh >= 68 ? 175 : 50;
+    return kmh >= 70 ? 300 : 175;
   }
 
   /* =========================
@@ -698,7 +714,6 @@ export default function NavLive() {
     if (!active) return [];
 
     const zoom = m.getZoom();
-
     const hidePx = zoom >= 18 ? 18 : zoom >= 17 ? 22 : zoom >= 16 ? 28 : zoom >= 15 ? 36 : 44;
 
     const activePt = m.project([active.lng, active.lat]);
@@ -954,12 +969,7 @@ export default function NavLive() {
           type: "circle",
           source: MAP_STOPS_SRC,
           paint: {
-            "circle-radius": [
-              "case",
-              ["==", ["get", "active"], 1],
-              18,
-              16,
-            ],
+            "circle-radius": 16,
             "circle-color": [
               "match",
               ["get", "t"],
@@ -975,12 +985,7 @@ export default function NavLive() {
               "#22c55e",
               "#ef4444",
             ],
-            "circle-stroke-width": [
-              "case",
-              ["==", ["get", "active"], 1],
-              7,
-              6,
-            ],
+            "circle-stroke-width": 6,
             "circle-stroke-color": "#ffffff",
           },
         });
@@ -991,21 +996,12 @@ export default function NavLive() {
           source: MAP_STOPS_SRC,
           layout: {
             "text-field": ["get", "num"],
-            "text-size": [
-              "case",
-              ["==", ["get", "active"], 1],
-              17,
-              16,
-            ],
+            "text-size": 16,
             "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
             "text-allow-overlap": true,
             "text-ignore-placement": true,
           },
-          paint: {
-            "text-color": "#ffffff",
-            "text-halo-color": "rgba(0,0,0,0.55)",
-            "text-halo-width": 1.6,
-          },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
         });
 
         applyActiveStopPriorityFilter();
@@ -1282,6 +1278,10 @@ export default function NavLive() {
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
 
+    rawGpsRef.current = null;
+    filteredGpsRef.current = null;
+    lastFixAtRef.current = 0;
+
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
@@ -1435,7 +1435,7 @@ export default function NavLive() {
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: 175 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
 
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
@@ -1489,6 +1489,9 @@ export default function NavLive() {
 
     targetPosRef.current = initial;
     animPosRef.current = initial;
+    rawGpsRef.current = initial;
+    filteredGpsRef.current = initial;
+    lastFixAtRef.current = performance.now();
 
     setMe(initial);
     setAcc(got.acc ?? null);
@@ -1564,7 +1567,52 @@ export default function NavLive() {
     watchId = watchPos(
       (p) => {
         const raw = { lat: p.lat, lng: p.lng };
-        targetPosRef.current = raw;
+        const now = performance.now();
+
+        const prevRaw = rawGpsRef.current;
+        const prevFiltered = filteredGpsRef.current;
+
+        rawGpsRef.current = raw;
+        lastFixAtRef.current = now;
+
+        const accNow = p.acc ?? accRef.current ?? 999;
+        const sp = p.speed ?? speedRef.current ?? 0;
+        const kmh = sp * 3.6;
+
+        let nextTarget = raw;
+
+        if (prevRaw && prevFiltered) {
+          const driftRaw = haversineMeters(prevRaw, raw);
+
+          const ignoreTinyJumpM =
+            kmh < 5
+              ? Math.min(5.5, Math.max(1.2, accNow * 0.14))
+              : kmh < 20
+              ? 1.2
+              : 0.9;
+
+          if (driftRaw < ignoreTinyJumpM) {
+            nextTarget = prevFiltered;
+          } else {
+            const alpha =
+              kmh >= 85 ? 0.96 :
+              kmh >= 65 ? 0.92 :
+              kmh >= 45 ? 0.84 :
+              kmh >= 25 ? 0.72 :
+              kmh >= 10 ? 0.52 :
+              0.34;
+
+            nextTarget = {
+              lat: lerp(prevFiltered.lat, raw.lat, alpha),
+              lng: lerp(prevFiltered.lng, raw.lng, alpha),
+            };
+          }
+        } else if (prevFiltered) {
+          nextTarget = prevFiltered;
+        }
+
+        filteredGpsRef.current = nextTarget;
+        targetPosRef.current = nextTarget;
 
         setAcc(p.acc ?? null);
         setSpeed(p.speed ?? null);
@@ -1575,7 +1623,6 @@ export default function NavLive() {
         if (hd != null && Number.isFinite(hd)) {
           setHeading(hd);
           headingRef.current = hd;
-          lastBearingRef.current = hd;
         } else {
           setHeading(null);
           headingRef.current = null;
@@ -1607,24 +1654,63 @@ export default function NavLive() {
       if (targetP) {
         const cur = animPosRef.current ?? targetP;
 
-        const k = 1 - Math.pow(0.001, dt);
-        const next = {
-          lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
-          lng: cur.lng + (targetP.lng - cur.lng) * clamp(k * 6.0, 0.05, 0.9),
+        const sp = speedRef.current ?? 0;
+        const kmh = sp * 3.6;
+
+        const followStrength =
+          kmh >= 90 ? 0.42 :
+          kmh >= 70 ? 0.34 :
+          kmh >= 50 ? 0.28 :
+          kmh >= 30 ? 0.22 :
+          kmh >= 15 ? 0.17 :
+          0.12;
+
+        const blend = 1 - Math.pow(1 - followStrength, dt * 60);
+
+        let next = {
+          lat: lerp(cur.lat, targetP.lat, blend),
+          lng: lerp(cur.lng, targetP.lng, blend),
         };
 
-        const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
-        if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
-          const d = haversineMeters(cur, next);
-          if (d >= 1.2) {
-            const b = bearingDeg(cur, next);
-            const prev = wrap360(lastBearingRef.current || 0);
-            lastBearingRef.current = wrap360(smoothAngle(prev, b));
-          }
-        } else if (headingRef.current != null && Number.isFinite(headingRef.current)) {
-          lastBearingRef.current = wrap360(headingRef.current);
+        const stepM = haversineMeters(cur, next);
+
+        const maxStepM =
+          kmh >= 90 ? 22 :
+          kmh >= 70 ? 16 :
+          kmh >= 50 ? 11 :
+          kmh >= 30 ? 7 :
+          kmh >= 15 ? 4.2 :
+          2.2;
+
+        if (stepM > maxStepM && stepM > 0.01) {
+          const ratio = maxStepM / stepM;
+          next = {
+            lat: lerp(cur.lat, next.lat, ratio),
+            lng: lerp(cur.lng, next.lng, ratio),
+          };
         }
+
+        const movingEnough = sp >= 0.6;
+        let desiredBearing = lastBearingRef.current || 0;
+
+        if (headingRef.current != null && Number.isFinite(headingRef.current)) {
+          desiredBearing = wrap360(headingRef.current);
+        } else if (movingEnough) {
+          const d = haversineMeters(cur, next);
+          if (d >= 0.8) {
+            desiredBearing = wrap360(bearingDeg(cur, next));
+          }
+        }
+
+        const bearingStrength =
+          kmh >= 90 ? 0.28 :
+          kmh >= 70 ? 0.23 :
+          kmh >= 50 ? 0.19 :
+          kmh >= 30 ? 0.16 :
+          0.11;
+
+        const bearingBlend = 1 - Math.pow(1 - bearingStrength, dt * 60);
+        lastBearingRef.current = lerpAngleDeg(lastBearingRef.current || 0, desiredBearing, bearingBlend);
 
         animPosRef.current = next;
         setMe(next);
@@ -1679,8 +1765,8 @@ export default function NavLive() {
 
           if (followRef.current) {
             const v = speedRef.current ?? null;
-            const kmh = v != null ? v * 3.6 : 0;
-            const computedZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+            const kmhFollow = v != null ? v * 3.6 : 0;
+            const computedZoom = kmhFollow >= 60 ? 17.2 : kmhFollow >= 25 ? 16.6 : 16.1;
 
             const zoomLocked = Date.now() < manualZoomUntilRef.current && manualZoomRef.current != null;
             const targetZoom = zoomLocked ? (manualZoomRef.current as number) : computedZoom;
@@ -1794,7 +1880,7 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    const VOICE_LEAD_SEC = 2.5;
+    const VOICE_LEAD_SEC = 4.0;
     const spNow = speedRef.current ?? null;
     const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
     const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
@@ -2283,7 +2369,7 @@ export default function NavLive() {
       <div style={topStack}>
         {stopBanner?.show &&
           (() => {
-            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 175;
+            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
             const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
