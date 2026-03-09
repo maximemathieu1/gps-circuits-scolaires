@@ -985,7 +985,7 @@ export default function NavLive() {
               "match",
               ["get", "t"],
               "school",
-              "#0000FF",
+              "#FF0000",
               "school_uturn",
               "#f97316",
               "uturn",
@@ -1005,7 +1005,7 @@ export default function NavLive() {
             "circle-stroke-color": [
               "case",
               ["==", ["get", "active"], 1],
-              "#FF0000",
+              "#FFFFFF",
               "rgba(255,255,255,0)",
             ],
           },
