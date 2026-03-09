@@ -172,10 +172,6 @@ function isBlockingType(t: StopType) {
   return t === "transfer" || t === "ecole";
 }
 
-function isSchoolLikeType(t: StopType) {
-  return t === "school" || t === "school_uturn";
-}
-
 function haloColorForType(t: StopType) {
   switch (t) {
     case "school":
@@ -469,6 +465,7 @@ export default function NavLive() {
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
+  const lastStopFilterAtRef = useRef<number>(0);
 
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
@@ -543,7 +540,7 @@ export default function NavLive() {
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 50 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
@@ -559,14 +556,14 @@ export default function NavLive() {
 
   const followRef = useRef(true);
 
-  const ARRIVE_STOP_M_DEFAULT = 45;
-  const ARRIVE_STOP_M_BLOCKING = 8;
-  const DING_AT_M = 5;
+  const ARRIVE_STOP_M_DEFAULT = 15;
+  const ARRIVE_STOP_M_BLOCKING = 15;
+  const DING_AT_M = 15;
 
   function warnStopMeters() {
     const v = speedRef.current ?? null;
     const kmh = v != null ? v * 3.6 : 0;
-    return kmh >= 70 ? 300 : 175;
+    return kmh > 70 ? 150 : 50;
   }
 
   /* =========================
@@ -701,10 +698,16 @@ export default function NavLive() {
     const active = pts[activeIdx];
     if (!active) return [];
 
-    const zoom = m.getZoom();
-    const hidePx = zoom >= 18 ? 18 : zoom >= 17 ? 22 : zoom >= 16 ? 28 : zoom >= 15 ? 36 : 44;
-
     const activePt = m.project([active.lng, active.lat]);
+    const zoom = m.getZoom();
+
+    const hidePx =
+      zoom >= 18 ? 26 :
+      zoom >= 17 ? 32 :
+      zoom >= 16 ? 40 :
+      zoom >= 15 ? 48 :
+      56;
+
     const toHide: string[] = [];
 
     for (let i = 0; i < pts.length; i++) {
@@ -730,9 +733,9 @@ export default function NavLive() {
     if (!m || !m.isStyleLoaded()) return;
     if (!stopsRef.current.length) return;
 
-    const hideIds = computeStopIdsToHideNearActive(m, stopsRef.current, targetIdx);
-
     try {
+      const hideIds = computeStopIdsToHideNearActive(m, stopsRef.current, targetIdx);
+
       if (hideIds.length > 0) {
         const filter = ["!", ["in", ["get", "stopId"], ["literal", hideIds]]];
 
@@ -905,7 +908,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#FFFFFF", "line-width": FULL_HALO_WIDTH, "line-opacity": 0.55, "line-blur": 0.25 },
+          paint: {
+            "line-color": "#ffffff",
+            "line-width": FULL_HALO_WIDTH,
+            "line-opacity": 0.22,
+            "line-blur": 0.2,
+          },
         });
 
         m.addLayer({
@@ -913,7 +921,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#2563eb", "line-width": FULL_LINE_WIDTH, "line-opacity": 0.58, "line-blur": 0.06 },
+          paint: {
+            "line-color": "#6b7280",
+            "line-width": FULL_LINE_WIDTH,
+            "line-opacity": 0.72,
+            "line-blur": 0.04,
+          },
         });
       } catch (e) {
         console.error("Mapbox apply full line failed:", e);
@@ -932,7 +945,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#93c5fd", "line-width": ACTIVE_HALO_WIDTH, "line-opacity": 0.28, "line-blur": 1.15 },
+          paint: {
+            "line-color": "#93c5fd",
+            "line-width": ACTIVE_HALO_WIDTH,
+            "line-opacity": 0.28,
+            "line-blur": 1.15,
+          },
         });
 
         m.addLayer({
@@ -940,7 +958,12 @@ export default function NavLive() {
           type: "line",
           source: MAP_ACTIVE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#1d4ed8", "line-width": ACTIVE_LINE_WIDTH, "line-opacity": 1.0, "line-blur": 0.02 },
+          paint: {
+            "line-color": "#1d4ed8",
+            "line-width": ACTIVE_LINE_WIDTH,
+            "line-opacity": 1.0,
+            "line-blur": 0.02,
+          },
         });
       } catch (e) {
         console.error("Mapbox apply active line failed:", e);
@@ -962,7 +985,7 @@ export default function NavLive() {
               "match",
               ["get", "t"],
               "school",
-              "#ef4444",
+              "#0000FF",
               "school_uturn",
               "#f97316",
               "uturn",
@@ -973,8 +996,18 @@ export default function NavLive() {
               "#22c55e",
               "#ef4444",
             ],
-            "circle-stroke-width": 6,
-            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": [
+              "case",
+              ["==", ["get", "active"], 1],
+              6,
+              0,
+            ],
+            "circle-stroke-color": [
+              "case",
+              ["==", ["get", "active"], 1],
+              "#FF0000",
+              "rgba(255,255,255,0)",
+            ],
           },
         });
 
@@ -1096,16 +1129,12 @@ export default function NavLive() {
 
     m.on("load", () => {
       applyOverlays();
-      applyActiveStopPriorityFilter();
       try {
         m.resize();
       } catch {}
     });
 
-    m.on("style.load", () => {
-      applyOverlays();
-      applyActiveStopPriorityFilter();
-    });
+    m.on("style.load", () => applyOverlays());
 
     return m;
   }
@@ -1416,7 +1445,7 @@ export default function NavLive() {
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
-    setStopBanner({ show: false, meters: 0, label: null, max: 150 });
+    setStopBanner({ show: false, meters: 0, label: null, max: 50 });
 
     travelSinceTargetSetRef.current = 0;
     initialDistToTargetRef.current = null;
@@ -1431,6 +1460,7 @@ export default function NavLive() {
       applyOverlays();
       ensureMeMarker();
       upsertActiveLineOnMap();
+      applyActiveStopPriorityFilter();
     }
 
     return { pts, line, generalNote };
@@ -1652,6 +1682,12 @@ export default function NavLive() {
 
           upsertActiveLineOnMap();
 
+          const nowFilter = performance.now();
+          if (nowFilter - lastStopFilterAtRef.current >= 180) {
+            lastStopFilterAtRef.current = nowFilter;
+            applyActiveStopPriorityFilter();
+          }
+
           if (m.isStyleLoaded()) {
             if (!m.getLayer(MAP_LINE_LAYER) && lineRef.current.length >= 2) applyOverlays();
             if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
@@ -1661,18 +1697,7 @@ export default function NavLive() {
           if (followRef.current) {
             const v = speedRef.current ?? null;
             const kmh = v != null ? v * 3.6 : 0;
-
-            let computedZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
-
-            if (target) {
-              const tt = stopTypeOrDefault(target.stop_type);
-              if (isSchoolLikeType(tt)) {
-                const dToTarget = haversineMeters(next, { lat: target.lat, lng: target.lng });
-
-                if (dToTarget <= 20) computedZoom = 18.8;
-                else if (dToTarget <= 35) computedZoom = Math.max(computedZoom, 17.8);
-              }
-            }
+            const computedZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
 
             const zoomLocked = Date.now() < manualZoomUntilRef.current && manualZoomRef.current != null;
             const targetZoom = zoomLocked ? (manualZoomRef.current as number) : computedZoom;
@@ -1706,7 +1731,7 @@ export default function NavLive() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, hasOfficial, targetIdx, stopIdxOnTrace, target]);
+  }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
 
   /* =========================
      Quand le targetIdx change
@@ -2275,7 +2300,7 @@ export default function NavLive() {
       <div style={topStack}>
         {stopBanner?.show &&
           (() => {
-            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 150;
+            const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 50;
             const meters = Number.isFinite(stopBanner.meters) ? stopBanner.meters : 0;
             const m = Math.max(0, Math.min(MAX, Math.round(meters)));
             const pct = Math.round((1 - m / MAX) * 100);
