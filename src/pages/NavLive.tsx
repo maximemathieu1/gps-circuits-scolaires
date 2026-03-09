@@ -19,7 +19,6 @@ type StopPoint = {
   label?: string | null;
   stop_type?: StopType | null;
 
-  // Notes
   note?: string | null;
   note_trigger_m?: number | null;
   note_once?: boolean | null;
@@ -33,9 +32,7 @@ type PointsResp = {
     lat: number;
     lng: number;
     label?: string | null;
-
     stop_type?: StopType | null;
-
     note?: string | null;
     note_trigger_m?: number | null;
     note_once?: boolean | null;
@@ -74,7 +71,11 @@ function watchPos(
         speed: (pos.coords as any).speed ?? null,
       }),
     (err) => onErr(err.message),
-    { enableHighAccuracy: true, maximumAge: 500, timeout: 15000 }
+    {
+      enableHighAccuracy: true,
+      maximumAge: 200,
+      timeout: 10000,
+    }
   );
 }
 
@@ -88,6 +89,14 @@ function projectMeters(originLat: number, p: LatLng) {
   const lng = (p.lng * Math.PI) / 180;
   const lat0 = (originLat * Math.PI) / 180;
   return { x: R * lng * Math.cos(lat0), y: R * lat };
+}
+
+function unprojectMeters(originLat: number, x: number, y: number): LatLng {
+  const R = 6371000;
+  const lat0 = (originLat * Math.PI) / 180;
+  const lat = (y / R) * (180 / Math.PI);
+  const lng = (x / (R * Math.cos(lat0))) * (180 / Math.PI);
+  return { lat, lng };
 }
 
 function distPointToSegmentMeters(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
@@ -158,6 +167,161 @@ function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: num
     }
   }
   return { idx: bestIdx, dist: best };
+}
+
+function projectPointOnSegment(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
+  const P = projectMeters(originLat, p);
+  const A = projectMeters(originLat, a);
+  const B = projectMeters(originLat, b);
+
+  const ABx = B.x - A.x;
+  const ABy = B.y - A.y;
+  const APx = P.x - A.x;
+  const APy = P.y - A.y;
+
+  const denom = ABx * ABx + ABy * ABy;
+  if (denom <= 1e-9) {
+    return {
+      point: a,
+      t: 0,
+      dist: Math.hypot(P.x - A.x, P.y - A.y),
+    };
+  }
+
+  const t = clamp((APx * ABx + APy * ABy) / denom, 0, 1);
+  const cx = A.x + t * ABx;
+  const cy = A.y + t * ABy;
+
+  return {
+    point: unprojectMeters(originLat, cx, cy),
+    t,
+    dist: Math.hypot(P.x - cx, P.y - cy),
+  };
+}
+
+function snapPointToPolyline(
+  me: LatLng,
+  line: [number, number][],
+  startIdx = 0,
+  endIdx = Math.max(0, line.length - 1)
+) {
+  if (!line || line.length < 2) return null;
+
+  const s = clamp(Math.floor(startIdx), 0, line.length - 2);
+  const e = clamp(Math.floor(endIdx), 1, line.length - 1);
+  const a = Math.min(s, e - 1);
+  const b = Math.max(s + 1, e);
+
+  let best: {
+    point: LatLng;
+    dist: number;
+    segIdx: number;
+    t: number;
+  } | null = null;
+
+  for (let i = a; i < b; i++) {
+    const A = { lat: line[i][0], lng: line[i][1] };
+    const B = { lat: line[i + 1][0], lng: line[i + 1][1] };
+    const pr = projectPointOnSegment(me.lat, me, A, B);
+
+    if (!best || pr.dist < best.dist) {
+      best = {
+        point: pr.point,
+        dist: pr.dist,
+        segIdx: i,
+        t: pr.t,
+      };
+    }
+  }
+
+  if (!best) return null;
+
+  return {
+    point: best.point,
+    dist: best.dist,
+    segIdx: best.segIdx,
+    approxIdx: best.segIdx + best.t,
+  };
+}
+
+function movePointMeters(p: LatLng, bearingDegValue: number, meters: number): LatLng {
+  const R = 6371000;
+  const br = (bearingDegValue * Math.PI) / 180;
+  const lat1 = (p.lat * Math.PI) / 180;
+  const lon1 = (p.lng * Math.PI) / 180;
+  const d = meters / R;
+
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(br));
+  const lon2 =
+    lon1 +
+    Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+
+  return {
+    lat: (lat2 * 180) / Math.PI,
+    lng: (lon2 * 180) / Math.PI,
+  };
+}
+
+function interpolateLatLng(a: LatLng, b: LatLng, t: number): LatLng {
+  const tt = clamp(t, 0, 1);
+  return {
+    lat: a.lat + (b.lat - a.lat) * tt,
+    lng: a.lng + (b.lng - a.lng) * tt,
+  };
+}
+
+function advanceAlongPolyline(line: [number, number][], approxIdx: number, metersAhead: number): { point: LatLng; approxIdx: number } | null {
+  if (!line || line.length < 2) return null;
+
+  let idx = clamp(approxIdx, 0, line.length - 1);
+  let i = Math.floor(idx);
+  let frac = idx - i;
+
+  if (i >= line.length - 1) {
+    const last = line[line.length - 1];
+    return { point: { lat: last[0], lng: last[1] }, approxIdx: line.length - 1 };
+  }
+
+  let remaining = Math.max(0, metersAhead);
+
+  let a: LatLng = { lat: line[i][0], lng: line[i][1] };
+  let b: LatLng = { lat: line[i + 1][0], lng: line[i + 1][1] };
+
+  let segLen = haversineMeters(a, b);
+  if (segLen < 0.01) segLen = 0.01;
+
+  let onSeg = interpolateLatLng(a, b, frac);
+  let distLeftOnSeg = haversineMeters(onSeg, b);
+
+  if (remaining <= distLeftOnSeg) {
+    const t = frac + (1 - frac) * (remaining / distLeftOnSeg || 0);
+    return { point: interpolateLatLng(a, b, t), approxIdx: i + t };
+  }
+
+  remaining -= distLeftOnSeg;
+  i += 1;
+
+  while (i < line.length - 1) {
+    a = { lat: line[i][0], lng: line[i][1] };
+    b = { lat: line[i + 1][0], lng: line[i + 1][1] };
+    segLen = haversineMeters(a, b);
+
+    if (segLen < 0.01) {
+      i += 1;
+      continue;
+    }
+
+    if (remaining <= segLen) {
+      const t = remaining / segLen;
+      return { point: interpolateLatLng(a, b, t), approxIdx: i + t };
+    }
+
+    remaining -= segLen;
+    i += 1;
+  }
+
+  const last = line[line.length - 1];
+  return { point: { lat: last[0], lng: last[1] }, approxIdx: line.length - 1 };
 }
 
 /* =========================
@@ -237,7 +401,7 @@ function bannerIconForType(t: StopType) {
 }
 
 /* =========================
-   MP3 SFX (Safari iOS + Fully Android)
+   MP3 SFX
 ========================= */
 
 const SOUND_URLS = {
@@ -361,7 +525,7 @@ function audioKeyForStopType(t: StopType): SoundKey {
 }
 
 /* =========================
-   Fullscreen helpers (best-effort web)
+   Fullscreen helpers
 ========================= */
 
 async function tryEnterFullscreen() {
@@ -459,13 +623,19 @@ export default function NavLive() {
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const rawGpsRef = useRef<LatLng | null>(null);
+  const rawGpsAtRef = useRef<number>(0);
   const targetPosRef = useRef<LatLng | null>(null);
   const animPosRef = useRef<LatLng | null>(null);
+
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
   const headingRef = useRef<number | null>(null);
   const lastBearingRef = useRef<number>(0);
   const lastStopFilterAtRef = useRef<number>(0);
+
+  const snappedApproxIdxRef = useRef<number>(0);
+  const snappedPointRef = useRef<LatLng | null>(null);
 
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
@@ -546,7 +716,6 @@ export default function NavLive() {
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const stopBannerLastMRef = useRef<number | null>(null);
 
@@ -615,9 +784,7 @@ export default function NavLive() {
 
     const mixed = baseZoom + (APPROACH_MAX_ZOOM - baseZoom) * progress;
 
-    if (dStop <= arriveM + 3) {
-      return Math.max(mixed, 18.15);
-    }
+    if (dStop <= arriveM + 3) return Math.max(mixed, 18.15);
 
     return mixed;
   }
@@ -645,12 +812,21 @@ export default function NavLive() {
   const MAP_STOPS_LAYER = "stops-layer";
   const MAP_STOPS_NUM_LAYER = "stops-num-layer";
 
+  const MAP_ACTIVE_STOP_SRC = "active-stop-src";
+  const MAP_ACTIVE_STOP_HALO = "active-stop-halo";
+  const MAP_ACTIVE_STOP_FILL = "active-stop-fill";
+  const MAP_ACTIVE_STOP_NUM = "active-stop-num";
+
   const ACTIVE_MIN_POINTS = 12;
 
   const JOIN_DIST_M = 35;
   const SNAP_MAX_DIST_M = 55;
+  const SNAP_VISUAL_MAX_DIST_M = 70;
   const SNAP_AHEAD_PTS = 240;
   const SNAP_BACK_PTS = 12;
+
+  const PREDICT_AHEAD_MAX_MS = 950;
+  const SNAP_DISPLAY_AHEAD_SEC = 0.35;
 
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
@@ -730,7 +906,7 @@ export default function NavLive() {
     return buildLineGeoJSON(slice);
   }
 
-  function buildStopsGeoJSON(pts: StopPoint[], activeIdx: number) {
+  function buildStopsGeoJSON(pts: StopPoint[]) {
     return {
       type: "FeatureCollection" as const,
       features: pts.map((p, i) => ({
@@ -740,11 +916,32 @@ export default function NavLive() {
           idx: i,
           num: String(i + 1),
           label: p.label ?? "",
-          active: i === activeIdx ? 1 : 0,
           t: stopTypeOrDefault(p.stop_type),
         },
         geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
       })),
+    };
+  }
+
+  function buildActiveStopGeoJSON(pts: StopPoint[], activeIdx: number) {
+    const p = pts[activeIdx];
+    if (!p) return { type: "FeatureCollection" as const, features: [] };
+
+    return {
+      type: "FeatureCollection" as const,
+      features: [
+        {
+          type: "Feature" as const,
+          properties: {
+            stopId: String(activeIdx),
+            idx: activeIdx,
+            num: String(activeIdx + 1),
+            label: p.label ?? "",
+            t: stopTypeOrDefault(p.stop_type),
+          },
+          geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
+        },
+      ],
     };
   }
 
@@ -763,7 +960,6 @@ export default function NavLive() {
 
     for (let i = 0; i < pts.length; i++) {
       if (i === activeIdx) continue;
-
       const p = pts[i];
       const pt = m.project([p.lng, p.lat]);
 
@@ -771,9 +967,7 @@ export default function NavLive() {
       const dy = pt.y - activePt.y;
       const d = Math.hypot(dx, dy);
 
-      if (d < hidePx) {
-        toHide.push(String(i));
-      }
+      if (d < hidePx) toHide.push(String(i));
     }
 
     return toHide;
@@ -790,19 +984,11 @@ export default function NavLive() {
       if (hideIds.length > 0) {
         const filter = ["!", ["in", ["get", "stopId"], ["literal", hideIds]]];
 
-        if (m.getLayer(MAP_STOPS_LAYER)) {
-          m.setFilter(MAP_STOPS_LAYER, filter as any);
-        }
-        if (m.getLayer(MAP_STOPS_NUM_LAYER)) {
-          m.setFilter(MAP_STOPS_NUM_LAYER, filter as any);
-        }
+        if (m.getLayer(MAP_STOPS_LAYER)) m.setFilter(MAP_STOPS_LAYER, filter as any);
+        if (m.getLayer(MAP_STOPS_NUM_LAYER)) m.setFilter(MAP_STOPS_NUM_LAYER, filter as any);
       } else {
-        if (m.getLayer(MAP_STOPS_LAYER)) {
-          m.setFilter(MAP_STOPS_LAYER, null as any);
-        }
-        if (m.getLayer(MAP_STOPS_NUM_LAYER)) {
-          m.setFilter(MAP_STOPS_NUM_LAYER, null as any);
-        }
+        if (m.getLayer(MAP_STOPS_LAYER)) m.setFilter(MAP_STOPS_LAYER, null as any);
+        if (m.getLayer(MAP_STOPS_NUM_LAYER)) m.setFilter(MAP_STOPS_NUM_LAYER, null as any);
       }
     } catch (e) {
       console.error("applyActiveStopPriorityFilter failed:", e);
@@ -904,6 +1090,7 @@ export default function NavLive() {
 
     joinedTraceRef.current = true;
     traceIdxRef.current = traceIdxNow;
+    snappedApproxIdxRef.current = traceIdxNow;
 
     return true;
   }
@@ -948,6 +1135,11 @@ export default function NavLive() {
     safeRemoveLayer(m, MAP_STOPS_NUM_LAYER);
     safeRemoveLayer(m, MAP_STOPS_LAYER);
     safeRemoveSource(m, MAP_STOPS_SRC);
+
+    safeRemoveLayer(m, MAP_ACTIVE_STOP_NUM);
+    safeRemoveLayer(m, MAP_ACTIVE_STOP_FILL);
+    safeRemoveLayer(m, MAP_ACTIVE_STOP_HALO);
+    safeRemoveSource(m, MAP_ACTIVE_STOP_SRC);
 
     if (fullLine && fullLine.length >= 2) {
       try {
@@ -1012,7 +1204,7 @@ export default function NavLive() {
           paint: {
             "line-color": "#1d4ed8",
             "line-width": ACTIVE_LINE_WIDTH,
-            "line-opacity": 1.0,
+            "line-opacity": 1,
             "line-blur": 0.02,
           },
         });
@@ -1022,7 +1214,9 @@ export default function NavLive() {
     }
 
     if (pts && pts.length > 0) {
-      const fc = buildStopsGeoJSON(pts, targetIdx);
+      const fc = buildStopsGeoJSON(pts);
+      const activeFc = buildActiveStopGeoJSON(pts, targetIdx);
+
       try {
         m.addSource(MAP_STOPS_SRC, { type: "geojson", data: fc as any });
 
@@ -1047,18 +1241,8 @@ export default function NavLive() {
               "#22c55e",
               "#ef4444",
             ],
-            "circle-stroke-width": [
-              "case",
-              ["==", ["get", "active"], 1],
-              6,
-              0,
-            ],
-            "circle-stroke-color": [
-              "case",
-              ["==", ["get", "active"], 1],
-              "#1d4ed8",
-              "rgba(255,255,255,0)",
-            ],
+            "circle-stroke-width": 0,
+            "circle-stroke-color": "rgba(255,255,255,0)",
           },
         });
 
@@ -1076,6 +1260,78 @@ export default function NavLive() {
           paint: { "text-color": "#ffffff", "text-halo-color": "rgba(0,0,0,0.55)", "text-halo-width": 1.6 },
         });
 
+        m.addSource(MAP_ACTIVE_STOP_SRC, { type: "geojson", data: activeFc as any });
+
+        m.addLayer({
+          id: MAP_ACTIVE_STOP_HALO,
+          type: "circle",
+          source: MAP_ACTIVE_STOP_SRC,
+          paint: {
+            "circle-radius": 26,
+            "circle-color": [
+              "match",
+              ["get", "t"],
+              "school",
+              "#FBBF24",
+              "school_uturn",
+              "#f97316",
+              "uturn",
+              "#a855f7",
+              "transfer",
+              "#06b6d4",
+              "ecole",
+              "#22c55e",
+              "#93c5fd",
+            ],
+            "circle-opacity": 0.32,
+            "circle-blur": 0.65,
+          },
+        });
+
+        m.addLayer({
+          id: MAP_ACTIVE_STOP_FILL,
+          type: "circle",
+          source: MAP_ACTIVE_STOP_SRC,
+          paint: {
+            "circle-radius": 16,
+            "circle-color": [
+              "match",
+              ["get", "t"],
+              "school",
+              "#FF0000",
+              "school_uturn",
+              "#f97316",
+              "uturn",
+              "#a855f7",
+              "transfer",
+              "#06b6d4",
+              "ecole",
+              "#22c55e",
+              "#ef4444",
+            ],
+            "circle-stroke-width": 6,
+            "circle-stroke-color": "#1d4ed8",
+          },
+        });
+
+        m.addLayer({
+          id: MAP_ACTIVE_STOP_NUM,
+          type: "symbol",
+          source: MAP_ACTIVE_STOP_SRC,
+          layout: {
+            "text-field": ["get", "num"],
+            "text-size": 16,
+            "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+            "text-allow-overlap": true,
+            "text-ignore-placement": true,
+          },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(0,0,0,0.55)",
+            "text-halo-width": 1.8,
+          },
+        });
+
         applyActiveStopPriorityFilter();
       } catch (e) {
         console.error("Mapbox apply stops failed:", e);
@@ -1089,12 +1345,25 @@ export default function NavLive() {
 
     try {
       const src = m.getSource(MAP_STOPS_SRC) as mapboxgl.GeoJSONSource | undefined;
-      const data = buildStopsGeoJSON(stopsRef.current, targetIdx) as any;
+      const activeSrc = m.getSource(MAP_ACTIVE_STOP_SRC) as mapboxgl.GeoJSONSource | undefined;
 
-      if (src) {
-        src.setData(data);
-        if (!m.getLayer(MAP_STOPS_LAYER) || !m.getLayer(MAP_STOPS_NUM_LAYER)) applyOverlays();
-      } else {
+      const data = buildStopsGeoJSON(stopsRef.current) as any;
+      const activeData = buildActiveStopGeoJSON(stopsRef.current, targetIdx) as any;
+
+      if (src) src.setData(data);
+      else {
+        applyOverlays();
+        return;
+      }
+
+      if (activeSrc) activeSrc.setData(activeData);
+      else {
+        applyOverlays();
+        return;
+      }
+
+      if (!m.getLayer(MAP_STOPS_LAYER) || !m.getLayer(MAP_STOPS_NUM_LAYER)) applyOverlays();
+      if (!m.getLayer(MAP_ACTIVE_STOP_HALO) || !m.getLayer(MAP_ACTIVE_STOP_FILL) || !m.getLayer(MAP_ACTIVE_STOP_NUM)) {
         applyOverlays();
       }
 
@@ -1144,6 +1413,7 @@ export default function NavLive() {
       try {
         if (m.getLayer(MAP_ACTIVE_HALO)) m.setPaintProperty(MAP_ACTIVE_HALO, "line-color", halo);
         if (m.getLayer(MAP_ACTIVE_LAYER)) m.setPaintProperty(MAP_ACTIVE_LAYER, "line-color", lineCol);
+        if (m.getLayer(MAP_ACTIVE_STOP_HALO)) m.setPaintProperty(MAP_ACTIVE_STOP_HALO, "circle-color", halo);
       } catch {}
     } catch (e) {
       console.error("upsertActiveLineOnMap failed:", e);
@@ -1267,7 +1537,7 @@ export default function NavLive() {
     if (audioOn) return;
     sfx.unlock();
     sfx.preloadAll();
-    sfx.play("audioOn", { volume: 1.0, cooldownMs: 0 });
+    sfx.play("audioOn", { volume: 1, cooldownMs: 0 });
     setAudioOn(true);
   }
 
@@ -1287,8 +1557,8 @@ export default function NavLive() {
       } catch {}
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "fr-CA";
-      u.rate = 1.0;
-      u.pitch = 1.0;
+      u.rate = 1;
+      u.pitch = 1;
       s.speak(u);
     } catch {}
   }
@@ -1330,7 +1600,7 @@ export default function NavLive() {
       setTargetIdx(nextIdx);
       resetStopGatesFor(nextIdx);
     } else {
-      if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
+      if (audioOn) sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
       setFinished(true);
     }
   }
@@ -1345,6 +1615,8 @@ export default function NavLive() {
 
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
+    snappedApproxIdxRef.current = 0;
+    snappedPointRef.current = null;
 
     setPaused(false);
     clearNoteNow();
@@ -1386,11 +1658,13 @@ export default function NavLive() {
     if (d <= SNAP_MAX_DIST_M) {
       joinedTraceRef.current = true;
 
-      const pick =
-        nearestLineIndexWindow(p, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(p, line);
+      const snapped = snapPointToPolyline(p, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS));
+      const idx = clamp(Math.floor(snapped?.approxIdx ?? 0), 0, line.length - 1);
 
-      const idx = clamp(Math.floor(pick?.idx ?? 0), 0, line.length - 1);
       traceIdxRef.current = idx;
+      snappedApproxIdxRef.current = snapped?.approxIdx ?? idx;
+      snappedPointRef.current = snapped?.point ?? p;
+
       return { ok: true, traceIdx: idx };
     }
 
@@ -1435,6 +1709,8 @@ export default function NavLive() {
 
     joinedTraceRef.current = false;
     traceIdxRef.current = 0;
+    snappedApproxIdxRef.current = 0;
+    snappedPointRef.current = null;
 
     resetStopGatesFor(0);
 
@@ -1493,6 +1769,8 @@ export default function NavLive() {
 
     traceIdxRef.current = 0;
     joinedTraceRef.current = false;
+    snappedApproxIdxRef.current = 0;
+    snappedPointRef.current = null;
     lastActiveUpdateRef.current = { t: 0, targetIdx: -1 };
 
     stopWarnRef.current = null;
@@ -1518,6 +1796,7 @@ export default function NavLive() {
       applyOverlays();
       ensureMeMarker();
       upsertActiveLineOnMap();
+      upsertStopsOnMap();
       applyActiveStopPriorityFilter();
     }
 
@@ -1550,12 +1829,14 @@ export default function NavLive() {
             acc: p.coords.accuracy ?? null,
           }),
         (e) => reject(new Error(e.message)),
-        { enableHighAccuracy: true, maximumAge: 500, timeout: 15000 }
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
       );
     });
 
     const initial = { lat: got.lat, lng: got.lng };
 
+    rawGpsRef.current = initial;
+    rawGpsAtRef.current = Date.now();
     targetPosRef.current = initial;
     animPosRef.current = initial;
 
@@ -1618,8 +1899,7 @@ export default function NavLive() {
       setErr(e?.message || "Erreur démarrage.");
       setRunning(false);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [circuitId]);
+  }, [circuitId, running]);
 
   /* =========================
      GPS tracking
@@ -1633,7 +1913,8 @@ export default function NavLive() {
     watchId = watchPos(
       (p) => {
         const raw = { lat: p.lat, lng: p.lng };
-        targetPosRef.current = raw;
+        rawGpsRef.current = raw;
+        rawGpsAtRef.current = Date.now();
 
         setAcc(p.acc ?? null);
         setSpeed(p.speed ?? null);
@@ -1672,27 +1953,91 @@ export default function NavLive() {
       const dt = Math.max(0, Math.min(0.05, (t - lastT) / 1000));
       lastT = t;
 
-      const targetP = targetPosRef.current;
-      if (targetP) {
-        const cur = animPosRef.current ?? targetP;
+      const raw = rawGpsRef.current;
+      if (raw) {
+        let displayTarget = raw;
 
+        const rawAgeMs = Date.now() - (rawGpsAtRef.current || Date.now());
+        const predictMs = clamp(rawAgeMs, 0, PREDICT_AHEAD_MAX_MS);
+        const sp = Math.max(0, speedRef.current ?? 0);
+        const hd = headingRef.current ?? lastBearingRef.current ?? 0;
+
+        let predicted = raw;
+        if (sp > 0.7 && Number.isFinite(hd)) {
+          predicted = movePointMeters(raw, hd, sp * (predictMs / 1000));
+        }
+
+        if (hasOfficial && lineRef.current.length >= 2) {
+          const line = lineRef.current;
+
+          if (!joinedTraceRef.current) {
+            const d = minDistanceToPolylineMeters(predicted, line);
+            if (d != null && d <= JOIN_DIST_M) {
+              joinedTraceRef.current = true;
+
+              const snapped = snapPointToPolyline(predicted, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS));
+              if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
+                traceIdxRef.current = clamp(Math.floor(snapped.approxIdx), 0, line.length - 1);
+                snappedApproxIdxRef.current = snapped.approxIdx;
+                snappedPointRef.current = snapped.point;
+              }
+            }
+          }
+
+          if (joinedTraceRef.current) {
+            const curApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
+            const start = Math.max(0, Math.floor(curApprox - SNAP_BACK_PTS));
+            const end = Math.min(line.length - 1, Math.ceil(curApprox + SNAP_AHEAD_PTS));
+
+            const snapped =
+              snapPointToPolyline(predicted, line, start, end) ??
+              snapPointToPolyline(predicted, line, Math.max(0, Math.floor(curApprox) - 4), Math.min(line.length - 1, Math.ceil(curApprox) + SNAP_AHEAD_PTS));
+
+            if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
+              const minAllowed = Math.max(0, curApprox - 3);
+              const maxAllowed = Math.min(line.length - 1, curApprox + SNAP_AHEAD_PTS);
+              const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
+
+              snappedApproxIdxRef.current = nextApprox;
+              traceIdxRef.current = clamp(Math.floor(nextApprox), 0, line.length - 1);
+              snappedPointRef.current = snapped.point;
+
+              const forwardMeters = Math.min(12, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+              const ahead = advanceAlongPolyline(line, nextApprox, forwardMeters);
+              displayTarget = ahead?.point ?? snapped.point;
+            } else {
+              displayTarget = predicted;
+            }
+          } else {
+            displayTarget = predicted;
+          }
+        } else {
+          displayTarget = predicted;
+        }
+
+        targetPosRef.current = displayTarget;
+
+        const cur = animPosRef.current ?? displayTarget;
+        const smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
         const k = 1 - Math.pow(0.001, dt);
+        const alpha = clamp(k * smoothGain, 0.08, 0.94);
+
         const next = {
-          lat: cur.lat + (targetP.lat - cur.lat) * clamp(k * 6.0, 0.05, 0.9),
-          lng: cur.lng + (targetP.lng - cur.lng) * clamp(k * 6.0, 0.05, 0.9),
+          lat: cur.lat + (displayTarget.lat - cur.lat) * alpha,
+          lng: cur.lng + (displayTarget.lng - cur.lng) * alpha,
         };
 
-        const sp = speedRef.current ?? null;
-        const movingEnough = sp == null ? true : sp >= 0.6;
+        const movingEnough = sp >= 0.6;
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
           const d = haversineMeters(cur, next);
-          if (d >= 1.2) {
+          if (d >= 0.7) {
             const b = bearingDeg(cur, next);
             const prev = wrap360(lastBearingRef.current || 0);
             lastBearingRef.current = wrap360(smoothAngle(prev, b));
           }
         } else if (headingRef.current != null && Number.isFinite(headingRef.current)) {
-          lastBearingRef.current = wrap360(headingRef.current);
+          const prev = wrap360(lastBearingRef.current || headingRef.current);
+          lastBearingRef.current = wrap360(smoothAngle(prev, headingRef.current));
         }
 
         animPosRef.current = next;
@@ -1701,42 +2046,6 @@ export default function NavLive() {
         const m = ensureMap();
         if (m) {
           ensureMeMarker()?.setLngLat([next.lng, next.lat]);
-
-          if (hasOfficial && lineRef.current.length >= 2) {
-            const line = lineRef.current;
-
-            if (!joinedTraceRef.current) {
-              const d = minDistanceToPolylineMeters(next, line);
-              if (d != null && d <= JOIN_DIST_M) {
-                joinedTraceRef.current = true;
-
-                const pick =
-                  nearestLineIndexWindow(next, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS)) ?? nearestLineIndex(next, line);
-
-                if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                  traceIdxRef.current = clamp(pick.idx, 0, line.length - 1);
-                } else {
-                  traceIdxRef.current = 0;
-                }
-              } else {
-                traceIdxRef.current = 0;
-              }
-            } else {
-              const curIdx = traceIdxRef.current;
-              const start = Math.max(0, curIdx - SNAP_BACK_PTS);
-              const end = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
-
-              const pick =
-                nearestLineIndexWindow(next, line, start, end) ??
-                nearestLineIndexWindow(next, line, curIdx, Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS));
-
-              if (pick && pick.dist <= SNAP_MAX_DIST_M) {
-                const minAllowed = Math.max(0, curIdx - 3);
-                const maxAllowed = Math.min(line.length - 1, curIdx + SNAP_AHEAD_PTS);
-                traceIdxRef.current = clamp(pick.idx, minAllowed, maxAllowed);
-              }
-            }
-          }
 
           upsertActiveLineOnMap();
 
@@ -1750,6 +2059,7 @@ export default function NavLive() {
             if (!m.getLayer(MAP_LINE_LAYER) && lineRef.current.length >= 2) applyOverlays();
             if (!m.getLayer(MAP_STOPS_LAYER) && stopsRef.current.length > 0) applyOverlays();
             if (!m.getLayer(MAP_ACTIVE_LAYER) && lineRef.current.length >= 2) applyOverlays();
+            if (!m.getLayer(MAP_ACTIVE_STOP_HALO) && stopsRef.current.length > 0) applyOverlays();
           }
 
           if (followRef.current) {
@@ -1772,7 +2082,7 @@ export default function NavLive() {
                 pitch: 55,
                 bearing: b,
                 offset: [0, yOff],
-                duration: 260,
+                duration: 140,
                 easing: (x: number) => x,
                 essential: true,
               });
@@ -1786,7 +2096,6 @@ export default function NavLive() {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
 
   /* =========================
@@ -1804,8 +2113,7 @@ export default function NavLive() {
     }
 
     noteSuppressForIdxRef.current.delete(targetIdx);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetIdx, running, showGeneralStartNote]);
+  }, [targetIdx, running, showGeneralStartNote, startPrompt]);
 
   /* =========================
      Distance à la trace
@@ -1813,11 +2121,11 @@ export default function NavLive() {
 
   useEffect(() => {
     if (!running) return;
-    const p = animPosRef.current ?? me;
-    if (!p) return;
+    const raw = rawGpsRef.current ?? me;
+    if (!raw) return;
     if (!hasOfficial || officialLine.length < 2) return;
 
-    const dLine = minDistanceToPolylineMeters(p, officialLine);
+    const dLine = minDistanceToPolylineMeters(raw, officialLine);
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine]);
 
@@ -1894,14 +2202,14 @@ export default function NavLive() {
       if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
         stopWarnRef.current = targetIdx;
         const key = audioKeyForStopType(t);
-        sfx.play(key, { volume: 1.0, cooldownMs: 2500 });
+        sfx.play(key, { volume: 1, cooldownMs: 2500 });
       }
     }
 
     if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
       if (stopDingRef.current !== targetIdx) {
         stopDingRef.current = targetIdx;
-        sfx.play("ding", { volume: 1.0, cooldownMs: 900 });
+        sfx.play("ding", { volume: 1, cooldownMs: 900 });
       }
     }
 
@@ -1970,7 +2278,7 @@ export default function NavLive() {
 
       const nextIdx = targetIdx + 1;
       if (nextIdx < points.length) {
-        if (audioOn) sfx.play("stopReached", { volume: 1.0, cooldownMs: 1200 });
+        if (audioOn) sfx.play("stopReached", { volume: 1, cooldownMs: 1200 });
         setTargetIdx(nextIdx);
 
         stopWarnRef.current = null;
@@ -1983,7 +2291,7 @@ export default function NavLive() {
 
         resetStopGatesFor(nextIdx);
       } else {
-        if (audioOn) sfx.play("circuitDone", { volume: 1.0, cooldownMs: 1500 });
+        if (audioOn) sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
         setFinished(true);
 
         stopWarnRef.current = null;
@@ -2502,10 +2810,7 @@ export default function NavLive() {
 
             {!audioOn ? (
               <button
-                style={{
-                  ...overlayBtn,
-                  fontSize: 30,
-                }}
+                style={{ ...overlayBtn, fontSize: 30 }}
                 onPointerDown={tapHandler(enableAudio)}
                 onTouchStart={tapHandler(enableAudio)}
                 onClick={tapHandler(enableAudio)}
@@ -2557,7 +2862,7 @@ export default function NavLive() {
             fontWeight: 900,
             color: "#fff",
             pointerEvents: "none",
-            opacity: 0.0,
+            opacity: 0,
           }}
         >
           Hors-trace: {Math.round(offRouteM)} m
