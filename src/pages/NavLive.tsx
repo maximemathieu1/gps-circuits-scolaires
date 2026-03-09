@@ -537,6 +537,7 @@ export default function NavLive() {
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
+
   const currentTargetDistRef = useRef<number | null>(null);
   const stopStillSinceRef = useRef<number | null>(null);
   const stopCompletedForIdxRef = useRef<number>(-1);
@@ -564,6 +565,8 @@ export default function NavLive() {
   const ARRIVE_STOP_M_BLOCKING = 15;
   const DING_AT_M = 15;
 
+  const APPROACH_MAX_ZOOM = 18.4;
+
   function warnStopMetersFromKmh(kmh: number) {
     if (kmh >= 85) return 200;
     if (kmh >= 70) return 150;
@@ -577,9 +580,16 @@ export default function NavLive() {
     return warnStopMetersFromKmh(peakKmh);
   }
 
-  function computeAutoFollowZoom() {
+  function computeBaseFollowZoom() {
     const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
-    const baseZoom = liveKmh >= 60 ? 17.2 : liveKmh >= 25 ? 16.6 : 16.1;
+
+    if (liveKmh >= 90) return 16.05;
+    if (liveKmh >= 75) return 16.35;
+    return 16.6;
+  }
+
+  function computeAutoFollowZoom() {
+    const baseZoom = computeBaseFollowZoom();
 
     const dStop = currentTargetDistRef.current;
     const tgt = target;
@@ -603,11 +613,10 @@ export default function NavLive() {
     const denom = Math.max(1, warnM - arriveM);
     const progress = clamp((warnM - dStop) / denom, 0, 1);
 
-    const approachZoom = liveKmh >= 60 ? 18.15 : liveKmh >= 25 ? 18.35 : 18.55;
-    const mixed = baseZoom + (approachZoom - baseZoom) * progress;
+    const mixed = baseZoom + (APPROACH_MAX_ZOOM - baseZoom) * progress;
 
-    if (dStop <= arriveM + 3 && liveKmh < 1) {
-      return Math.max(mixed, 18.45);
+    if (dStop <= arriveM + 3) {
+      return Math.max(mixed, 18.15);
     }
 
     return mixed;
@@ -951,7 +960,7 @@ export default function NavLive() {
           source: MAP_LINE_SRC,
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
-            "line-color": "#ffffff",
+            "line-color": "#FFFFFF",
             "line-width": FULL_HALO_WIDTH,
             "line-opacity": 0.22,
             "line-blur": 0.2,
@@ -1156,7 +1165,7 @@ export default function NavLive() {
       container: mapElRef.current,
       style: "mapbox://styles/mapbox/streets-v12",
       center: [-73.0, 46.8],
-      zoom: 16.0,
+      zoom: 16.6,
       pitch: 55,
       bearing: 0,
       attributionControl: false,
@@ -1572,7 +1581,7 @@ export default function NavLive() {
         const yOff = computeFollowOffsetPx(m);
         (m as any).jumpTo({
           center: [initial.lng, initial.lat],
-          zoom: 16.1,
+          zoom: computeBaseFollowZoom(),
           bearing: 0,
           pitch: 55,
           offset: [0, yOff],
