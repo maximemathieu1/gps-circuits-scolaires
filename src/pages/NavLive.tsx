@@ -627,6 +627,7 @@ export default function NavLive() {
   const rawGpsAtRef = useRef<number>(0);
   const targetPosRef = useRef<LatLng | null>(null);
   const animPosRef = useRef<LatLng | null>(null);
+  const logicPosRef = useRef<LatLng | null>(null);
 
   const accRef = useRef<number | null>(null);
   const speedRef = useRef<number | null>(null);
@@ -737,10 +738,10 @@ export default function NavLive() {
   const APPROACH_MAX_ZOOM = 18.4;
 
   function warnStopMetersFromKmh(kmh: number) {
-    if (kmh >= 85) return 200;
-    if (kmh >= 70) return 150;
-    if (kmh >= 50) return 75;
-    return 50;
+    if (kmh >= 85) return 300;
+    if (kmh >= 70) return 220;
+    if (kmh >= 50) return 140;
+    return 70;
   }
 
   function warnStopMeters() {
@@ -826,7 +827,7 @@ export default function NavLive() {
   const SNAP_BACK_PTS = 12;
 
   const PREDICT_AHEAD_MAX_MS = 950;
-  const SNAP_DISPLAY_AHEAD_SEC = 0.35;
+  const SNAP_DISPLAY_AHEAD_SEC = 0.18;
 
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
@@ -1367,6 +1368,13 @@ export default function NavLive() {
         applyOverlays();
       }
 
+      const tt = stopTypeOrDefault(target?.stop_type);
+      const halo = haloColorForType(tt);
+
+      try {
+        if (m.getLayer(MAP_ACTIVE_STOP_HALO)) m.setPaintProperty(MAP_ACTIVE_STOP_HALO, "circle-color", halo);
+      } catch {}
+
       applyActiveStopPriorityFilter();
     } catch (e) {
       console.error("upsertStopsOnMap failed:", e);
@@ -1415,6 +1423,8 @@ export default function NavLive() {
         if (m.getLayer(MAP_ACTIVE_LAYER)) m.setPaintProperty(MAP_ACTIVE_LAYER, "line-color", lineCol);
         if (m.getLayer(MAP_ACTIVE_STOP_HALO)) m.setPaintProperty(MAP_ACTIVE_STOP_HALO, "circle-color", halo);
       } catch {}
+
+      upsertStopsOnMap();
     } catch (e) {
       console.error("upsertActiveLineOnMap failed:", e);
       applyOverlays();
@@ -1578,7 +1588,7 @@ export default function NavLive() {
 
     travelSinceTargetSetRef.current = 0;
 
-    const p = animPosRef.current ?? me;
+    const p = logicPosRef.current ?? animPosRef.current ?? me;
     const curTarget = points[idx] ?? null;
     initialDistToTargetRef.current = p && curTarget ? haversineMeters(p, curTarget as any) : null;
   }
@@ -1617,6 +1627,7 @@ export default function NavLive() {
     traceIdxRef.current = 0;
     snappedApproxIdxRef.current = 0;
     snappedPointRef.current = null;
+    logicPosRef.current = null;
 
     setPaused(false);
     clearNoteNow();
@@ -1664,6 +1675,7 @@ export default function NavLive() {
       traceIdxRef.current = idx;
       snappedApproxIdxRef.current = snapped?.approxIdx ?? idx;
       snappedPointRef.current = snapped?.point ?? p;
+      logicPosRef.current = snapped?.point ?? p;
 
       return { ok: true, traceIdx: idx };
     }
@@ -1711,6 +1723,7 @@ export default function NavLive() {
     traceIdxRef.current = 0;
     snappedApproxIdxRef.current = 0;
     snappedPointRef.current = null;
+    logicPosRef.current = null;
 
     resetStopGatesFor(0);
 
@@ -1771,6 +1784,7 @@ export default function NavLive() {
     joinedTraceRef.current = false;
     snappedApproxIdxRef.current = 0;
     snappedPointRef.current = null;
+    logicPosRef.current = null;
     lastActiveUpdateRef.current = { t: 0, targetIdx: -1 };
 
     stopWarnRef.current = null;
@@ -1839,6 +1853,7 @@ export default function NavLive() {
     rawGpsAtRef.current = Date.now();
     targetPosRef.current = initial;
     animPosRef.current = initial;
+    logicPosRef.current = initial;
 
     setMe(initial);
     setAcc(got.acc ?? null);
@@ -1955,6 +1970,7 @@ export default function NavLive() {
 
       const raw = rawGpsRef.current;
       if (raw) {
+        let logicTarget = raw;
         let displayTarget = raw;
 
         const rawAgeMs = Date.now() - (rawGpsAtRef.current || Date.now());
@@ -1991,7 +2007,12 @@ export default function NavLive() {
 
             const snapped =
               snapPointToPolyline(predicted, line, start, end) ??
-              snapPointToPolyline(predicted, line, Math.max(0, Math.floor(curApprox) - 4), Math.min(line.length - 1, Math.ceil(curApprox) + SNAP_AHEAD_PTS));
+              snapPointToPolyline(
+                predicted,
+                line,
+                Math.max(0, Math.floor(curApprox) - 4),
+                Math.min(line.length - 1, Math.ceil(curApprox) + SNAP_AHEAD_PTS)
+              );
 
             if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
               const minAllowed = Math.max(0, curApprox - 3);
@@ -2002,19 +2023,25 @@ export default function NavLive() {
               traceIdxRef.current = clamp(Math.floor(nextApprox), 0, line.length - 1);
               snappedPointRef.current = snapped.point;
 
-              const forwardMeters = Math.min(12, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+              logicTarget = snapped.point;
+
+              const forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
               const ahead = advanceAlongPolyline(line, nextApprox, forwardMeters);
               displayTarget = ahead?.point ?? snapped.point;
             } else {
+              logicTarget = predicted;
               displayTarget = predicted;
             }
           } else {
+            logicTarget = predicted;
             displayTarget = predicted;
           }
         } else {
+          logicTarget = predicted;
           displayTarget = predicted;
         }
 
+        logicPosRef.current = logicTarget;
         targetPosRef.current = displayTarget;
 
         const cur = animPosRef.current ?? displayTarget;
@@ -2121,7 +2148,7 @@ export default function NavLive() {
 
   useEffect(() => {
     if (!running) return;
-    const raw = rawGpsRef.current ?? me;
+    const raw = logicPosRef.current ?? rawGpsRef.current ?? me;
     if (!raw) return;
     if (!hasOfficial || officialLine.length < 2) return;
 
@@ -2135,7 +2162,7 @@ export default function NavLive() {
 
   useEffect(() => {
     if (!running) return;
-    const p = animPosRef.current ?? me;
+    const p = logicPosRef.current ?? animPosRef.current ?? me;
     if (!p || !target) return;
     if (finished) return;
 
