@@ -537,6 +537,10 @@ export default function NavLive() {
   const stopWarnRef = useRef<number | null>(null);
   const stopWarnMaxRef = useRef<number | null>(null);
   const stopDingRef = useRef<number | null>(null);
+  const currentTargetDistRef = useRef<number | null>(null);
+  const stopStillSinceRef = useRef<number | null>(null);
+  const stopCompletedForIdxRef = useRef<number>(-1);
+  const peakKmhSinceTargetRef = useRef<number>(0);
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
   useEffect(() => {
@@ -560,10 +564,53 @@ export default function NavLive() {
   const ARRIVE_STOP_M_BLOCKING = 15;
   const DING_AT_M = 15;
 
+  function warnStopMetersFromKmh(kmh: number) {
+    if (kmh >= 85) return 200;
+    if (kmh >= 70) return 150;
+    if (kmh >= 50) return 75;
+    return 50;
+  }
+
   function warnStopMeters() {
-    const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    return kmh > 70 ? 150 : 50;
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    const peakKmh = Math.max(liveKmh, peakKmhSinceTargetRef.current || 0);
+    return warnStopMetersFromKmh(peakKmh);
+  }
+
+  function computeAutoFollowZoom() {
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    const baseZoom = liveKmh >= 60 ? 17.2 : liveKmh >= 25 ? 16.6 : 16.1;
+
+    const dStop = currentTargetDistRef.current;
+    const tgt = target;
+    if (!tgt || dStop == null) return baseZoom;
+
+    if (stopCompletedForIdxRef.current === targetIdx) {
+      return baseZoom;
+    }
+
+    const t = stopTypeOrDefault(tgt.stop_type);
+    const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
+
+    const warnM = Math.max(
+      stopWarnMaxRef.current ?? 0,
+      warnStopMeters(),
+      warnStopMetersFromKmh(peakKmhSinceTargetRef.current || 0)
+    );
+
+    if (dStop > warnM) return baseZoom;
+
+    const denom = Math.max(1, warnM - arriveM);
+    const progress = clamp((warnM - dStop) / denom, 0, 1);
+
+    const approachZoom = liveKmh >= 60 ? 18.15 : liveKmh >= 25 ? 18.35 : 18.55;
+    const mixed = baseZoom + (approachZoom - baseZoom) * progress;
+
+    if (dStop <= arriveM + 3 && liveKmh < 1) {
+      return Math.max(mixed, 18.45);
+    }
+
+    return mixed;
   }
 
   /* =========================
@@ -701,12 +748,7 @@ export default function NavLive() {
     const activePt = m.project([active.lng, active.lat]);
     const zoom = m.getZoom();
 
-    const hidePx =
-      zoom >= 18 ? 26 :
-      zoom >= 17 ? 32 :
-      zoom >= 16 ? 40 :
-      zoom >= 15 ? 48 :
-      56;
+    const hidePx = zoom >= 18 ? 26 : zoom >= 17 ? 32 : zoom >= 16 ? 40 : zoom >= 15 ? 48 : 56;
 
     const toHide: string[] = [];
 
@@ -1005,7 +1047,7 @@ export default function NavLive() {
             "circle-stroke-color": [
               "case",
               ["==", ["get", "active"], 1],
-              "#FFFFFF",
+              "#1d4ed8",
               "rgba(255,255,255,0)",
             ],
           },
@@ -1197,10 +1239,7 @@ export default function NavLive() {
     manualZoomRef.current = null;
     manualZoomUntilRef.current = 0;
 
-    const v = speedRef.current ?? null;
-    const kmh = v != null ? v * 3.6 : 0;
-    const targetZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
-
+    const targetZoom = computeAutoFollowZoom();
     const yOff = computeFollowOffsetPx(m);
     const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
@@ -1250,6 +1289,12 @@ export default function NavLive() {
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
+
+    currentTargetDistRef.current = null;
+    stopStillSinceRef.current = null;
+    stopCompletedForIdxRef.current = -1;
+    peakKmhSinceTargetRef.current = 0;
+
     setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
     travelSinceTargetSetRef.current = 0;
@@ -1445,6 +1490,10 @@ export default function NavLive() {
     stopWarnMaxRef.current = null;
     stopDingRef.current = null;
     stopBannerLastMRef.current = null;
+    currentTargetDistRef.current = null;
+    stopStillSinceRef.current = null;
+    stopCompletedForIdxRef.current = -1;
+    peakKmhSinceTargetRef.current = 0;
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
 
     travelSinceTargetSetRef.current = 0;
@@ -1695,9 +1744,7 @@ export default function NavLive() {
           }
 
           if (followRef.current) {
-            const v = speedRef.current ?? null;
-            const kmh = v != null ? v * 3.6 : 0;
-            const computedZoom = kmh >= 60 ? 17.2 : kmh >= 25 ? 16.6 : 16.1;
+            const computedZoom = computeAutoFollowZoom();
 
             const zoomLocked = Date.now() < manualZoomUntilRef.current && manualZoomRef.current != null;
             const targetZoom = zoomLocked ? (manualZoomRef.current as number) : computedZoom;
@@ -1789,13 +1836,30 @@ export default function NavLive() {
     const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
 
     const dStop = haversineMeters(p, target as any);
+    currentTargetDistRef.current = dStop;
+
     const rawStopM = Math.round(dStop);
 
-    const dynamicMax = warnStopMeters();
-    if (stopWarnMaxRef.current == null) stopWarnMaxRef.current = dynamicMax;
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    peakKmhSinceTargetRef.current = Math.max(peakKmhSinceTargetRef.current || 0, liveKmh);
+
+    const dynamicMax = warnStopMetersFromKmh(Math.max(liveKmh, peakKmhSinceTargetRef.current || 0));
+    stopWarnMaxRef.current = Math.max(stopWarnMaxRef.current ?? 0, dynamicMax);
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
     const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
+
+    const nearStopForComplete = rawStopM <= arriveM + 3;
+
+    if (nearStopForComplete && liveKmh < 1) {
+      if (stopStillSinceRef.current == null) {
+        stopStillSinceRef.current = Date.now();
+      } else if (Date.now() - stopStillSinceRef.current >= 1000) {
+        stopCompletedForIdxRef.current = targetIdx;
+      }
+    } else {
+      stopStillSinceRef.current = null;
+    }
 
     if (rawStopM > WARN_STOP_M) {
       if (stopBanner.show) setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
