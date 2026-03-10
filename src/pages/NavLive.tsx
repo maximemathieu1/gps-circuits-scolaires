@@ -737,11 +737,17 @@ export default function NavLive() {
 
   const APPROACH_MAX_ZOOM = 18.4;
 
+  const PRECISE_STOP_ZONE_M = 120;
+  const VERY_PRECISE_STOP_ZONE_M = 60;
+  const LOW_SPEED_PRECISE_KMH = 22;
+  const VERY_LOW_SPEED_PRECISE_KMH = 10;
+
   function warnStopMetersFromKmh(kmh: number) {
-    if (kmh >= 85) return 300;
-    if (kmh >= 70) return 220;
-    if (kmh >= 50) return 140;
-    return 70;
+    if (kmh >= 85) return 360;
+    if (kmh >= 70) return 280;
+    if (kmh >= 50) return 180;
+    if (kmh >= 30) return 110;
+    return 75;
   }
 
   function warnStopMeters() {
@@ -772,10 +778,13 @@ export default function NavLive() {
     const t = stopTypeOrDefault(tgt.stop_type);
     const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
 
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    const peakKmh = Math.max(liveKmh, peakKmhSinceTargetRef.current || 0);
+
     const warnM = Math.max(
       stopWarnMaxRef.current ?? 0,
-      warnStopMeters(),
-      warnStopMetersFromKmh(peakKmhSinceTargetRef.current || 0)
+      warnStopMetersFromKmh(peakKmh),
+      warnStopMetersFromKmh(liveKmh)
     );
 
     if (dStop > warnM) return baseZoom;
@@ -783,11 +792,21 @@ export default function NavLive() {
     const denom = Math.max(1, warnM - arriveM);
     const progress = clamp((warnM - dStop) / denom, 0, 1);
 
-    const mixed = baseZoom + (APPROACH_MAX_ZOOM - baseZoom) * progress;
+    let targetZoom = baseZoom + (APPROACH_MAX_ZOOM - baseZoom) * progress;
 
-    if (dStop <= arriveM + 3) return Math.max(mixed, 18.15);
+    if (dStop <= PRECISE_STOP_ZONE_M || liveKmh <= LOW_SPEED_PRECISE_KMH) {
+      targetZoom = Math.max(targetZoom, 17.8);
+    }
 
-    return mixed;
+    if (dStop <= VERY_PRECISE_STOP_ZONE_M || liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+      targetZoom = Math.max(targetZoom, 18.35);
+    }
+
+    if (dStop <= arriveM + 6) {
+      targetZoom = Math.max(targetZoom, 18.55);
+    }
+
+    return targetZoom;
   }
 
   /* =========================
@@ -2025,7 +2044,22 @@ export default function NavLive() {
 
               logicTarget = snapped.point;
 
-              const forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+              const dToTargetNow =
+                target ? haversineMeters(snapped.point, { lat: target.lat, lng: target.lng }) : Infinity;
+
+              const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+
+              const inPreciseZone =
+                dToTargetNow <= PRECISE_STOP_ZONE_M || liveKmh <= LOW_SPEED_PRECISE_KMH;
+
+              const inVeryPreciseZone =
+                dToTargetNow <= VERY_PRECISE_STOP_ZONE_M || liveKmh <= VERY_LOW_SPEED_PRECISE_KMH;
+
+              let forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+
+              if (inPreciseZone) forwardMeters = Math.min(forwardMeters, 2.0);
+              if (inVeryPreciseZone) forwardMeters = 0;
+
               const ahead = advanceAlongPolyline(line, nextApprox, forwardMeters);
               displayTarget = ahead?.point ?? snapped.point;
             } else {
@@ -2045,9 +2079,24 @@ export default function NavLive() {
         targetPosRef.current = displayTarget;
 
         const cur = animPosRef.current ?? displayTarget;
-        const smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
+
+        const dToTargetForSmooth =
+          target && logicTarget ? haversineMeters(logicTarget, { lat: target.lat, lng: target.lng }) : Infinity;
+
+        const liveKmhForSmooth = Math.max(0, (speedRef.current ?? 0) * 3.6);
+
+        const inPreciseZoneForSmooth =
+          dToTargetForSmooth <= PRECISE_STOP_ZONE_M || liveKmhForSmooth <= LOW_SPEED_PRECISE_KMH;
+
+        const inVeryPreciseZoneForSmooth =
+          dToTargetForSmooth <= VERY_PRECISE_STOP_ZONE_M || liveKmhForSmooth <= VERY_LOW_SPEED_PRECISE_KMH;
+
+        let smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
+        if (inPreciseZoneForSmooth) smoothGain = 14;
+        if (inVeryPreciseZoneForSmooth) smoothGain = 18;
+
         const k = 1 - Math.pow(0.001, dt);
-        const alpha = clamp(k * smoothGain, 0.08, 0.94);
+        const alpha = clamp(k * smoothGain, 0.1, 0.98);
 
         const next = {
           lat: cur.lat + (displayTarget.lat - cur.lat) * alpha,
@@ -2109,7 +2158,7 @@ export default function NavLive() {
                 pitch: 55,
                 bearing: b,
                 offset: [0, yOff],
-                duration: 140,
+                duration: 110,
                 easing: (x: number) => x,
                 essential: true,
               });
@@ -2123,7 +2172,7 @@ export default function NavLive() {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [running, hasOfficial, targetIdx, stopIdxOnTrace]);
+  }, [running, hasOfficial, targetIdx, stopIdxOnTrace, target]);
 
   /* =========================
      Quand le targetIdx change
