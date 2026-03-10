@@ -922,8 +922,8 @@ export default function NavLive() {
   const ACTIVE_MIN_POINTS = 12;
 
   const JOIN_DIST_M = 40;
-  const SNAP_MAX_DIST_M = 65;
-  const SNAP_VISUAL_MAX_DIST_M = 80;
+  const SNAP_MAX_DIST_M = 45;
+  const SNAP_VISUAL_MAX_DIST_M = 70;
   const SNAP_AHEAD_PTS = 240;
   const SNAP_BACK_PTS = 12;
 
@@ -2134,9 +2134,19 @@ export default function NavLive() {
               );
 
             if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
-              const minAllowed = Math.max(0, curApprox - 3);
-              const maxAllowed = Math.min(line.length - 1, curApprox + SNAP_AHEAD_PTS);
-              const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
+              const rawPrev = animPosRef.current ?? rawGpsRef.current ?? predicted;
+const movedMeters = rawPrev ? haversineMeters(rawPrev, predicted) : 0;
+
+const maxTraceAdvancePts =
+  movedMeters <= 3 ? 6 :
+  movedMeters <= 8 ? 12 :
+  movedMeters <= 15 ? 22 :
+  36;
+
+const minAllowed = Math.max(0, curApprox - 2);
+const maxAllowed = Math.min(line.length - 1, curApprox + maxTraceAdvancePts);
+
+const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
 
               snappedApproxIdxRef.current = nextApprox;
               traceIdxRef.current = clamp(Math.floor(nextApprox), 0, line.length - 1);
@@ -2405,11 +2415,17 @@ export default function NavLive() {
       setStopBanner({ show: true, meters: shown, label: target.label ?? null, max: WARN_STOP_M });
     }
 
-    const VOICE_LEAD_SEC = 4.0;
-    const spNow = speedRef.current ?? null;
-    const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
-    const leadM = clamp(spAssume * VOICE_LEAD_SEC, 15, 140);
-    const VOICE_TRIGGER_M = WARN_STOP_M + leadM;
+    const liveKmhVoice = Math.max(0, (speedRef.current ?? 0) * 3.6);
+
+let VOICE_TRIGGER_M = WARN_STOP_M;
+
+// matcher la voix avec le bandeau jaune à 70 km/h et moins
+if (liveKmhVoice > 70) {
+  const spNow = speedRef.current ?? null;
+  const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
+  const leadM = clamp(spAssume * 4.0, 15, 140);
+  VOICE_TRIGGER_M = WARN_STOP_M + leadM;
+}
 
     if (audioOn && stopWarnRef.current !== targetIdx) {
       if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
