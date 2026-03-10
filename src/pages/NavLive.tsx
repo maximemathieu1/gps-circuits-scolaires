@@ -270,7 +270,11 @@ function interpolateLatLng(a: LatLng, b: LatLng, t: number): LatLng {
   };
 }
 
-function advanceAlongPolyline(line: [number, number][], approxIdx: number, metersAhead: number): { point: LatLng; approxIdx: number } | null {
+function advanceAlongPolyline(
+  line: [number, number][],
+  approxIdx: number,
+  metersAhead: number
+): { point: LatLng; approxIdx: number } | null {
   if (!line || line.length < 2) return null;
 
   let idx = clamp(approxIdx, 0, line.length - 1);
@@ -712,9 +716,13 @@ export default function NavLive() {
   const currentTargetDistRef = useRef<number | null>(null);
   const stopStillSinceRef = useRef<number | null>(null);
   const stopCompletedForIdxRef = useRef<number>(-1);
+  const stopApproachHoldUntilRef = useRef<number>(0);
+  const stopApproachHoldActiveRef = useRef<boolean>(false);
   const peakKmhSinceTargetRef = useRef<number>(0);
 
-  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(null as any);
+  const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
+    null as any
+  );
   useEffect(() => {
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
   }, []);
@@ -741,6 +749,10 @@ export default function NavLive() {
   const VERY_PRECISE_STOP_ZONE_M = 60;
   const LOW_SPEED_PRECISE_KMH = 22;
   const VERY_LOW_SPEED_PRECISE_KMH = 10;
+
+  const STOP_APPROACH_HOLD_MS = 3000;
+  const STOP_HOLD_KEEP_UNDER_KMH = 10;
+  const STOP_HOLD_RELEASE_OVER_KMH = 15;
 
   function warnStopMetersFromKmh(kmh: number) {
     if (kmh >= 85) return 360;
@@ -771,6 +783,34 @@ export default function NavLive() {
     const tgt = target;
     if (!tgt || dStop == null) return baseZoom;
 
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    const now = Date.now();
+
+    if (stopApproachHoldActiveRef.current) {
+      const minHoldPassed = now >= (stopApproachHoldUntilRef.current || 0);
+
+      if (liveKmh > STOP_HOLD_RELEASE_OVER_KMH) {
+        stopApproachHoldActiveRef.current = false;
+        stopApproachHoldUntilRef.current = 0;
+      } else {
+        const shouldKeep =
+          !minHoldPassed ||
+          liveKmh <= STOP_HOLD_KEEP_UNDER_KMH ||
+          (liveKmh > STOP_HOLD_KEEP_UNDER_KMH && liveKmh <= STOP_HOLD_RELEASE_OVER_KMH);
+
+        if (shouldKeep) {
+          let holdZoom = Math.max(baseZoom, 18.35);
+          if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+            holdZoom = Math.max(holdZoom, 18.5);
+          }
+          return holdZoom;
+        }
+
+        stopApproachHoldActiveRef.current = false;
+        stopApproachHoldUntilRef.current = 0;
+      }
+    }
+
     if (stopCompletedForIdxRef.current === targetIdx) {
       return baseZoom;
     }
@@ -778,7 +818,6 @@ export default function NavLive() {
     const t = stopTypeOrDefault(tgt.stop_type);
     const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
 
-    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
     const peakKmh = Math.max(liveKmh, peakKmhSinceTargetRef.current || 0);
 
     const warnM = Math.max(
@@ -1648,6 +1687,9 @@ export default function NavLive() {
     snappedPointRef.current = null;
     logicPosRef.current = null;
 
+    stopApproachHoldUntilRef.current = 0;
+    stopApproachHoldActiveRef.current = false;
+
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
@@ -1714,6 +1756,9 @@ export default function NavLive() {
       return;
     }
 
+    stopApproachHoldUntilRef.current = 0;
+    stopApproachHoldActiveRef.current = false;
+
     const lineLen = lineRef.current.length;
     const traceIdxNow = clamp(Math.floor(traceIdxRef.current ?? 0), 0, lineLen - 1);
 
@@ -1743,6 +1788,9 @@ export default function NavLive() {
     snappedApproxIdxRef.current = 0;
     snappedPointRef.current = null;
     logicPosRef.current = null;
+
+    stopApproachHoldUntilRef.current = 0;
+    stopApproachHoldActiveRef.current = false;
 
     resetStopGatesFor(0);
 
@@ -1813,6 +1861,8 @@ export default function NavLive() {
     currentTargetDistRef.current = null;
     stopStillSinceRef.current = null;
     stopCompletedForIdxRef.current = -1;
+    stopApproachHoldUntilRef.current = 0;
+    stopApproachHoldActiveRef.current = false;
     peakKmhSinceTargetRef.current = 0;
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
 
@@ -2350,6 +2400,9 @@ export default function NavLive() {
       initD == null || initD > arriveM + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
 
     if (dStop <= arriveM && allowArrive) {
+      stopApproachHoldUntilRef.current = Date.now() + STOP_APPROACH_HOLD_MS;
+      stopApproachHoldActiveRef.current = true;
+
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
       const nextIdx = targetIdx + 1;
@@ -2730,7 +2783,7 @@ export default function NavLive() {
                 </div>
               ) : null}
 
-              {allNotes.length ? (
+               {allNotes.length ? (
                 allNotes.map((n) => (
                   <div key={n.idx} style={notesItem}>
                     <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
