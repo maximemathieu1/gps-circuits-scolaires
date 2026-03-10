@@ -741,9 +741,9 @@ export default function NavLive() {
 
   const followRef = useRef(true);
 
-  const ARRIVE_STOP_M_DEFAULT = 15;
-  const ARRIVE_STOP_M_BLOCKING = 15;
-  const DING_AT_M = 15;
+  const ARRIVE_STOP_M_DEFAULT = 12;
+  const ARRIVE_STOP_M_BLOCKING = 12;
+  const DING_AT_M = 10;
 
   const APPROACH_MAX_ZOOM = 18.4;
 
@@ -752,19 +752,25 @@ export default function NavLive() {
   const LOW_SPEED_PRECISE_KMH = 22;
   const VERY_LOW_SPEED_PRECISE_KMH = 10;
 
+  const STOP_LOCK_ZONE_M = 35;
+  const STOP_LOCK_VERY_NEAR_M = 8;
+  const STOP_LOCK_SPEED_KMH = 8;
+  const STOP_LOCK_STOPPED_KMH = 2.5;
+
   const STOP_APPROACH_HOLD_MS = 3000;
   const STOP_HOLD_KEEP_UNDER_KMH = 10;
   const STOP_HOLD_RELEASE_OVER_KMH = 15;
   const STOP_HOLD_STOPPED_KMH = 1.5;
-  const STOP_HOLD_AFTER_STOP_MS = 2000;
+  const STOP_HOLD_AFTER_STOP_MS = 2500;
+  const STOP_RELEASE_PAST_STOP_M = 30;
 
   function warnStopMetersFromKmh(kmh: number) {
-    if (kmh >= 85) return 360;
-    if (kmh >= 70) return 280;
-    if (kmh >= 50) return 180;
-    if (kmh >= 30) return 110;
-    return 75;
-  }
+  if (kmh >= 85) return 300;
+  if (kmh >= 70) return 200;
+  if (kmh >= 50) return 125;
+  if (kmh >= 30) return 75;
+  return 50;
+}
 
   function warnStopMeters() {
     const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
@@ -790,8 +796,7 @@ export default function NavLive() {
     const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
     const now = Date.now();
 
-    if (stopApproachHoldActiveRef.current) {
-      const passedRightThrough = dStop > Math.max(55, warnStopMetersFromKmh(liveKmh) * 0.6);
+    const passedRightThrough = dStop > STOP_RELEASE_PAST_STOP_M;
 
       if (passedRightThrough && !stopApproachHasStoppedRef.current) {
         stopApproachHoldActiveRef.current = false;
@@ -848,7 +853,6 @@ export default function NavLive() {
           stopApproachHasStoppedRef.current = false;
         }
       }
-    }
 
     if (stopCompletedForIdxRef.current === targetIdx) {
       return baseZoom;
@@ -917,9 +921,9 @@ export default function NavLive() {
 
   const ACTIVE_MIN_POINTS = 12;
 
-  const JOIN_DIST_M = 35;
-  const SNAP_MAX_DIST_M = 55;
-  const SNAP_VISUAL_MAX_DIST_M = 70;
+  const JOIN_DIST_M = 40;
+  const SNAP_MAX_DIST_M = 65;
+  const SNAP_VISUAL_MAX_DIST_M = 80;
   const SNAP_AHEAD_PTS = 240;
   const SNAP_BACK_PTS = 12;
 
@@ -2151,13 +2155,25 @@ export default function NavLive() {
               const inVeryPreciseZone =
                 dToTargetNow <= VERY_PRECISE_STOP_ZONE_M || liveKmh <= VERY_LOW_SPEED_PRECISE_KMH;
 
-              let forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+                           let forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
 
               if (inPreciseZone) forwardMeters = Math.min(forwardMeters, 2.0);
               if (inVeryPreciseZone) forwardMeters = 0;
 
+              if (dToTargetNow <= STOP_LOCK_ZONE_M && liveKmh <= STOP_LOCK_SPEED_KMH) {
+                forwardMeters = 0;
+              }
+
+              if (dToTargetNow <= STOP_LOCK_VERY_NEAR_M) {
+                forwardMeters = 0;
+              }
+
               const ahead = advanceAlongPolyline(line, nextApprox, forwardMeters);
               displayTarget = ahead?.point ?? snapped.point;
+
+              if (dToTargetNow <= STOP_LOCK_VERY_NEAR_M) {
+                displayTarget = snapped.point;
+              }
             } else {
               logicTarget = predicted;
               displayTarget = predicted;
@@ -2187,17 +2203,42 @@ export default function NavLive() {
         const inVeryPreciseZoneForSmooth =
           dToTargetForSmooth <= VERY_PRECISE_STOP_ZONE_M || liveKmhForSmooth <= VERY_LOW_SPEED_PRECISE_KMH;
 
-        let smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
+               let smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
         if (inPreciseZoneForSmooth) smoothGain = 14;
         if (inVeryPreciseZoneForSmooth) smoothGain = 18;
 
-        const k = 1 - Math.pow(0.001, dt);
-        const alpha = clamp(k * smoothGain, 0.1, 0.98);
+        const inStopLockZoneForSmooth =
+          dToTargetForSmooth <= STOP_LOCK_ZONE_M && liveKmhForSmooth <= STOP_LOCK_SPEED_KMH;
 
-        const next = {
-          lat: cur.lat + (displayTarget.lat - cur.lat) * alpha,
-          lng: cur.lng + (displayTarget.lng - cur.lng) * alpha,
-        };
+        const inVeryNearStopLockZoneForSmooth =
+          dToTargetForSmooth <= STOP_LOCK_VERY_NEAR_M;
+
+        const isAlmostStoppedForLock =
+          liveKmhForSmooth <= STOP_LOCK_STOPPED_KMH;
+
+        let next: LatLng;
+
+        if (inVeryNearStopLockZoneForSmooth && snappedPointRef.current) {
+          const alpha = isAlmostStoppedForLock ? 1 : 0.72;
+          next = {
+            lat: cur.lat + (snappedPointRef.current.lat - cur.lat) * alpha,
+            lng: cur.lng + (snappedPointRef.current.lng - cur.lng) * alpha,
+          };
+        } else if (inStopLockZoneForSmooth && snappedPointRef.current) {
+          const alpha = 0.55;
+          next = {
+            lat: cur.lat + (snappedPointRef.current.lat - cur.lat) * alpha,
+            lng: cur.lng + (snappedPointRef.current.lng - cur.lng) * alpha,
+          };
+        } else {
+          const k = 1 - Math.pow(0.001, dt);
+          const alpha = clamp(k * smoothGain, 0.1, 0.98);
+
+          next = {
+            lat: cur.lat + (displayTarget.lat - cur.lat) * alpha,
+            lng: cur.lng + (displayTarget.lng - cur.lng) * alpha,
+          };
+        }
 
         const movingEnough = sp >= 0.6;
         if ((headingRef.current == null || !Number.isFinite(headingRef.current)) && movingEnough) {
