@@ -718,6 +718,8 @@ export default function NavLive() {
   const stopCompletedForIdxRef = useRef<number>(-1);
   const stopApproachHoldUntilRef = useRef<number>(0);
   const stopApproachHoldActiveRef = useRef<boolean>(false);
+  const stopApproachStoppedAtRef = useRef<number | null>(null);
+  const stopApproachHasStoppedRef = useRef<boolean>(false);
   const peakKmhSinceTargetRef = useRef<number>(0);
 
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
@@ -753,6 +755,8 @@ export default function NavLive() {
   const STOP_APPROACH_HOLD_MS = 3000;
   const STOP_HOLD_KEEP_UNDER_KMH = 10;
   const STOP_HOLD_RELEASE_OVER_KMH = 15;
+  const STOP_HOLD_STOPPED_KMH = 1.5;
+  const STOP_HOLD_AFTER_STOP_MS = 2000;
 
   function warnStopMetersFromKmh(kmh: number) {
     if (kmh >= 85) return 360;
@@ -787,27 +791,62 @@ export default function NavLive() {
     const now = Date.now();
 
     if (stopApproachHoldActiveRef.current) {
-      const minHoldPassed = now >= (stopApproachHoldUntilRef.current || 0);
+      const passedRightThrough = dStop > Math.max(55, warnStopMetersFromKmh(liveKmh) * 0.6);
 
-      if (liveKmh > STOP_HOLD_RELEASE_OVER_KMH) {
+      if (passedRightThrough && !stopApproachHasStoppedRef.current) {
         stopApproachHoldActiveRef.current = false;
         stopApproachHoldUntilRef.current = 0;
+        stopApproachStoppedAtRef.current = null;
+        stopApproachHasStoppedRef.current = false;
       } else {
-        const shouldKeep =
-          !minHoldPassed ||
-          liveKmh <= STOP_HOLD_KEEP_UNDER_KMH ||
-          (liveKmh > STOP_HOLD_KEEP_UNDER_KMH && liveKmh <= STOP_HOLD_RELEASE_OVER_KMH);
-
-        if (shouldKeep) {
-          let holdZoom = Math.max(baseZoom, 18.35);
-          if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
-            holdZoom = Math.max(holdZoom, 18.5);
+        if (liveKmh <= STOP_HOLD_STOPPED_KMH) {
+          if (stopApproachStoppedAtRef.current == null) {
+            stopApproachStoppedAtRef.current = now;
           }
-          return holdZoom;
+          stopApproachHasStoppedRef.current = true;
         }
 
-        stopApproachHoldActiveRef.current = false;
-        stopApproachHoldUntilRef.current = 0;
+        const hasStopped2s =
+          stopApproachStoppedAtRef.current != null &&
+          now - stopApproachStoppedAtRef.current >= STOP_HOLD_AFTER_STOP_MS;
+
+        if (stopApproachHasStoppedRef.current) {
+          if (hasStopped2s) {
+            if (liveKmh > STOP_HOLD_RELEASE_OVER_KMH) {
+              stopApproachHoldActiveRef.current = false;
+              stopApproachHoldUntilRef.current = 0;
+              stopApproachStoppedAtRef.current = null;
+              stopApproachHasStoppedRef.current = false;
+            } else {
+              let holdZoom = Math.max(baseZoom, 18.35);
+              if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+                holdZoom = Math.max(holdZoom, 18.5);
+              }
+              return holdZoom;
+            }
+          } else {
+            let holdZoom = Math.max(baseZoom, 18.35);
+            if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+              holdZoom = Math.max(holdZoom, 18.5);
+            }
+            return holdZoom;
+          }
+        } else {
+          const minHoldPassed = now >= (stopApproachHoldUntilRef.current || 0);
+
+          if (!minHoldPassed) {
+            let holdZoom = Math.max(baseZoom, 18.35);
+            if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+              holdZoom = Math.max(holdZoom, 18.5);
+            }
+            return holdZoom;
+          }
+
+          stopApproachHoldActiveRef.current = false;
+          stopApproachHoldUntilRef.current = 0;
+          stopApproachStoppedAtRef.current = null;
+          stopApproachHasStoppedRef.current = false;
+        }
       }
     }
 
@@ -1642,6 +1681,9 @@ export default function NavLive() {
     stopCompletedForIdxRef.current = -1;
     peakKmhSinceTargetRef.current = 0;
 
+    stopApproachStoppedAtRef.current = null;
+    stopApproachHasStoppedRef.current = false;
+
     setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
     travelSinceTargetSetRef.current = 0;
@@ -1689,6 +1731,8 @@ export default function NavLive() {
 
     stopApproachHoldUntilRef.current = 0;
     stopApproachHoldActiveRef.current = false;
+    stopApproachStoppedAtRef.current = null;
+    stopApproachHasStoppedRef.current = false;
 
     setPaused(false);
     clearNoteNow();
@@ -1863,6 +1907,8 @@ export default function NavLive() {
     stopCompletedForIdxRef.current = -1;
     stopApproachHoldUntilRef.current = 0;
     stopApproachHoldActiveRef.current = false;
+    stopApproachStoppedAtRef.current = null;
+    stopApproachHasStoppedRef.current = false;
     peakKmhSinceTargetRef.current = 0;
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
 
@@ -2402,6 +2448,8 @@ export default function NavLive() {
     if (dStop <= arriveM && allowArrive) {
       stopApproachHoldUntilRef.current = Date.now() + STOP_APPROACH_HOLD_MS;
       stopApproachHoldActiveRef.current = true;
+      stopApproachStoppedAtRef.current = null;
+      stopApproachHasStoppedRef.current = false;
 
       setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
 
