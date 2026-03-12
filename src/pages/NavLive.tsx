@@ -22,6 +22,7 @@ type StopPoint = {
   note?: string | null;
   note_trigger_m?: number | null;
   note_once?: boolean | null;
+  note_images?: string[] | null;
 };
 
 type PointsResp = {
@@ -36,6 +37,7 @@ type PointsResp = {
     note?: string | null;
     note_trigger_m?: number | null;
     note_once?: boolean | null;
+    note_images?: string[] | null;
   }[];
 };
 
@@ -627,6 +629,8 @@ export default function NavLive() {
   const [heading, setHeading] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+
   const rawGpsRef = useRef<LatLng | null>(null);
   const rawGpsAtRef = useRef<number>(0);
   const targetPosRef = useRef<LatLng | null>(null);
@@ -665,27 +669,39 @@ export default function NavLive() {
 
   const [showAllNotes, setShowAllNotes] = useState(false);
   const allNotes = useMemo(() => {
-    return points
-      .map((p, i) => {
-        const txt = String(p.note ?? "").trim();
-        if (!txt) return null;
-        return {
-          idx: i,
-          type: stopTypeOrDefault(p.stop_type),
-          label: p.label ?? null,
-          triggerM: p.note_trigger_m ?? null,
-          text: txt,
-        };
-      })
-      .filter(Boolean) as {
-      idx: number;
-      type: StopType;
-      label: string | null;
-      triggerM: number | null;
-      text: string;
-    }[];
-  }, [points]);
+  return points
+    .map((p, i) => {
+      const txt = String(p.note ?? "").trim();
+      if (!txt) return null;
+
+      const images = Array.isArray(p.note_images) ? p.note_images.filter(Boolean).slice(0, 3) : [];
+
+      return {
+        idx: i,
+        type: stopTypeOrDefault(p.stop_type),
+        label: p.label ?? null,
+        triggerM: p.note_trigger_m ?? null,
+        text: txt,
+        images,
+      };
+    })
+    .filter(Boolean) as {
+    idx: number;
+    type: StopType;
+    label: string | null;
+    triggerM: number | null;
+    text: string;
+    images: string[];
+  }[];
+}, [points]);
   const hasAnyNotes = allNotes.length > 0 || !!String(generalStartNote ?? "").trim();
+
+  const activeNoteImages = useMemo(() => {
+    if (!activeNote) return [];
+    if (showGeneralStartNote) return [];
+    const imgs = Array.isArray(target?.note_images) ? target?.note_images.filter(Boolean) : [];
+    return imgs.slice(0, 3);
+  }, [activeNote, showGeneralStartNote, target]);
 
   function clearNoteTimer() {
     if (noteTimerRef.current != null) {
@@ -765,12 +781,12 @@ export default function NavLive() {
   const STOP_RELEASE_PAST_STOP_M = 30;
 
   function warnStopMetersFromKmh(kmh: number) {
-  if (kmh >= 85) return 300;
-  if (kmh >= 70) return 200;
-  if (kmh >= 50) return 125;
-  if (kmh >= 30) return 75;
-  return 50;
-}
+    if (kmh >= 85) return 300;
+    if (kmh >= 70) return 200;
+    if (kmh >= 50) return 125;
+    if (kmh >= 30) return 75;
+    return 50;
+  }
 
   function warnStopMeters() {
     const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
@@ -798,37 +814,30 @@ export default function NavLive() {
 
     const passedRightThrough = dStop > STOP_RELEASE_PAST_STOP_M;
 
-      if (passedRightThrough && !stopApproachHasStoppedRef.current) {
-        stopApproachHoldActiveRef.current = false;
-        stopApproachHoldUntilRef.current = 0;
-        stopApproachStoppedAtRef.current = null;
-        stopApproachHasStoppedRef.current = false;
-      } else {
-        if (liveKmh <= STOP_HOLD_STOPPED_KMH) {
-          if (stopApproachStoppedAtRef.current == null) {
-            stopApproachStoppedAtRef.current = now;
-          }
-          stopApproachHasStoppedRef.current = true;
+    if (passedRightThrough && !stopApproachHasStoppedRef.current) {
+      stopApproachHoldActiveRef.current = false;
+      stopApproachHoldUntilRef.current = 0;
+      stopApproachStoppedAtRef.current = null;
+      stopApproachHasStoppedRef.current = false;
+    } else {
+      if (liveKmh <= STOP_HOLD_STOPPED_KMH) {
+        if (stopApproachStoppedAtRef.current == null) {
+          stopApproachStoppedAtRef.current = now;
         }
+        stopApproachHasStoppedRef.current = true;
+      }
 
-        const hasStopped2s =
-          stopApproachStoppedAtRef.current != null &&
-          now - stopApproachStoppedAtRef.current >= STOP_HOLD_AFTER_STOP_MS;
+      const hasStopped2s =
+        stopApproachStoppedAtRef.current != null &&
+        now - stopApproachStoppedAtRef.current >= STOP_HOLD_AFTER_STOP_MS;
 
-        if (stopApproachHasStoppedRef.current) {
-          if (hasStopped2s) {
-            if (liveKmh > STOP_HOLD_RELEASE_OVER_KMH) {
-              stopApproachHoldActiveRef.current = false;
-              stopApproachHoldUntilRef.current = 0;
-              stopApproachStoppedAtRef.current = null;
-              stopApproachHasStoppedRef.current = false;
-            } else {
-              let holdZoom = Math.max(baseZoom, 18.35);
-              if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
-                holdZoom = Math.max(holdZoom, 18.5);
-              }
-              return holdZoom;
-            }
+      if (stopApproachHasStoppedRef.current) {
+        if (hasStopped2s) {
+          if (liveKmh > STOP_HOLD_RELEASE_OVER_KMH) {
+            stopApproachHoldActiveRef.current = false;
+            stopApproachHoldUntilRef.current = 0;
+            stopApproachStoppedAtRef.current = null;
+            stopApproachHasStoppedRef.current = false;
           } else {
             let holdZoom = Math.max(baseZoom, 18.35);
             if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
@@ -837,22 +846,29 @@ export default function NavLive() {
             return holdZoom;
           }
         } else {
-          const minHoldPassed = now >= (stopApproachHoldUntilRef.current || 0);
-
-          if (!minHoldPassed) {
-            let holdZoom = Math.max(baseZoom, 18.35);
-            if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
-              holdZoom = Math.max(holdZoom, 18.5);
-            }
-            return holdZoom;
+          let holdZoom = Math.max(baseZoom, 18.35);
+          if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+            holdZoom = Math.max(holdZoom, 18.5);
           }
-
-          stopApproachHoldActiveRef.current = false;
-          stopApproachHoldUntilRef.current = 0;
-          stopApproachStoppedAtRef.current = null;
-          stopApproachHasStoppedRef.current = false;
+          return holdZoom;
         }
+      } else {
+        const minHoldPassed = now >= (stopApproachHoldUntilRef.current || 0);
+
+        if (!minHoldPassed) {
+          let holdZoom = Math.max(baseZoom, 18.35);
+          if (liveKmh <= VERY_LOW_SPEED_PRECISE_KMH) {
+            holdZoom = Math.max(holdZoom, 18.5);
+          }
+          return holdZoom;
+        }
+
+        stopApproachHoldActiveRef.current = false;
+        stopApproachHoldUntilRef.current = 0;
+        stopApproachStoppedAtRef.current = null;
+        stopApproachHasStoppedRef.current = false;
       }
+    }
 
     if (stopCompletedForIdxRef.current === targetIdx) {
       return baseZoom;
@@ -1657,6 +1673,7 @@ export default function NavLive() {
     setActiveNote(null);
     noteHoldIdxRef.current = -1;
     noteHoldUntilRef.current = 0;
+    setFullscreenImage(null);
   }
 
   function speakNoteTTS(text: string) {
@@ -1743,6 +1760,7 @@ export default function NavLive() {
     setShowAllNotes(false);
     setShowGeneralStartNote(false);
     setStartPrompt(false);
+    setFullscreenImage(null);
 
     nav("/");
   }
@@ -1866,6 +1884,7 @@ export default function NavLive() {
       note: p.note ?? null,
       note_trigger_m: p.note_trigger_m ?? null,
       note_once: p.note_once ?? null,
+      note_images: Array.isArray(p.note_images) ? p.note_images.filter(Boolean) : [],
     }));
     if (pts.length === 0) throw new Error("Ce circuit n’a aucun arrêt enregistré.");
 
@@ -2135,18 +2154,18 @@ export default function NavLive() {
 
             if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
               const rawPrev = animPosRef.current ?? rawGpsRef.current ?? predicted;
-const movedMeters = rawPrev ? haversineMeters(rawPrev, predicted) : 0;
+              const movedMeters = rawPrev ? haversineMeters(rawPrev, predicted) : 0;
 
-const maxTraceAdvancePts =
-  movedMeters <= 3 ? 6 :
-  movedMeters <= 8 ? 12 :
-  movedMeters <= 15 ? 22 :
-  36;
+              const maxTraceAdvancePts =
+                movedMeters <= 3 ? 6 :
+                movedMeters <= 8 ? 12 :
+                movedMeters <= 15 ? 22 :
+                36;
 
-const minAllowed = Math.max(0, curApprox - 2);
-const maxAllowed = Math.min(line.length - 1, curApprox + maxTraceAdvancePts);
+              const minAllowed = Math.max(0, curApprox - 2);
+              const maxAllowed = Math.min(line.length - 1, curApprox + maxTraceAdvancePts);
 
-const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
+              const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
 
               snappedApproxIdxRef.current = nextApprox;
               traceIdxRef.current = clamp(Math.floor(nextApprox), 0, line.length - 1);
@@ -2165,7 +2184,7 @@ const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
               const inVeryPreciseZone =
                 dToTargetNow <= VERY_PRECISE_STOP_ZONE_M || liveKmh <= VERY_LOW_SPEED_PRECISE_KMH;
 
-                           let forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
+              let forwardMeters = Math.min(8, Math.max(0, sp * SNAP_DISPLAY_AHEAD_SEC));
 
               if (inPreciseZone) forwardMeters = Math.min(forwardMeters, 2.0);
               if (inVeryPreciseZone) forwardMeters = 0;
@@ -2213,7 +2232,7 @@ const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
         const inVeryPreciseZoneForSmooth =
           dToTargetForSmooth <= VERY_PRECISE_STOP_ZONE_M || liveKmhForSmooth <= VERY_LOW_SPEED_PRECISE_KMH;
 
-               let smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
+        let smoothGain = hasOfficial && joinedTraceRef.current ? 10.5 : 6.2;
         if (inPreciseZoneForSmooth) smoothGain = 14;
         if (inVeryPreciseZoneForSmooth) smoothGain = 18;
 
@@ -2417,15 +2436,14 @@ const nextApprox = clamp(snapped.approxIdx, minAllowed, maxAllowed);
 
     const liveKmhVoice = Math.max(0, (speedRef.current ?? 0) * 3.6);
 
-let VOICE_TRIGGER_M = WARN_STOP_M;
+    let VOICE_TRIGGER_M = WARN_STOP_M;
 
-// matcher la voix avec le bandeau jaune à 70 km/h et moins
-if (liveKmhVoice > 70) {
-  const spNow = speedRef.current ?? null;
-  const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
-  const leadM = clamp(spAssume * 4.0, 15, 140);
-  VOICE_TRIGGER_M = WARN_STOP_M + leadM;
-}
+    if (liveKmhVoice > 70) {
+      const spNow = speedRef.current ?? null;
+      const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
+      const leadM = clamp(spAssume * 4.0, 15, 140);
+      VOICE_TRIGGER_M = WARN_STOP_M + leadM;
+    }
 
     if (audioOn && stopWarnRef.current !== targetIdx) {
       if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
@@ -2651,6 +2669,74 @@ if (liveKmhVoice > 70) {
     WebkitTapHighlightColor: "transparent",
   };
 
+  const noteImagesRow: React.CSSProperties = {
+    display: "flex",
+    gap: 12,
+    justifyContent: "center",
+    alignItems: "center",
+    flexWrap: "wrap",
+  };
+
+  const noteImageThumb: React.CSSProperties = {
+    width: 150,
+    height: 110,
+    objectFit: "cover",
+    borderRadius: 14,
+    border: "2px solid rgba(255,255,255,.18)",
+    boxShadow: "0 10px 24px rgba(0,0,0,.28)",
+    cursor: "pointer",
+    background: "rgba(255,255,255,.06)",
+    touchAction: "manipulation",
+    WebkitTapHighlightColor: "transparent",
+  };
+
+  const imageFullscreenWrap: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    zIndex: 26000,
+    background: "rgba(0,0,0,.92)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+    pointerEvents: "auto",
+  };
+
+  const imageFullscreenCard: React.CSSProperties = {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
+  const imageFullscreenImg: React.CSSProperties = {
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    borderRadius: 16,
+    boxShadow: "0 24px 70px rgba(0,0,0,.45)",
+  };
+
+  const imageCloseBtn: React.CSSProperties = {
+    position: "absolute",
+    top: "calc(env(safe-area-inset-top) + 10px)",
+    right: 4,
+    minWidth: 64,
+    height: 52,
+    padding: "0 18px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.16)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 950,
+    fontSize: 18,
+    cursor: "pointer",
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+  };
+
   const notesOverlayWrap: React.CSSProperties = {
     position: "absolute",
     inset: 0,
@@ -2714,6 +2800,19 @@ if (liveKmhVoice > 70) {
     touchAction: "none",
     WebkitTapHighlightColor: "transparent",
   };
+
+const notesPhotoBtn: React.CSSProperties = {
+  height: 40,
+  padding: "0 12px",
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,.14)",
+  background: "rgba(255,255,255,.10)",
+  color: "#fff",
+  fontWeight: 900,
+  cursor: "pointer",
+  touchAction: "none",
+  WebkitTapHighlightColor: "transparent",
+};
 
   const startCard: React.CSSProperties = {
     width: "min(92vw, 760px)",
@@ -2839,6 +2938,22 @@ if (liveKmhVoice > 70) {
               {activeNote}
             </div>
 
+            {activeNoteImages.length > 0 ? (
+              <div style={noteImagesRow}>
+                {activeNoteImages.map((img, i) => (
+                  <img
+                    key={`${img}-${i}`}
+                    src={img}
+                    alt={`Photo repère ${i + 1}`}
+                    style={noteImageThumb}
+                    onPointerDown={tapHandler(() => setFullscreenImage(img))}
+                    onTouchStart={tapHandler(() => setFullscreenImage(img))}
+                    onClick={tapHandler(() => setFullscreenImage(img))}
+                  />
+                ))}
+              </div>
+            ) : null}
+
             {paused ? (
               <button
                 style={noteBtn}
@@ -2849,6 +2964,42 @@ if (liveKmhVoice > 70) {
                 Continuer
               </button>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {fullscreenImage ? (
+        <div style={imageFullscreenWrap}>
+          <div style={imageFullscreenCard}>
+            <button
+              style={imageCloseBtn}
+              onPointerDown={tapHandler(() => setFullscreenImage(null))}
+              onTouchStart={tapHandler(() => setFullscreenImage(null))}
+              onClick={tapHandler(() => setFullscreenImage(null))}
+            >
+              Retour
+            </button>
+
+            <img
+              src={fullscreenImage}
+              alt="Photo plein écran"
+              style={imageFullscreenImg}
+              onPointerDown={(e) => {
+                try {
+                  e.stopPropagation?.();
+                } catch {}
+              }}
+              onTouchStart={(e) => {
+                try {
+                  e.stopPropagation?.();
+                } catch {}
+              }}
+              onClick={(e) => {
+                try {
+                  e.stopPropagation?.();
+                } catch {}
+              }}
+            />
           </div>
         </div>
       ) : null}
@@ -2888,25 +3039,41 @@ if (liveKmhVoice > 70) {
                 </div>
               ) : null}
 
-               {allNotes.length ? (
-                allNotes.map((n) => (
-                  <div key={n.idx} style={notesItem}>
-                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ fontWeight: 950 }}>
-                        Arrêt #{n.idx + 1} — {n.label ?? "(sans nom)"}
-                      </div>
+              {allNotes.length ? (
+  allNotes.map((n) => (
+    <div key={n.idx} style={notesItem}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontWeight: 950 }}>
+          Arrêt #{n.idx + 1} — {n.label ?? "(sans nom)"}
+        </div>
 
-                      <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>
-                        {isBlockingType(n.type) ? "Bloquante" : "Auto 5s"} {n.triggerM != null ? `• ${Math.round(n.triggerM)} m` : ""}
-                      </div>
-                    </div>
+        <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>
+          {isBlockingType(n.type) ? "Bloquante" : "Auto 5s"} {n.triggerM != null ? `• ${Math.round(n.triggerM)} m` : ""}
+        </div>
+      </div>
 
-                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
-                  </div>
-                ))
-              ) : !String(generalStartNote ?? "").trim() ? (
-                <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
-              ) : null}
+      <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
+
+      {n.images.length > 0 ? (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+          {n.images.map((img, imgIdx) => (
+            <button
+              key={`${img}-${imgIdx}`}
+              style={notesPhotoBtn}
+              onPointerDown={tapHandler(() => setFullscreenImage(img))}
+              onTouchStart={tapHandler(() => setFullscreenImage(img))}
+              onClick={tapHandler(() => setFullscreenImage(img))}
+            >
+              {n.images.length > 1 ? `Voir photo ${imgIdx + 1}` : "Voir photo"}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  ))
+) : !String(generalStartNote ?? "").trim() ? (
+  <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
+) : null}
             </div>
           </div>
         </div>

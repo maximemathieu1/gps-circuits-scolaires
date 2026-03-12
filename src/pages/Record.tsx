@@ -12,6 +12,8 @@ type Point = { idx: number; lat: number; lng: number; label: string | null; crea
 // ✅ réponse souple (ça évite de “casser” si ton API retourne un shape légèrement différent)
 type SaveTraceResp = { ok?: boolean; version_id?: string; points_saved?: number };
 
+type StopSaveState = "idle" | "saving" | "success" | "error";
+
 function useQuery() {
   const { search } = useLocation();
   return useMemo(() => new URLSearchParams(search), [search]);
@@ -81,6 +83,11 @@ export default function Record() {
   // ✅ NEW: état sauvegarde trace
   const [savingTrace, setSavingTrace] = useState(false);
 
+  // ✅ NEW: état visuel sauvegarde arrêt
+  const [stopSaveState, setStopSaveState] = useState<StopSaveState>("idle");
+  const [stopSaveMessage, setStopSaveMessage] = useState("");
+  const stopSaveTimerRef = useRef<number | null>(null);
+
   // GPS
   const [gpsOk, setGpsOk] = useState<boolean | null>(null);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
@@ -100,6 +107,41 @@ export default function Record() {
 
   // ✅ KEEP SCREEN AWAKE (Wake Lock)
   const wakeLockRef = useRef<any>(null);
+
+  function clearStopSaveTimer() {
+    if (stopSaveTimerRef.current !== null) {
+      window.clearTimeout(stopSaveTimerRef.current);
+      stopSaveTimerRef.current = null;
+    }
+  }
+
+  function showStopSaving(message = "Enregistrement de l’arrêt…") {
+    clearStopSaveTimer();
+    setStopSaveMessage(message);
+    setStopSaveState("saving");
+  }
+
+  function showStopSuccess(message = "Arrêt enregistré") {
+    clearStopSaveTimer();
+    setStopSaveMessage(message);
+    setStopSaveState("success");
+    stopSaveTimerRef.current = window.setTimeout(() => {
+      setStopSaveState("idle");
+      setStopSaveMessage("");
+      stopSaveTimerRef.current = null;
+    }, 1100);
+  }
+
+  function showStopError(message = "Erreur lors de l’enregistrement") {
+    clearStopSaveTimer();
+    setStopSaveMessage(message);
+    setStopSaveState("error");
+    stopSaveTimerRef.current = window.setTimeout(() => {
+      setStopSaveState("idle");
+      setStopSaveMessage("");
+      stopSaveTimerRef.current = null;
+    }, 1600);
+  }
 
   async function requestWakeLock() {
     try {
@@ -183,6 +225,10 @@ export default function Record() {
   useEffect(() => {
     refreshAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => clearStopSaveTimer();
   }, []);
 
   useEffect(() => {
@@ -370,11 +416,13 @@ export default function Record() {
     }
   }
 
-  // ✅ Ajout arrêt: plus de prompt de commentaire (label = null)
+  // ✅ Ajout arrêt: loading + succès/erreur visuels
   async function addStop() {
     if (!versionId) return;
 
     setBusy(true);
+    showStopSaving();
+
     try {
       await requireAuth();
 
@@ -384,7 +432,11 @@ export default function Record() {
 
       if (typeof pos.accuracy === "number" && pos.accuracy > 45) {
         const ok = confirm(`GPS imprécis (± ${Math.round(pos.accuracy)} m). Ajouter l’arrêt quand même ?`);
-        if (!ok) return;
+        if (!ok) {
+          setStopSaveState("idle");
+          setStopSaveMessage("");
+          return;
+        }
       }
 
       await callFn("circuits-api", {
@@ -406,8 +458,15 @@ export default function Record() {
         if (next.length > TRACE_MAX_POINTS) next.splice(0, next.length - TRACE_MAX_POINTS);
         return next;
       });
+
+      showStopSuccess("Arrêt enregistré");
     } catch (e: any) {
-      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
+      if (e?.message === "NOT_AUTHENTICATED") {
+        setStopSaveState("idle");
+        setStopSaveMessage("");
+      } else {
+        showStopError(e?.message ? `Erreur : ${e.message}` : "Erreur lors de l’enregistrement");
+      }
     } finally {
       setBusy(false);
     }
@@ -651,11 +710,81 @@ export default function Record() {
     color: "rgba(15,23,42,.68)",
   };
 
+  const stopFeedbackBackdrop: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    zIndex: 9999,
+    background: "rgba(15,23,42,.28)",
+    backdropFilter: "blur(4px)",
+    display: "grid",
+    placeItems: "center",
+    padding: 20,
+  };
+
+  const stopFeedbackCard: React.CSSProperties = {
+    width: "min(320px, calc(100vw - 32px))",
+    borderRadius: 28,
+    background: "rgba(255,255,255,.98)",
+    border: "1px solid rgba(2,6,23,.06)",
+    boxShadow: "0 30px 90px rgba(2,6,23,.22)",
+    padding: "26px 22px",
+    display: "grid",
+    justifyItems: "center",
+    textAlign: "center",
+  };
+
+  const stopIconBase: React.CSSProperties = {
+    width: 104,
+    height: 104,
+    borderRadius: 999,
+    display: "grid",
+    placeItems: "center",
+    fontSize: 56,
+    fontWeight: 950,
+    lineHeight: 1,
+    marginBottom: 16,
+    boxShadow: "0 16px 40px rgba(2,6,23,.16)",
+  };
+
   const canStartNew = !busy && Boolean(newNom.trim());
   const canStartUpdate = !busy && Boolean(selectedCircuit);
+  const stopOverlayVisible = stopSaveState !== "idle";
 
   return (
     <div style={pageLook}>
+      {stopOverlayVisible ? (
+        <div style={stopFeedbackBackdrop}>
+          <div style={stopFeedbackCard}>
+            <div
+              style={{
+                ...stopIconBase,
+                background:
+                  stopSaveState === "saving"
+                    ? "linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%)"
+                    : stopSaveState === "success"
+                    ? "linear-gradient(135deg, #059669 0%, #10b981 100%)"
+                    : "linear-gradient(135deg, #dc2626 0%, #ef4444 100%)",
+                color: "#fff",
+              }}
+            >
+              {stopSaveState === "saving" ? "…" : stopSaveState === "success" ? "✓" : "✕"}
+            </div>
+
+            <div style={{ fontWeight: 950, fontSize: 22, color: "#0f172a", letterSpacing: -0.3 }}>
+              {stopSaveState === "saving"
+                ? "Enregistrement…"
+                : stopSaveState === "success"
+                ? "Réussi"
+                : "Erreur"}
+            </div>
+
+            <div style={{ marginTop: 8, color: "rgba(15,23,42,.70)", fontWeight: 700 }}>
+              {stopSaveMessage}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div style={wrap}>
         <div style={mainCard}>
           {/* Entête (même vibe Portal) */}
@@ -702,26 +831,33 @@ export default function Record() {
                   >
                     {/* ARRÊT */}
                     <div
-                      style={{ ...actionGreen, ...(busy || savingTrace ? disabledAction : {}) }}
-                      onClick={busy || savingTrace ? undefined : addStop}
+                      style={{
+                        ...actionGreen,
+                        ...(busy || savingTrace || stopSaveState === "saving" ? disabledAction : {}),
+                      }}
+                      onClick={busy || savingTrace || stopSaveState === "saving" ? undefined : addStop}
                       role="button"
-                      aria-disabled={busy || savingTrace}
+                      aria-disabled={busy || savingTrace || stopSaveState === "saving"}
                       title="Enregistrer un arrêt"
                     >
                       <div style={overlay} />
                       <div style={leftText}>
-                        <div style={{ fontWeight: 950, fontSize: 22, letterSpacing: -0.2 }}>ARRÊT</div>
-                        <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.9 }}>Enregistrer la position</div>
+                        <div style={{ fontWeight: 950, fontSize: 22, letterSpacing: -0.2 }}>
+                          {stopSaveState === "saving" ? "ARRÊT…" : "ARRÊT"}
+                        </div>
+                        <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.9 }}>
+                          {stopSaveState === "saving" ? "Enregistrement en cours" : "Enregistrer la position"}
+                        </div>
                       </div>
-                      <div style={rightPill}>Ouvrir ›</div>
+                      <div style={rightPill}>{stopSaveState === "saving" ? "…" : "Ouvrir ›"}</div>
                     </div>
 
                     {/* STOP */}
                     <div
-                      style={{ ...actionRed, ...(busy || savingTrace ? disabledAction : {}) }}
-                      onClick={busy || savingTrace ? undefined : stop}
+                      style={{ ...actionRed, ...(busy || savingTrace || stopSaveState === "saving" ? disabledAction : {}) }}
+                      onClick={busy || savingTrace || stopSaveState === "saving" ? undefined : stop}
                       role="button"
-                      aria-disabled={busy || savingTrace}
+                      aria-disabled={busy || savingTrace || stopSaveState === "saving"}
                       title="Terminer"
                     >
                       <div style={overlay} />
