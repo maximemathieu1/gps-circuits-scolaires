@@ -6,6 +6,7 @@ import mapboxgl from "mapbox-gl";
 import { callFn } from "@/lib/api";
 import { haversineMeters } from "@/lib/geo";
 import { useWakeLock } from "@/lib/useWakeLock";
+import { getNavLiveSession, saveNavLiveSession, clearNavLiveSession } from "@/lib/navLiveSession";
 
 /* =========================
    Types (alignés DB)
@@ -669,31 +670,31 @@ export default function NavLive() {
 
   const [showAllNotes, setShowAllNotes] = useState(false);
   const allNotes = useMemo(() => {
-  return points
-    .map((p, i) => {
-      const txt = String(p.note ?? "").trim();
-      if (!txt) return null;
+    return points
+      .map((p, i) => {
+        const txt = String(p.note ?? "").trim();
+        if (!txt) return null;
 
-      const images = Array.isArray(p.note_images) ? p.note_images.filter(Boolean).slice(0, 3) : [];
+        const images = Array.isArray(p.note_images) ? p.note_images.filter(Boolean).slice(0, 3) : [];
 
-      return {
-        idx: i,
-        type: stopTypeOrDefault(p.stop_type),
-        label: p.label ?? null,
-        triggerM: p.note_trigger_m ?? null,
-        text: txt,
-        images,
-      };
-    })
-    .filter(Boolean) as {
-    idx: number;
-    type: StopType;
-    label: string | null;
-    triggerM: number | null;
-    text: string;
-    images: string[];
-  }[];
-}, [points]);
+        return {
+          idx: i,
+          type: stopTypeOrDefault(p.stop_type),
+          label: p.label ?? null,
+          triggerM: p.note_trigger_m ?? null,
+          text: txt,
+          images,
+        };
+      })
+      .filter(Boolean) as {
+      idx: number;
+      type: StopType;
+      label: string | null;
+      triggerM: number | null;
+      text: string;
+      images: string[];
+    }[];
+  }, [points]);
   const hasAnyNotes = allNotes.length > 0 || !!String(generalStartNote ?? "").trim();
 
   const activeNoteImages = useMemo(() => {
@@ -722,6 +723,10 @@ export default function NavLive() {
   const [hasOfficial, setHasOfficial] = useState(false);
 
   const [offRouteM, setOffRouteM] = useState<number | null>(null);
+
+  const restoreDoneRef = useRef(false);
+  const persistBusyRef = useRef(false);
+  const [syncBadge, setSyncBadge] = useState<"normal" | "offline">("normal");
 
   useWakeLock(running);
 
@@ -905,6 +910,55 @@ export default function NavLive() {
     }
 
     return targetZoom;
+  }
+
+  async function persistNavSession(
+    partial?: Partial<{
+      running: boolean;
+      finished: boolean;
+      paused: boolean;
+      targetIdx: number;
+      me: LatLng | null;
+      acc: number | null;
+      speed: number | null;
+      heading: number | null;
+      showGeneralStartNote: boolean;
+      startPrompt: boolean;
+      activeNote: string | null;
+    }>
+  ) {
+    if (!circuitId) return;
+    if (persistBusyRef.current) return;
+
+    persistBusyRef.current = true;
+    try {
+      await saveNavLiveSession({
+        circuitId,
+        running: partial?.running ?? running,
+        finished: partial?.finished ?? finished,
+        paused: partial?.paused ?? paused,
+        targetIdx: partial?.targetIdx ?? targetIdx,
+        me: partial?.me ?? (logicPosRef.current ?? animPosRef.current ?? me ?? null),
+        acc: partial?.acc ?? acc,
+        speed: partial?.speed ?? speed,
+        heading: partial?.heading ?? heading,
+        showGeneralStartNote: partial?.showGeneralStartNote ?? showGeneralStartNote,
+        startPrompt: partial?.startPrompt ?? startPrompt,
+        activeNote: partial?.activeNote ?? activeNote,
+        noteShownIdxs: [...noteShownForIdxRef.current],
+        noteSuppressIdxs: [...noteSuppressForIdxRef.current],
+        joinedTrace: joinedTraceRef.current,
+        traceIdx: traceIdxRef.current ?? 0,
+        snappedApproxIdx: snappedApproxIdxRef.current ?? 0,
+        snappedPoint: snappedPointRef.current ?? null,
+        logicPos: logicPosRef.current ?? null,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {
+      // silence
+    } finally {
+      persistBusyRef.current = false;
+    }
   }
 
   /* =========================
@@ -1674,6 +1728,10 @@ export default function NavLive() {
     noteHoldIdxRef.current = -1;
     noteHoldUntilRef.current = 0;
     setFullscreenImage(null);
+
+    void persistNavSession({
+      activeNote: null,
+    });
   }
 
   function speakNoteTTS(text: string) {
@@ -1717,6 +1775,10 @@ export default function NavLive() {
   function continueAfterGeneralStartNote() {
     setShowGeneralStartNote(false);
     setPaused(false);
+    void persistNavSession({
+      paused: false,
+      showGeneralStartNote: false,
+    });
   }
 
   function resumeAfterNote() {
@@ -1734,6 +1796,11 @@ export default function NavLive() {
       if (audioOn) sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
       setFinished(true);
     }
+
+    void persistNavSession({
+      paused: false,
+      activeNote: null,
+    });
   }
 
   function stop() {
@@ -1762,6 +1829,7 @@ export default function NavLive() {
     setStartPrompt(false);
     setFullscreenImage(null);
 
+    void clearNavLiveSession(circuitId);
     nav("/");
   }
 
@@ -1843,6 +1911,14 @@ export default function NavLive() {
     try {
       recenter();
     } catch {}
+
+    void persistNavSession({
+      running: true,
+      paused: false,
+      startPrompt: false,
+      showGeneralStartNote: false,
+      targetIdx: idx,
+    });
   }
 
   function restartFromBeginning() {
@@ -1866,6 +1942,14 @@ export default function NavLive() {
     try {
       recenter();
     } catch {}
+
+    void persistNavSession({
+      running: true,
+      paused: false,
+      startPrompt: false,
+      showGeneralStartNote: false,
+      targetIdx: 0,
+    });
   }
 
   /* =========================
@@ -1956,6 +2040,61 @@ export default function NavLive() {
   }
 
   /* =========================
+     Restore local session
+  ========================= */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreLocalSession() {
+      if (!circuitId) return;
+      if (restoreDoneRef.current) return;
+      restoreDoneRef.current = true;
+
+      try {
+        const local = await getNavLiveSession(circuitId);
+        if (!local || !local.running) return;
+        if (cancelled) return;
+
+        setRunning(local.running);
+        setFinished(local.finished);
+        setPaused(local.paused);
+        setTargetIdx(local.targetIdx);
+
+        setMe(local.me ?? null);
+        setAcc(local.acc ?? null);
+        setSpeed(local.speed ?? null);
+        setHeading(local.heading ?? null);
+
+        setShowGeneralStartNote(local.showGeneralStartNote);
+        setStartPrompt(local.startPrompt);
+        setActiveNote(local.activeNote ?? null);
+
+        noteShownForIdxRef.current = new Set(local.noteShownIdxs ?? []);
+        noteSuppressForIdxRef.current = new Set(local.noteSuppressIdxs ?? []);
+
+        joinedTraceRef.current = Boolean(local.joinedTrace);
+        traceIdxRef.current = local.traceIdx ?? 0;
+        snappedApproxIdxRef.current = local.snappedApproxIdx ?? 0;
+        snappedPointRef.current = local.snappedPoint ?? null;
+        logicPosRef.current = local.logicPos ?? local.me ?? null;
+        animPosRef.current = local.me ?? null;
+        targetPosRef.current = local.me ?? null;
+
+        if (!navigator.onLine) setSyncBadge("offline");
+      } catch {
+        // silence
+      }
+    }
+
+    restoreLocalSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [circuitId]);
+
+  /* =========================
      AUTO START
   ========================= */
 
@@ -2042,16 +2181,44 @@ export default function NavLive() {
         setShowGeneralStartNote(false);
       }
     }
+
+    void persistNavSession({
+      running: true,
+      finished: false,
+      paused: offerResume ? true : !!generalNote,
+      targetIdx: 0,
+      me: initial,
+      acc: got.acc ?? null,
+      showGeneralStartNote: !offerResume && !!generalNote,
+      startPrompt: offerResume,
+      activeNote: null,
+    });
   }
 
   useEffect(() => {
     if (!circuitId) return;
     if (running) return;
 
-    startAuto().catch((e: any) => {
-      setErr(e?.message || "Erreur démarrage.");
-      setRunning(false);
-    });
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const local = await getNavLiveSession(circuitId);
+        if (cancelled) return;
+
+        if (local?.running) return;
+
+        await startAuto();
+      } catch (e: any) {
+        if (cancelled) return;
+        setErr(e?.message || "Erreur démarrage.");
+        setRunning(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [circuitId, running]);
 
   /* =========================
@@ -2091,6 +2258,55 @@ export default function NavLive() {
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     };
   }, [running]);
+
+  /* =========================
+     Persist session
+  ========================= */
+
+  useEffect(() => {
+    if (!circuitId) return;
+    if (!running) return;
+
+    void persistNavSession();
+  }, [
+    circuitId,
+    running,
+    finished,
+    paused,
+    targetIdx,
+    me,
+    acc,
+    speed,
+    heading,
+    showGeneralStartNote,
+    startPrompt,
+    activeNote,
+  ]);
+
+  useEffect(() => {
+    if (!running || !circuitId) return;
+
+    const id = window.setInterval(() => {
+      void persistNavSession();
+    }, 3000);
+
+    return () => window.clearInterval(id);
+  }, [running, circuitId]);
+
+  useEffect(() => {
+    const onOnline = () => setSyncBadge("normal");
+    const onOffline = () => setSyncBadge("offline");
+
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+
+    setSyncBadge(navigator.onLine ? "normal" : "offline");
+
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
 
   /* =========================
      Animation loop + follow + rotation
@@ -2493,6 +2709,11 @@ export default function NavLive() {
           setActiveNote(noteRaw);
           if (audioOn) speakNoteTTS(noteRaw);
           didShowBlockingNoteThisTick = true;
+
+          void persistNavSession({
+            paused: true,
+            activeNote: noteRaw,
+          });
         } else {
           clearNoteTimer();
           setPaused(false);
@@ -2505,6 +2726,11 @@ export default function NavLive() {
           noteTimerRef.current = window.setTimeout(() => {
             clearNoteNow();
           }, NOTE_AUTO_HIDE_MS);
+
+          void persistNavSession({
+            paused: false,
+            activeNote: noteRaw,
+          });
         }
       }
     }
@@ -2542,6 +2768,12 @@ export default function NavLive() {
         setPaused(false);
 
         resetStopGatesFor(nextIdx);
+
+        void persistNavSession({
+          targetIdx: nextIdx,
+          paused: false,
+          activeNote: null,
+        });
       } else {
         if (audioOn) sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
         setFinished(true);
@@ -2553,6 +2785,13 @@ export default function NavLive() {
 
         clearNoteNow();
         setPaused(false);
+
+        void persistNavSession({
+          finished: true,
+          running: true,
+          paused: false,
+          activeNote: null,
+        });
       }
     }
   }, [
@@ -2801,18 +3040,18 @@ export default function NavLive() {
     WebkitTapHighlightColor: "transparent",
   };
 
-const notesPhotoBtn: React.CSSProperties = {
-  height: 40,
-  padding: "0 12px",
-  borderRadius: 12,
-  border: "1px solid rgba(255,255,255,.14)",
-  background: "rgba(255,255,255,.10)",
-  color: "#fff",
-  fontWeight: 900,
-  cursor: "pointer",
-  touchAction: "none",
-  WebkitTapHighlightColor: "transparent",
-};
+  const notesPhotoBtn: React.CSSProperties = {
+    height: 40,
+    padding: "0 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    touchAction: "none",
+    WebkitTapHighlightColor: "transparent",
+  };
 
   const startCard: React.CSSProperties = {
     width: "min(92vw, 760px)",
@@ -3040,46 +3279,70 @@ const notesPhotoBtn: React.CSSProperties = {
               ) : null}
 
               {allNotes.length ? (
-  allNotes.map((n) => (
-    <div key={n.idx} style={notesItem}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ fontWeight: 950 }}>
-          Arrêt #{n.idx + 1} — {n.label ?? "(sans nom)"}
-        </div>
+                allNotes.map((n) => (
+                  <div key={n.idx} style={notesItem}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 950 }}>
+                        Arrêt #{n.idx + 1} — {n.label ?? "(sans nom)"}
+                      </div>
 
-        <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>
-          {isBlockingType(n.type) ? "Bloquante" : "Auto 5s"} {n.triggerM != null ? `• ${Math.round(n.triggerM)} m` : ""}
-        </div>
-      </div>
+                      <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap" }}>
+                        {isBlockingType(n.type) ? "Bloquante" : "Auto 5s"} {n.triggerM != null ? `• ${Math.round(n.triggerM)} m` : ""}
+                      </div>
+                    </div>
 
-      <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.25, fontSize: 16 }}>{n.text}</div>
 
-      {n.images.length > 0 ? (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
-          {n.images.map((img, imgIdx) => (
-            <button
-              key={`${img}-${imgIdx}`}
-              style={notesPhotoBtn}
-              onPointerDown={tapHandler(() => setFullscreenImage(img))}
-              onTouchStart={tapHandler(() => setFullscreenImage(img))}
-              onClick={tapHandler(() => setFullscreenImage(img))}
-            >
-              {n.images.length > 1 ? `Voir photo ${imgIdx + 1}` : "Voir photo"}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  ))
-) : !String(generalStartNote ?? "").trim() ? (
-  <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
-) : null}
+                    {n.images.length > 0 ? (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                        {n.images.map((img, imgIdx) => (
+                          <button
+                            key={`${img}-${imgIdx}`}
+                            style={notesPhotoBtn}
+                            onPointerDown={tapHandler(() => setFullscreenImage(img))}
+                            onTouchStart={tapHandler(() => setFullscreenImage(img))}
+                            onClick={tapHandler(() => setFullscreenImage(img))}
+                          >
+                            {n.images.length > 1 ? `Voir photo ${imgIdx + 1}` : "Voir photo"}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))
+              ) : !String(generalStartNote ?? "").trim() ? (
+                <div style={{ opacity: 0.9, padding: 8 }}>Aucune note configurée.</div>
+              ) : null}
             </div>
           </div>
         </div>
       ) : null}
 
       <div style={topStack}>
+        <div
+          style={{
+            pointerEvents: "none",
+            display: "flex",
+            justifyContent: "center",
+            marginBottom: hasBanner ? 0 : 8,
+          }}
+        >
+          <div
+            style={{
+              background: syncBadge === "offline" ? "rgba(185,28,28,.92)" : "rgba(17,24,39,.78)",
+              color: "#fff",
+              border: "1px solid rgba(255,255,255,.14)",
+              borderRadius: 999,
+              padding: "8px 12px",
+              boxShadow: "0 10px 24px rgba(0,0,0,.18)",
+              fontSize: 12,
+              fontWeight: 900,
+            }}
+          >
+            {syncBadge === "offline" ? "Hors ligne — progression conservée localement" : "Navigation active"}
+          </div>
+        </div>
+
         {stopBanner?.show &&
           (() => {
             const MAX = Number.isFinite(stopBanner.max) ? stopBanner.max : 50;

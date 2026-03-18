@@ -3,16 +3,44 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
-import { page, container, card, muted, btn, select, input } from "@/ui";
+import { get as idbGet, set as idbSet, del as idbDel } from "idb-keyval";
+import { muted, btn, select, input } from "@/ui";
 
 type TCode = "B" | "C" | "S";
 type Circuit = { id: string; nom: string };
 type Point = { idx: number; lat: number; lng: number; label: string | null; created_at?: string };
 
-// ✅ réponse souple (ça évite de “casser” si ton API retourne un shape légèrement différent)
+// réponse souple
 type SaveTraceResp = { ok?: boolean; version_id?: string; points_saved?: number };
 
 type StopSaveState = "idle" | "saving" | "success" | "error";
+type SyncState = "synced" | "pending" | "offline";
+
+type LocalPoint = {
+  idx: number;
+  lat: number;
+  lng: number;
+  label: string | null;
+  created_at?: string;
+  synced?: boolean;
+};
+
+type ActiveRecordSession = {
+  transporteur: TCode;
+  selectedCircuit: string;
+  versionId: string;
+  recording: boolean;
+  startedAt: string;
+  trace: [number, number][];
+  points: LocalPoint[];
+  tracePaused: boolean;
+  gpsAccuracy: number | null;
+  updatedAt: string;
+};
+
+const ACTIVE_RECORD_KEY = "gps_record_active_v2";
+const LS_T = "gps_record_transporteur";
+const LS_C = "gps_record_circuit";
 
 function useQuery() {
   const { search } = useLocation();
@@ -47,8 +75,32 @@ function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng:
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-const LS_T = "gps_record_transporteur";
-const LS_C = "gps_record_circuit";
+async function getActiveRecordSession(): Promise<ActiveRecordSession | null> {
+  return (await idbGet(ACTIVE_RECORD_KEY)) ?? null;
+}
+
+async function saveActiveRecordSession(session: ActiveRecordSession): Promise<void> {
+  await idbSet(ACTIVE_RECORD_KEY, {
+    ...session,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function clearActiveRecordSession(): Promise<void> {
+  await idbDel(ACTIVE_RECORD_KEY);
+}
+
+function isLikelyNetworkError(err: any) {
+  const msg = String(err?.message ?? err ?? "").toLowerCase();
+  return (
+    msg.includes("network") ||
+    msg.includes("fetch") ||
+    msg.includes("timeout") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("load failed") ||
+    msg.includes("offline")
+  );
+}
 
 export default function Record() {
   const q = useQuery();
@@ -63,7 +115,7 @@ export default function Record() {
   const [circuits, setCircuits] = useState<Circuit[]>([]);
   const [selectedCircuit, setSelectedCircuit] = useState<string>(q.get("circuit") || localStorage.getItem(LS_C) || "");
 
-  // Écran départ : 2 choix
+  // Écran départ
   const [step, setStep] = useState<"pick" | "new" | "update">("pick");
 
   // Nouveau
@@ -76,14 +128,14 @@ export default function Record() {
   // ARRÊTS
   const [points, setPoints] = useState<Point[]>([]);
 
-  // TRACE (moteur conservé)
+  // TRACE
   const [trace, setTrace] = useState<[number, number][]>([]);
   const [tracePaused, setTracePaused] = useState(false);
 
-  // ✅ NEW: état sauvegarde trace
+  // Sauvegarde trace
   const [savingTrace, setSavingTrace] = useState(false);
 
-  // ✅ NEW: état visuel sauvegarde arrêt
+  // Sauvegarde arrêt
   const [stopSaveState, setStopSaveState] = useState<StopSaveState>("idle");
   const [stopSaveMessage, setStopSaveMessage] = useState("");
   const stopSaveTimerRef = useRef<number | null>(null);
@@ -97,6 +149,11 @@ export default function Record() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
+  // Sync état
+  const [syncState, setSyncState] = useState<SyncState>("synced");
+  const syncingStopsRef = useRef(false);
+  const restoreDoneRef = useRef(false);
+
   // Throttle trace
   const lastTracePointRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastTraceAtRef = useRef<number>(0);
@@ -105,7 +162,7 @@ export default function Record() {
   const TRACE_MIN_MS = 1200;
   const TRACE_MAX_POINTS = 12000;
 
-  // ✅ KEEP SCREEN AWAKE (Wake Lock)
+  // Wake Lock
   const wakeLockRef = useRef<any>(null);
 
   function clearStopSaveTimer() {
@@ -146,7 +203,7 @@ export default function Record() {
   async function requestWakeLock() {
     try {
       const navAny = navigator as any;
-      if (!navAny?.wakeLock?.request) return; // pas supporté (souvent iOS Safari)
+      if (!navAny?.wakeLock?.request) return;
       wakeLockRef.current = await navAny.wakeLock.request("screen");
     } catch {
       // silence
@@ -208,8 +265,80 @@ export default function Record() {
   }
 
   async function loadPointsByVersion(vId: string) {
-    const r = await callFn<{ points: Point[] }>("circuits-api", { action: "get_points_by_version", version_id: vId });
+    const r = await callFn<{ points: Point[] }>("circuits-api", {
+      action: "get_points_by_version",
+      version_id: vId,
+    });
     setPoints(r.points ?? []);
+    return r.points ?? [];
+  }
+
+  function buildSession(partial?: Partial<ActiveRecordSession>): ActiveRecordSession | null {
+    if (!versionId) return null;
+    return {
+      transporteur,
+      selectedCircuit,
+      versionId,
+      recording,
+      startedAt: partial?.startedAt ?? new Date().toISOString(),
+      trace,
+      points: (points as LocalPoint[]) ?? [],
+      tracePaused,
+      gpsAccuracy,
+      updatedAt: new Date().toISOString(),
+      ...partial,
+    };
+  }
+
+  async function persistCurrentSession(partial?: Partial<ActiveRecordSession>) {
+    const s = buildSession(partial);
+    if (!s || !s.recording) return;
+    await saveActiveRecordSession(s);
+  }
+
+  async function syncPendingStopsIfAny() {
+    if (syncingStopsRef.current) return;
+    if (!navigator.onLine) {
+      setSyncState("offline");
+      return;
+    }
+    if (!versionId) return;
+
+    const pending = (points as LocalPoint[]).filter((p) => !p.synced);
+    if (!pending.length) {
+      setSyncState("synced");
+      return;
+    }
+
+    syncingStopsRef.current = true;
+    setSyncState("pending");
+
+    try {
+      for (const p of pending) {
+        await callFn("circuits-api", {
+          action: "add_point",
+          version_id: versionId,
+          lat: p.lat,
+          lng: p.lng,
+          label: p.label ?? null,
+        });
+
+        setPoints((prev) =>
+          prev.map((x) => (x.idx === p.idx && x.lat === p.lat && x.lng === p.lng ? { ...x, synced: true } : x)) as Point[]
+        );
+      }
+
+      const remote = await loadPointsByVersion(versionId);
+      const normalized = remote.map((p) => ({ ...p, synced: true })) as LocalPoint[];
+      setPoints(normalized as Point[]);
+      await persistCurrentSession({ points: normalized });
+
+      setSyncState("synced");
+    } catch {
+      setSyncState(navigator.onLine ? "pending" : "offline");
+    } finally {
+      syncingStopsRef.current = false;
+    }
   }
 
   useEffect(() => {
@@ -229,6 +358,49 @@ export default function Record() {
 
   useEffect(() => {
     return () => clearStopSaveTimer();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreSession() {
+      if (restoreDoneRef.current) return;
+      restoreDoneRef.current = true;
+
+      try {
+        const session = await getActiveRecordSession();
+        if (!session?.recording || !session.versionId) return;
+        if (cancelled) return;
+
+        setTransporteur(session.transporteur);
+        setSelectedCircuit(session.selectedCircuit);
+        setVersionId(session.versionId);
+        setRecording(true);
+        setTrace(session.trace ?? []);
+        setPoints(((session.points ?? []).map((p) => ({ ...p })) as unknown) as Point[]);
+        setTracePaused(session.tracePaused ?? false);
+        setGpsAccuracy(session.gpsAccuracy ?? null);
+        setGpsOk(true);
+        setStep("pick");
+
+        const last = session.trace?.length ? session.trace[session.trace.length - 1] : null;
+        if (last) {
+          lastTracePointRef.current = { lat: last[0], lng: last[1] };
+          lastTraceAtRef.current = Date.now();
+        }
+
+        const hasPendingStops = (session.points ?? []).some((p) => !p.synced);
+        setSyncState(!navigator.onLine ? "offline" : hasPendingStops ? "pending" : "synced");
+      } catch {
+        // silence
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -256,7 +428,6 @@ export default function Record() {
     };
   }, [canGeo]);
 
-  // ✅ Empêche l'écran de se mettre en veille pendant l'enregistrement
   useEffect(() => {
     if (!recording) {
       releaseWakeLock();
@@ -285,7 +456,48 @@ export default function Record() {
     };
   }, [recording]);
 
-  // WATCH GPS pendant enregistrement : construit TRACE
+  // Persistance locale automatique pendant l'enregistrement
+  useEffect(() => {
+    if (!recording || !versionId) return;
+    persistCurrentSession().catch(() => {
+      // silence
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, versionId, trace, points, tracePaused, gpsAccuracy, transporteur, selectedCircuit]);
+
+  // État réseau
+  useEffect(() => {
+    const onOnline = () => {
+      setSyncState(((points as LocalPoint[]).some((p) => !p.synced) ? "pending" : "synced"));
+      syncPendingStopsIfAny().catch(() => {
+        // silence
+      });
+    };
+    const onOffline = () => setSyncState("offline");
+
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [points, versionId]);
+
+  // Retry sync périodique des arrêts en attente
+  useEffect(() => {
+    if (!recording || !versionId) return;
+
+    const id = window.setInterval(() => {
+      syncPendingStopsIfAny().catch(() => {
+        // silence
+      });
+    }, 15000);
+
+    return () => window.clearInterval(id);
+  }, [recording, versionId, points]);
+
+  // WATCH GPS pendant enregistrement
   useEffect(() => {
     if (!recording) return;
     if (!canGeo) return;
@@ -326,6 +538,8 @@ export default function Record() {
             if (next.length > TRACE_MAX_POINTS) next.splice(0, next.length - TRACE_MAX_POINTS);
             return next;
           });
+
+          setSyncState((prev) => (!navigator.onLine ? "offline" : prev === "offline" ? "pending" : prev));
         },
         (err) => {
           if (cancelled) return;
@@ -344,13 +558,28 @@ export default function Record() {
     };
   }, [recording, tracePaused, canGeo]);
 
-  function resetSessionForStart() {
+  function resetSessionForStart(nextVersionId: string) {
     setRecording(true);
+    setVersionId(nextVersionId);
     setPoints([]);
     setTrace([]);
     setTracePaused(false);
+    setSyncState(navigator.onLine ? "synced" : "offline");
     lastTracePointRef.current = null;
     lastTraceAtRef.current = 0;
+
+    void saveActiveRecordSession({
+      transporteur,
+      selectedCircuit,
+      versionId: nextVersionId,
+      recording: true,
+      startedAt: new Date().toISOString(),
+      trace: [],
+      points: [],
+      tracePaused: false,
+      gpsAccuracy: null,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async function startNew() {
@@ -376,8 +605,7 @@ export default function Record() {
       });
 
       setSelectedCircuit(r.circuit_id);
-      setVersionId(r.version_id);
-      resetSessionForStart();
+      resetSessionForStart(r.version_id);
 
       setNewNom("");
       await loadCircuits();
@@ -407,8 +635,7 @@ export default function Record() {
         note: "Mise à jour",
       });
 
-      setVersionId(r.version_id);
-      resetSessionForStart();
+      resetSessionForStart(r.version_id);
     } catch (e: any) {
       if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
@@ -416,7 +643,6 @@ export default function Record() {
     }
   }
 
-  // ✅ Ajout arrêt: loading + succès/erreur visuels
   async function addStop() {
     if (!versionId) return;
 
@@ -439,27 +665,64 @@ export default function Record() {
         }
       }
 
-      await callFn("circuits-api", {
-        action: "add_point",
-        version_id: versionId,
-        lat: pos.lat,
-        lng: pos.lng,
-        label: null,
-      });
-
-      await sleep(80);
-      await loadPointsByVersion(versionId);
-
       const curr = { lat: pos.lat, lng: pos.lng };
       lastTracePointRef.current = curr;
       lastTraceAtRef.current = Date.now();
+
       setTrace((prev) => {
         const next: [number, number][] = [...prev, [pos.lat, pos.lng]];
         if (next.length > TRACE_MAX_POINTS) next.splice(0, next.length - TRACE_MAX_POINTS);
         return next;
       });
 
-      showStopSuccess("Arrêt enregistré");
+      const localPoint: LocalPoint = {
+        idx: points.length + 1,
+        lat: pos.lat,
+        lng: pos.lng,
+        label: null,
+        created_at: new Date().toISOString(),
+        synced: false,
+      };
+
+      // Hors ligne: on garde localement
+      if (!navigator.onLine) {
+        const nextPoints = [...(points as LocalPoint[]), localPoint];
+        setPoints(nextPoints as Point[]);
+        await persistCurrentSession({ points: nextPoints });
+        setSyncState("offline");
+        showStopSuccess("Arrêt enregistré localement");
+        return;
+      }
+
+      try {
+        await callFn("circuits-api", {
+          action: "add_point",
+          version_id: versionId,
+          lat: pos.lat,
+          lng: pos.lng,
+          label: null,
+        });
+
+        await sleep(80);
+        const remote = await loadPointsByVersion(versionId);
+        const normalized = remote.map((p) => ({ ...p, synced: true })) as LocalPoint[];
+        setPoints(normalized as Point[]);
+        await persistCurrentSession({ points: normalized });
+        setSyncState("synced");
+        showStopSuccess("Arrêt enregistré");
+      } catch (e: any) {
+        // Réseau instable: on tombe en local pour ne rien perdre
+        if (isLikelyNetworkError(e) || !navigator.onLine) {
+          const nextPoints = [...(points as LocalPoint[]), localPoint];
+          setPoints(nextPoints as Point[]);
+          await persistCurrentSession({ points: nextPoints });
+          setSyncState(navigator.onLine ? "pending" : "offline");
+          showStopSuccess("Arrêt enregistré localement");
+          return;
+        }
+
+        throw e;
+      }
     } catch (e: any) {
       if (e?.message === "NOT_AUTHENTICATED") {
         setStopSaveState("idle");
@@ -472,15 +735,12 @@ export default function Record() {
     }
   }
 
-  // ✅ NEW: Sauvegarder la trace (circuit_traces) avant de quitter
   async function saveTraceIfAny(vId: string) {
     if (!vId) return;
-    if (!trace || trace.length < 2) return; // évite trail inutile
+    if (!trace || trace.length < 2) return;
 
-    // format attendu: [{idx,lat,lng}, ...]
     const trail = trace.map(([lat, lng], i) => ({ idx: i + 1, lat, lng }));
 
-    // retry léger (mobile / réseau)
     let lastErr: any = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -505,47 +765,72 @@ export default function Record() {
   }
 
   async function stop() {
-    await releaseWakeLock(); // ✅ coupe le wake lock tout de suite
+    await releaseWakeLock();
 
-    const vId = versionId; // ✅ capture avant reset
+    const vId = versionId;
 
-    // ✅ on tente de sauvegarder la trace AVANT de quitter
-    if (vId && !savingTrace) {
+    if (!vId) {
+      setRecording(false);
+      setVersionId(null);
+      setPoints([]);
+      setTrace([]);
+      setTracePaused(false);
+      lastTracePointRef.current = null;
+      lastTraceAtRef.current = 0;
+      await clearActiveRecordSession();
+      nav("/");
+      return;
+    }
+
+    if (!savingTrace) {
       setSavingTrace(true);
       try {
         await requireAuth();
+
+        // d'abord on tente de pousser les arrêts locaux en attente
+        await syncPendingStopsIfAny();
+
+        // ensuite la trace
         await saveTraceIfAny(vId);
+
+        setRecording(false);
+        setVersionId(null);
+        setPoints([]);
+        setTrace([]);
+        setTracePaused(false);
+        lastTracePointRef.current = null;
+        lastTraceAtRef.current = 0;
+        setSyncState("synced");
+
+        await clearActiveRecordSession();
+        nav("/");
+        return;
       } catch (e: any) {
         const ok = confirm(
-          `Impossible de sauvegarder la trace (réseau / permissions).\n\n` +
-            `Voulez-vous quitter quand même ?\n\n` +
+          `Impossible de sauvegarder complètement la session pour l’instant.\n\n` +
+            `Le trajet a été conservé localement sur l’appareil.\n` +
+            `Voulez-vous quitter quand même et le reprendre plus tard ?\n\n` +
             `Détail: ${e?.message ?? e}`
         );
+
         if (!ok) {
           setSavingTrace(false);
-          // ✅ redemande wake lock si on reste dans l'écran
           await requestWakeLock();
           return;
         }
+
+        // On quitte SANS effacer la session locale
+        setRecording(false);
+        setVersionId(vId);
+        setSyncState(navigator.onLine ? "pending" : "offline");
+        nav("/");
+        return;
       } finally {
         setSavingTrace(false);
       }
     }
-
-    setRecording(false);
-    setVersionId(null);
-    setPoints([]);
-    setTrace([]);
-    setTracePaused(false);
-    lastTracePointRef.current = null;
-    lastTraceAtRef.current = 0;
-
-    nav("/");
   }
 
-  // =========================
-  // LOOK (aligné Portal)
-  // =========================
   const pageLook: React.CSSProperties = {
     minHeight: "100vh",
     width: "100%",
@@ -710,6 +995,18 @@ export default function Record() {
     color: "rgba(15,23,42,.68)",
   };
 
+  const syncPill: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "8px 12px",
+    borderRadius: 999,
+    fontWeight: 900,
+    fontSize: 12,
+    margin: "0 auto",
+    border: "1px solid rgba(2,6,23,.08)",
+  };
+
   const stopFeedbackBackdrop: React.CSSProperties = {
     position: "fixed",
     inset: 0,
@@ -771,30 +1068,22 @@ export default function Record() {
             </div>
 
             <div style={{ fontWeight: 950, fontSize: 22, color: "#0f172a", letterSpacing: -0.3 }}>
-              {stopSaveState === "saving"
-                ? "Enregistrement…"
-                : stopSaveState === "success"
-                ? "Réussi"
-                : "Erreur"}
+              {stopSaveState === "saving" ? "Enregistrement…" : stopSaveState === "success" ? "Réussi" : "Erreur"}
             </div>
 
-            <div style={{ marginTop: 8, color: "rgba(15,23,42,.70)", fontWeight: 700 }}>
-              {stopSaveMessage}
-            </div>
+            <div style={{ marginTop: 8, color: "rgba(15,23,42,.70)", fontWeight: 700 }}>{stopSaveMessage}</div>
           </div>
         </div>
       ) : null}
 
       <div style={wrap}>
         <div style={mainCard}>
-          {/* Entête (même vibe Portal) */}
           <div style={topRow}>
             <div style={brand}>
               <p style={brandName}>Groupe Breton</p>
               <div style={brandSub}>Espace conducteur</div>
             </div>
 
-            {/* Retour en haut à droite (comme tu montrais) */}
             {!recording ? (
               <button
                 type="button"
@@ -813,7 +1102,6 @@ export default function Record() {
             ) : null}
           </div>
 
-          {/* ENREGISTREMENT */}
           {recording ? (
             <>
               <div style={{ ...sectionCard, marginTop: 0 }}>
@@ -823,13 +1111,36 @@ export default function Record() {
                     <b>{gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}</b>
                   </div>
 
+                  <div style={{ display: "grid", placeItems: "center" }}>
+                    <div
+                      style={{
+                        ...syncPill,
+                        background:
+                          syncState === "synced"
+                            ? "rgba(5,150,105,.12)"
+                            : syncState === "offline"
+                            ? "rgba(220,38,38,.12)"
+                            : "rgba(217,119,6,.12)",
+                        color:
+                          syncState === "synced"
+                            ? "#065f46"
+                            : syncState === "offline"
+                            ? "#991b1b"
+                            : "#92400e",
+                      }}
+                    >
+                      {syncState === "synced" && "Synchronisé"}
+                      {syncState === "pending" && "Sauvegarde locale active — sync en attente"}
+                      {syncState === "offline" && "Hors ligne — trajet conservé localement"}
+                    </div>
+                  </div>
+
                   <div
                     style={{
                       display: "grid",
                       gap: 14,
                     }}
                   >
-                    {/* ARRÊT */}
                     <div
                       style={{
                         ...actionGreen,
@@ -852,7 +1163,6 @@ export default function Record() {
                       <div style={rightPill}>{stopSaveState === "saving" ? "…" : "Ouvrir ›"}</div>
                     </div>
 
-                    {/* STOP */}
                     <div
                       style={{ ...actionRed, ...(busy || savingTrace || stopSaveState === "saving" ? disabledAction : {}) }}
                       onClick={busy || savingTrace || stopSaveState === "saving" ? undefined : stop}
@@ -877,16 +1187,15 @@ export default function Record() {
                 </div>
               </div>
 
-              {/* Liste des arrêts (discrète) */}
               <div style={sectionCard}>
                 <div style={{ fontWeight: 950, marginBottom: 10, color: "#0f172a" }}>Arrêts</div>
                 {points.length === 0 ? (
                   <div style={muted}>—</div>
                 ) : (
                   <div style={{ display: "grid", gap: 10 }}>
-                    {points.map((p) => (
+                    {(points as LocalPoint[]).map((p) => (
                       <div
-                        key={p.idx}
+                        key={`${p.idx}-${p.lat}-${p.lng}`}
                         style={{
                           display: "flex",
                           gap: 10,
@@ -899,7 +1208,9 @@ export default function Record() {
                       >
                         <div style={{ width: 42, fontWeight: 950, color: "rgba(15,23,42,.85)" }}>{p.idx}</div>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 900, color: "#0f172a" }}>Arrêt</div>
+                          <div style={{ fontWeight: 900, color: "#0f172a" }}>
+                            Arrêt {p.synced === false ? "• local" : ""}
+                          </div>
                           <div style={muted}>
                             {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
                           </div>
@@ -912,10 +1223,8 @@ export default function Record() {
             </>
           ) : (
             <>
-              {/* DÉPART */}
               {step === "pick" ? (
                 <div style={{ display: "grid", gap: 14 }}>
-                  {/* Nouveau */}
                   <div
                     style={actionBlue}
                     onClick={() => setStep("new")}
@@ -931,7 +1240,6 @@ export default function Record() {
                     <div style={rightPill}>Ouvrir ›</div>
                   </div>
 
-                  {/* Mettre à jour */}
                   <div
                     style={actionLightRow}
                     onClick={() => setStep("update")}
@@ -1043,7 +1351,6 @@ export default function Record() {
                       GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
                     </div>
 
-                    {/* NOTE: le "Retour" est en haut à droite; on garde quand même un fallback bas */}
                     <div style={{ marginTop: 6 }}>
                       <button
                         type="button"

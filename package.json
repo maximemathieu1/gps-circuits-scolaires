@@ -12,6 +12,7 @@
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
     "@supabase/supabase-js": "^2.97.0",
+    "idb-keyval": "^6.2.2",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.575.0",
     "mapbox-gl": "^3.19.0",
