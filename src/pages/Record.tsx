@@ -765,68 +765,59 @@ export default function Record() {
   }
 
   async function stop() {
+    if (savingTrace) return;
+
     await releaseWakeLock();
 
     const vId = versionId;
+    const hadRecording = recording;
 
-    if (!vId) {
+    setSavingTrace(true);
+
+    try {
+      // On tente de sauvegarder, mais STOP doit toujours terminer
+      if (vId) {
+        try {
+          await requireAuth();
+        } catch {
+          // on ignore ici: on termine pareil
+        }
+
+        try {
+          await syncPendingStopsIfAny();
+        } catch {
+          // on ignore ici: on termine pareil
+        }
+
+        try {
+          await saveTraceIfAny(vId);
+        } catch (e) {
+          console.warn("saveTraceIfAny failed on stop:", e);
+        }
+      }
+    } finally {
+      // Terminer TOUJOURS la session locale
       setRecording(false);
       setVersionId(null);
       setPoints([]);
       setTrace([]);
       setTracePaused(false);
+      setSyncState("synced");
+      setStopSaveState("idle");
+      setStopSaveMessage("");
       lastTracePointRef.current = null;
       lastTraceAtRef.current = 0;
-      await clearActiveRecordSession();
-      nav("/");
-      return;
-    }
 
-    if (!savingTrace) {
-      setSavingTrace(true);
       try {
-        await requireAuth();
-
-        // d'abord on tente de pousser les arrêts locaux en attente
-        await syncPendingStopsIfAny();
-
-        // ensuite la trace
-        await saveTraceIfAny(vId);
-
-        setRecording(false);
-        setVersionId(null);
-        setPoints([]);
-        setTrace([]);
-        setTracePaused(false);
-        lastTracePointRef.current = null;
-        lastTraceAtRef.current = 0;
-        setSyncState("synced");
-
         await clearActiveRecordSession();
-        nav("/");
-        return;
-      } catch (e: any) {
-        const ok = confirm(
-          `Impossible de sauvegarder complètement la session pour l’instant.\n\n` +
-            `Le trajet a été conservé localement sur l’appareil.\n` +
-            `Voulez-vous quitter quand même et le reprendre plus tard ?\n\n` +
-            `Détail: ${e?.message ?? e}`
-        );
+      } catch {
+        // silence
+      }
 
-        if (!ok) {
-          setSavingTrace(false);
-          await requestWakeLock();
-          return;
-        }
+      setSavingTrace(false);
 
-        // On quitte SANS effacer la session locale
-        setRecording(false);
-        setVersionId(vId);
-        setSyncState(navigator.onLine ? "pending" : "offline");
+      if (hadRecording || vId) {
         nav("/");
-        return;
-      } finally {
-        setSavingTrace(false);
       }
     }
   }
@@ -1176,13 +1167,13 @@ export default function Record() {
                           {savingTrace ? "STOP…" : "STOP"}
                         </div>
                         <div style={{ marginTop: 6, fontWeight: 750, opacity: 0.9 }}>
-                          {savingTrace ? "Sauvegarde en cours" : "Terminer la session"}
+                          {savingTrace ? "Sauvegarde / fermeture…" : "Terminer la session"}
                         </div>
                       </div>
                       <div style={rightPill}>{savingTrace ? "…" : "Ouvrir ›"}</div>
                     </div>
 
-                    {savingTrace ? <div style={{ ...muted, textAlign: "center" }}>Sauvegarde de la trace…</div> : null}
+                    {savingTrace ? <div style={{ ...muted, textAlign: "center" }}>Fermeture de la session…</div> : null}
                   </div>
                 </div>
               </div>

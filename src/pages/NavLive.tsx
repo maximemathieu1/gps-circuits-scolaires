@@ -8,48 +8,61 @@ import { haversineMeters } from "@/lib/geo";
 import { useWakeLock } from "@/lib/useWakeLock";
 import { getNavLiveSession, saveNavLiveSession, clearNavLiveSession } from "@/lib/navLiveSession";
 
-/* =========================
-   Types (alignés DB)
-========================= */
-
-type StopType = "school" | "school_uturn" | "uturn" | "transfer" | "ecole";
-
-type StopPoint = {
-  lat: number;
-  lng: number;
-  label?: string | null;
-  stop_type?: StopType | null;
-
-  note?: string | null;
-  note_trigger_m?: number | null;
-  note_once?: boolean | null;
-  note_images?: string[] | null;
-};
-
-type PointsResp = {
-  version_id: string;
-  general_note_start?: string | null;
-  points: {
-    idx: number;
-    lat: number;
-    lng: number;
-    label?: string | null;
-    stop_type?: StopType | null;
-    note?: string | null;
-    note_trigger_m?: number | null;
-    note_once?: boolean | null;
-    note_images?: string[] | null;
-  }[];
-};
-
-type TraceResp = {
-  version_id: string;
-  points_count: number;
-  trail: { idx: number; lat: number; lng: number }[];
-  updated_at?: string;
-};
-
-type LatLng = { lat: number; lng: number };
+import type { StopType, StopPoint, PointsResp, TraceResp, LatLng } from "@/lib/navlive/types";
+import {
+  NOTE_REPEAT_COOLDOWN_MS,
+  NOTE_AUTO_HIDE_MS,
+  NOTE_SUPPRESS_HYSTERESIS_M,
+  ACTIVE_MIN_POINTS,
+  JOIN_DIST_M,
+  SNAP_MAX_DIST_M,
+  SNAP_VISUAL_MAX_DIST_M,
+  SNAP_AHEAD_PTS,
+  SNAP_BACK_PTS,
+  PREDICT_AHEAD_MAX_MS,
+  SNAP_DISPLAY_AHEAD_SEC,
+  MIN_TRAVEL_AFTER_TARGET_SET_M,
+  ARRIVE_EPS_M,
+  ARRIVE_STOP_M_DEFAULT,
+  ARRIVE_STOP_M_BLOCKING,
+  DING_AT_M,
+  APPROACH_MAX_ZOOM,
+  PRECISE_STOP_ZONE_M,
+  VERY_PRECISE_STOP_ZONE_M,
+  LOW_SPEED_PRECISE_KMH,
+  VERY_LOW_SPEED_PRECISE_KMH,
+  STOP_LOCK_ZONE_M,
+  STOP_LOCK_VERY_NEAR_M,
+  STOP_LOCK_SPEED_KMH,
+  STOP_LOCK_STOPPED_KMH,
+  STOP_APPROACH_HOLD_MS,
+  STOP_HOLD_RELEASE_OVER_KMH,
+  STOP_HOLD_STOPPED_KMH,
+  STOP_HOLD_AFTER_STOP_MS,
+  STOP_RELEASE_PAST_STOP_M,
+} from "@/lib/navlive/constants";
+import {
+  clamp,
+  minDistanceToPolylineMeters,
+  nearestLineIndex,
+  nearestLineIndexWindow,
+  snapPointToPolyline,
+  movePointMeters,
+  advanceAlongPolyline,
+  wrap360,
+  bearingDeg,
+  smoothAngle,
+} from "@/lib/navlive/geo";
+import {
+  stopTypeOrDefault,
+  isBlockingType,
+  haloColorForType,
+  activeLineColorForType,
+  bannerTitleForType,
+  bannerIconForType,
+  tapHandler,
+} from "@/lib/navlive/ui";
+import { useSfx, audioKeyForStopType, speakNoteTTS } from "@/lib/navlive/audio";
 
 /* =========================
    Helpers
@@ -82,455 +95,6 @@ function watchPos(
   );
 }
 
-function clamp(v: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, v));
-}
-
-function projectMeters(originLat: number, p: LatLng) {
-  const R = 6371000;
-  const lat = (p.lat * Math.PI) / 180;
-  const lng = (p.lng * Math.PI) / 180;
-  const lat0 = (originLat * Math.PI) / 180;
-  return { x: R * lng * Math.cos(lat0), y: R * lat };
-}
-
-function unprojectMeters(originLat: number, x: number, y: number): LatLng {
-  const R = 6371000;
-  const lat0 = (originLat * Math.PI) / 180;
-  const lat = (y / R) * (180 / Math.PI);
-  const lng = (x / (R * Math.cos(lat0))) * (180 / Math.PI);
-  return { lat, lng };
-}
-
-function distPointToSegmentMeters(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
-  const P = projectMeters(originLat, p);
-  const A = projectMeters(originLat, a);
-  const B = projectMeters(originLat, b);
-
-  const ABx = B.x - A.x;
-  const ABy = B.y - A.y;
-  const APx = P.x - A.x;
-  const APy = P.y - A.y;
-
-  const denom = ABx * ABx + ABy * ABy;
-  if (denom <= 1e-9) return Math.hypot(P.x - A.x, P.y - A.y);
-
-  const t = clamp((APx * ABx + APy * ABy) / denom, 0, 1);
-  const cx = A.x + t * ABx;
-  const cy = A.y + t * ABy;
-
-  return Math.hypot(P.x - cx, P.y - cy);
-}
-
-function minDistanceToPolylineMeters(me: LatLng, line: [number, number][]) {
-  if (!line || line.length < 2) return null;
-
-  const originLat = me.lat;
-  let best = Infinity;
-
-  for (let i = 0; i < line.length - 1; i++) {
-    const a = { lat: line[i][0], lng: line[i][1] };
-    const b = { lat: line[i + 1][0], lng: line[i + 1][1] };
-    const d = distPointToSegmentMeters(originLat, me, a, b);
-    if (d < best) best = d;
-  }
-
-  return Number.isFinite(best) ? best : null;
-}
-
-function nearestLineIndex(me: LatLng, line: [number, number][]) {
-  if (!line || line.length === 0) return null;
-  let best = Infinity;
-  let bestIdx = 0;
-  for (let i = 0; i < line.length; i++) {
-    const d = haversineMeters(me, { lat: line[i][0], lng: line[i][1] });
-    if (d < best) {
-      best = d;
-      bestIdx = i;
-    }
-  }
-  return { idx: bestIdx, dist: best };
-}
-
-function nearestLineIndexWindow(me: LatLng, line: [number, number][], start: number, end: number) {
-  if (!line || line.length === 0) return null;
-  const s = clamp(Math.floor(start), 0, line.length - 1);
-  const e = clamp(Math.floor(end), 0, line.length - 1);
-  const a = Math.min(s, e);
-  const b = Math.max(s, e);
-
-  let best = Infinity;
-  let bestIdx = a;
-
-  for (let i = a; i <= b; i++) {
-    const d = haversineMeters(me, { lat: line[i][0], lng: line[i][1] });
-    if (d < best) {
-      best = d;
-      bestIdx = i;
-    }
-  }
-  return { idx: bestIdx, dist: best };
-}
-
-function projectPointOnSegment(originLat: number, p: LatLng, a: LatLng, b: LatLng) {
-  const P = projectMeters(originLat, p);
-  const A = projectMeters(originLat, a);
-  const B = projectMeters(originLat, b);
-
-  const ABx = B.x - A.x;
-  const ABy = B.y - A.y;
-  const APx = P.x - A.x;
-  const APy = P.y - A.y;
-
-  const denom = ABx * ABx + ABy * ABy;
-  if (denom <= 1e-9) {
-    return {
-      point: a,
-      t: 0,
-      dist: Math.hypot(P.x - A.x, P.y - A.y),
-    };
-  }
-
-  const t = clamp((APx * ABx + APy * ABy) / denom, 0, 1);
-  const cx = A.x + t * ABx;
-  const cy = A.y + t * ABy;
-
-  return {
-    point: unprojectMeters(originLat, cx, cy),
-    t,
-    dist: Math.hypot(P.x - cx, P.y - cy),
-  };
-}
-
-function snapPointToPolyline(
-  me: LatLng,
-  line: [number, number][],
-  startIdx = 0,
-  endIdx = Math.max(0, line.length - 1)
-) {
-  if (!line || line.length < 2) return null;
-
-  const s = clamp(Math.floor(startIdx), 0, line.length - 2);
-  const e = clamp(Math.floor(endIdx), 1, line.length - 1);
-  const a = Math.min(s, e - 1);
-  const b = Math.max(s + 1, e);
-
-  let best: {
-    point: LatLng;
-    dist: number;
-    segIdx: number;
-    t: number;
-  } | null = null;
-
-  for (let i = a; i < b; i++) {
-    const A = { lat: line[i][0], lng: line[i][1] };
-    const B = { lat: line[i + 1][0], lng: line[i + 1][1] };
-    const pr = projectPointOnSegment(me.lat, me, A, B);
-
-    if (!best || pr.dist < best.dist) {
-      best = {
-        point: pr.point,
-        dist: pr.dist,
-        segIdx: i,
-        t: pr.t,
-      };
-    }
-  }
-
-  if (!best) return null;
-
-  return {
-    point: best.point,
-    dist: best.dist,
-    segIdx: best.segIdx,
-    approxIdx: best.segIdx + best.t,
-  };
-}
-
-function movePointMeters(p: LatLng, bearingDegValue: number, meters: number): LatLng {
-  const R = 6371000;
-  const br = (bearingDegValue * Math.PI) / 180;
-  const lat1 = (p.lat * Math.PI) / 180;
-  const lon1 = (p.lng * Math.PI) / 180;
-  const d = meters / R;
-
-  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(br));
-  const lon2 =
-    lon1 +
-    Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
-
-  return {
-    lat: (lat2 * 180) / Math.PI,
-    lng: (lon2 * 180) / Math.PI,
-  };
-}
-
-function interpolateLatLng(a: LatLng, b: LatLng, t: number): LatLng {
-  const tt = clamp(t, 0, 1);
-  return {
-    lat: a.lat + (b.lat - a.lat) * tt,
-    lng: a.lng + (b.lng - a.lng) * tt,
-  };
-}
-
-function advanceAlongPolyline(
-  line: [number, number][],
-  approxIdx: number,
-  metersAhead: number
-): { point: LatLng; approxIdx: number } | null {
-  if (!line || line.length < 2) return null;
-
-  let idx = clamp(approxIdx, 0, line.length - 1);
-  let i = Math.floor(idx);
-  let frac = idx - i;
-
-  if (i >= line.length - 1) {
-    const last = line[line.length - 1];
-    return { point: { lat: last[0], lng: last[1] }, approxIdx: line.length - 1 };
-  }
-
-  let remaining = Math.max(0, metersAhead);
-
-  let a: LatLng = { lat: line[i][0], lng: line[i][1] };
-  let b: LatLng = { lat: line[i + 1][0], lng: line[i + 1][1] };
-
-  let segLen = haversineMeters(a, b);
-  if (segLen < 0.01) segLen = 0.01;
-
-  let onSeg = interpolateLatLng(a, b, frac);
-  let distLeftOnSeg = haversineMeters(onSeg, b);
-
-  if (remaining <= distLeftOnSeg) {
-    const t = frac + (1 - frac) * (remaining / distLeftOnSeg || 0);
-    return { point: interpolateLatLng(a, b, t), approxIdx: i + t };
-  }
-
-  remaining -= distLeftOnSeg;
-  i += 1;
-
-  while (i < line.length - 1) {
-    a = { lat: line[i][0], lng: line[i][1] };
-    b = { lat: line[i + 1][0], lng: line[i + 1][1] };
-    segLen = haversineMeters(a, b);
-
-    if (segLen < 0.01) {
-      i += 1;
-      continue;
-    }
-
-    if (remaining <= segLen) {
-      const t = remaining / segLen;
-      return { point: interpolateLatLng(a, b, t), approxIdx: i + t };
-    }
-
-    remaining -= segLen;
-    i += 1;
-  }
-
-  const last = line[line.length - 1];
-  return { point: { lat: last[0], lng: last[1] }, approxIdx: line.length - 1 };
-}
-
-/* =========================
-   UI / Type mapping
-========================= */
-
-function stopTypeOrDefault(t?: StopType | null): StopType {
-  return (t ?? "school") as StopType;
-}
-
-function isBlockingType(t: StopType) {
-  return t === "transfer" || t === "ecole";
-}
-
-function haloColorForType(t: StopType) {
-  switch (t) {
-    case "school":
-      return "#FBBF24";
-    case "school_uturn":
-      return "#f97316";
-    case "uturn":
-      return "#a855f7";
-    case "transfer":
-      return "#06b6d4";
-    case "ecole":
-      return "#22c55e";
-    default:
-      return "#93c5fd";
-  }
-}
-
-function activeLineColorForType(t: StopType) {
-  switch (t) {
-    case "school":
-      return "#1d4ed8";
-    case "school_uturn":
-      return "#ea580c";
-    case "uturn":
-      return "#7c3aed";
-    case "transfer":
-      return "#0891b2";
-    case "ecole":
-      return "#16a34a";
-    default:
-      return "#1d4ed8";
-  }
-}
-
-function bannerTitleForType(t: StopType) {
-  switch (t) {
-    case "transfer":
-      return "Transfert dans";
-    case "ecole":
-      return "École dans";
-    case "uturn":
-      return "Demi-tour dans";
-    case "school_uturn":
-      return "Arrêt + demi-tour dans";
-    default:
-      return "Arrêt scolaire dans";
-  }
-}
-
-function bannerIconForType(t: StopType) {
-  switch (t) {
-    case "transfer":
-      return "🔁";
-    case "ecole":
-      return "🏫";
-    case "uturn":
-      return "↩️";
-    case "school_uturn":
-      return "🚌";
-    default:
-      return "🧒";
-  }
-}
-
-/* =========================
-   MP3 SFX
-========================= */
-
-const SOUND_URLS = {
-  audioOn: "/audio/audio_on.mp3",
-  stopWarning: "/audio/stop_warning.mp3",
-  stopReached: "/audio/stop_reached.mp3",
-  stopMissed: "/audio/stop_missed.mp3",
-  circuitDone: "/audio/circuit_done.mp3",
-  ding: "/audio/ding.mp3",
-
-  demiTour: "/audio/demi_tour.mp3",
-  arretScolaireDemiTour: "/audio/arret_scolaire_demi_tour.mp3",
-  transfert: "/audio/transfert.mp3",
-  ecole: "/audio/ecole.mp3",
-} as const;
-
-type SoundKey = keyof typeof SOUND_URLS;
-
-function useSfx() {
-  const unlockedRef = useRef(false);
-
-  const poolRef = useRef<Record<string, HTMLAudioElement[]>>({});
-  const poolPtrRef = useRef<Record<string, number>>({});
-  const lastPlayAtRef = useRef<Record<string, number>>({});
-
-  function getFromPool(key: SoundKey) {
-    const k = String(key);
-    if (!poolRef.current[k]) {
-      const url = SOUND_URLS[key] || "";
-      const poolSize = key === "ding" ? 3 : 2;
-
-      poolRef.current[k] = Array.from({ length: poolSize }).map(() => {
-        const a = new Audio(url);
-        a.preload = "auto";
-        a.crossOrigin = "anonymous";
-        (a as any).playsInline = true;
-        return a;
-      });
-      poolPtrRef.current[k] = 0;
-    }
-
-    const arr = poolRef.current[k];
-    const ptr = poolPtrRef.current[k] ?? 0;
-    const a = arr[ptr % arr.length];
-    poolPtrRef.current[k] = (ptr + 1) % arr.length;
-    return a;
-  }
-
-  function preloadAll() {
-    (Object.keys(SOUND_URLS) as SoundKey[]).forEach((k) => {
-      try {
-        const a = getFromPool(k);
-        a.load?.();
-      } catch {}
-    });
-  }
-
-  function unlock() {
-    if (unlockedRef.current) return;
-    try {
-      const a = getFromPool("audioOn");
-      a.volume = 0.001;
-      a.currentTime = 0;
-
-      const p = a.play();
-      Promise.resolve(p)
-        .then(() => {
-          try {
-            a.pause();
-            a.currentTime = 0;
-          } catch {}
-          unlockedRef.current = true;
-          try {
-            a.volume = 1.0;
-          } catch {}
-        })
-        .catch(() => {});
-    } catch {}
-  }
-
-  function play(key: SoundKey, opts?: { volume?: number; cooldownMs?: number }) {
-    try {
-      const k = String(key);
-      const now = Date.now();
-      const cd = opts?.cooldownMs ?? 700;
-      const last = lastPlayAtRef.current[k] ?? 0;
-      if (now - last < cd) return;
-      lastPlayAtRef.current[k] = now;
-
-      const a = getFromPool(key);
-      try {
-        a.pause();
-      } catch {}
-      try {
-        a.currentTime = 0;
-      } catch {}
-      try {
-        a.volume = clamp(opts?.volume ?? 1.0, 0, 1);
-      } catch {}
-
-      a.play().catch(() => {});
-    } catch {}
-  }
-
-  return { unlock, play, preloadAll };
-}
-
-function audioKeyForStopType(t: StopType): SoundKey {
-  switch (t) {
-    case "school_uturn":
-      return "arretScolaireDemiTour";
-    case "uturn":
-      return "demiTour";
-    case "transfer":
-      return "transfert";
-    case "ecole":
-      return "ecole";
-    default:
-      return "stopWarning";
-  }
-}
-
 /* =========================
    Fullscreen helpers
 ========================= */
@@ -561,51 +125,6 @@ function installAutoFullscreenOnce() {
 
   window.addEventListener("pointerdown", handler, { capture: true });
   window.addEventListener("touchstart", handler, { capture: true });
-}
-
-/* =========================
-   Bearing helpers
-========================= */
-
-function wrap360(deg: number) {
-  let d = deg % 360;
-  if (d < 0) d += 360;
-  return d;
-}
-
-function bearingDeg(a: LatLng, b: LatLng) {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const toDeg = (r: number) => (r * 180) / Math.PI;
-
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const dLon = toRad(b.lng - a.lng);
-
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-
-  let brng = toDeg(Math.atan2(y, x));
-  brng = (brng + 360) % 360;
-  return brng;
-}
-
-function smoothAngle(prev: number, next: number) {
-  const delta = ((next - prev + 540) % 360) - 180;
-  return prev + delta;
-}
-
-/* =========================
-   iOS tap helper
-========================= */
-
-function tapHandler(fn: () => void) {
-  return (e: any) => {
-    try {
-      e.preventDefault?.();
-      e.stopPropagation?.();
-    } catch {}
-    fn();
-  };
 }
 
 /* =========================
@@ -657,13 +176,10 @@ export default function NavLive() {
   const [activeNote, setActiveNote] = useState<string | null>(null);
   const noteShownForIdxRef = useRef<Set<number>>(new Set());
   const noteLastShowAtRef = useRef<Record<number, number>>({});
-  const NOTE_REPEAT_COOLDOWN_MS = 2500;
 
   const noteSuppressForIdxRef = useRef<Set<number>>(new Set());
-  const NOTE_SUPPRESS_HYSTERESIS_M = 12;
 
   const noteTimerRef = useRef<number | null>(null);
-  const NOTE_AUTO_HIDE_MS = 5000;
 
   const noteHoldUntilRef = useRef<number>(0);
   const noteHoldIdxRef = useRef<number>(-1);
@@ -743,6 +259,26 @@ export default function NavLive() {
   const stopApproachHasStoppedRef = useRef<boolean>(false);
   const peakKmhSinceTargetRef = useRef<number>(0);
 
+  const closestDistToTargetRef = useRef<number | null>(null);
+  const skipArmedRef = useRef<boolean>(false);
+  const lastAdvanceAtRef = useRef<number>(0);
+
+  const SKIP_ARM_DIST_M = 90;
+  const SKIP_AWAY_DIST_M = 55;
+  const SKIP_GROWTH_FROM_MIN_M = 18;
+  const SKIP_TRACE_MARGIN_PTS = 10;
+  const SKIP_MIN_SPEED_KMH = 8;
+  const ADVANCE_COOLDOWN_MS = 2200;
+
+  const AUTO_RESUME_TRACE_MARGIN_PTS = 18;
+  const AUTO_RESUME_CONFIRM_MS = 1800;
+  const AUTO_RESUME_MIN_SPEED_KMH = 8;
+  const AUTO_RESUME_COOLDOWN_MS = 5000;
+
+  const autoResumeCandidateRef = useRef<number | null>(null);
+  const autoResumeSinceRef = useRef<number | null>(null);
+  const lastAutoResumeAtRef = useRef<number>(0);
+
   const [stopBanner, setStopBanner] = useState<{ show: boolean; meters: number; label?: string | null; max: number }>(
     null as any
   );
@@ -757,33 +293,8 @@ export default function NavLive() {
   const lastMeRef = useRef<LatLng | null>(null);
   const travelSinceTargetSetRef = useRef(0);
   const initialDistToTargetRef = useRef<number | null>(null);
-  const MIN_TRAVEL_AFTER_TARGET_SET_M = 12;
-  const ARRIVE_EPS_M = 5;
 
   const followRef = useRef(true);
-
-  const ARRIVE_STOP_M_DEFAULT = 12;
-  const ARRIVE_STOP_M_BLOCKING = 12;
-  const DING_AT_M = 10;
-
-  const APPROACH_MAX_ZOOM = 18.4;
-
-  const PRECISE_STOP_ZONE_M = 120;
-  const VERY_PRECISE_STOP_ZONE_M = 60;
-  const LOW_SPEED_PRECISE_KMH = 22;
-  const VERY_LOW_SPEED_PRECISE_KMH = 10;
-
-  const STOP_LOCK_ZONE_M = 35;
-  const STOP_LOCK_VERY_NEAR_M = 8;
-  const STOP_LOCK_SPEED_KMH = 8;
-  const STOP_LOCK_STOPPED_KMH = 2.5;
-
-  const STOP_APPROACH_HOLD_MS = 3000;
-  const STOP_HOLD_KEEP_UNDER_KMH = 10;
-  const STOP_HOLD_RELEASE_OVER_KMH = 15;
-  const STOP_HOLD_STOPPED_KMH = 1.5;
-  const STOP_HOLD_AFTER_STOP_MS = 2500;
-  const STOP_RELEASE_PAST_STOP_M = 30;
 
   function warnStopMetersFromKmh(kmh: number) {
     if (kmh >= 85) return 300;
@@ -912,6 +423,26 @@ export default function NavLive() {
     return targetZoom;
   }
 
+  function canAdvanceStopNow() {
+    return Date.now() - lastAdvanceAtRef.current >= ADVANCE_COOLDOWN_MS;
+  }
+
+  function markStopAdvanced() {
+    lastAdvanceAtRef.current = Date.now();
+    closestDistToTargetRef.current = null;
+    skipArmedRef.current = false;
+  }
+
+  function canAutoResumeNow() {
+    return Date.now() - lastAutoResumeAtRef.current >= AUTO_RESUME_COOLDOWN_MS;
+  }
+
+  function markAutoResumed() {
+    lastAutoResumeAtRef.current = Date.now();
+    autoResumeCandidateRef.current = null;
+    autoResumeSinceRef.current = null;
+  }
+
   async function persistNavSession(
     partial?: Partial<{
       running: boolean;
@@ -961,6 +492,127 @@ export default function NavLive() {
     }
   }
 
+  function advanceToNextTarget(reason: "arrival" | "skip_trace" | "skip_away", warnMax: number) {
+    if (!canAdvanceStopNow()) return;
+
+    markStopAdvanced();
+
+    stopApproachHoldUntilRef.current = Date.now() + STOP_APPROACH_HOLD_MS;
+    stopApproachHoldActiveRef.current = true;
+    stopApproachStoppedAtRef.current = null;
+    stopApproachHasStoppedRef.current = false;
+
+    setStopBanner({ show: false, meters: 0, label: null, max: warnMax });
+
+    stopWarnRef.current = null;
+    stopWarnMaxRef.current = null;
+    stopDingRef.current = null;
+    stopBannerLastMRef.current = null;
+
+    const nextIdx = targetIdx + 1;
+
+    if (nextIdx < points.length) {
+      setTargetIdx(nextIdx);
+      clearNoteNow();
+      setPaused(false);
+      resetStopGatesFor(nextIdx);
+
+      void persistNavSession({
+        targetIdx: nextIdx,
+        paused: false,
+        activeNote: null,
+      });
+    } else {
+      setFinished(true);
+      clearNoteNow();
+      setPaused(false);
+
+      void persistNavSession({
+        finished: true,
+        running: true,
+        paused: false,
+        activeNote: null,
+      });
+    }
+
+    try {
+      console.log("[NavLive] advance", reason, { from: targetIdx, to: nextIdx });
+    } catch {}
+  }
+
+  function maybeAutoResumeOnTrace() {
+    if (!running) return;
+    if (finished) return;
+    if (pausedRef.current) return;
+    if (startPrompt) return;
+    if (showGeneralStartNote) return;
+
+    if (!hasOfficial) return;
+    if (!joinedTraceRef.current) return;
+    if (!stopIdxOnTrace.length) return;
+    if (!canAutoResumeNow()) return;
+
+    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+    if (liveKmh < AUTO_RESUME_MIN_SPEED_KMH) {
+      autoResumeCandidateRef.current = null;
+      autoResumeSinceRef.current = null;
+      return;
+    }
+
+    const traceApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
+    const currentStopTraceIdx = Number(stopIdxOnTrace[targetIdx] ?? -1);
+
+    if (!Number.isFinite(currentStopTraceIdx) || currentStopTraceIdx < 0) return;
+
+    if (traceApprox <= currentStopTraceIdx + AUTO_RESUME_TRACE_MARGIN_PTS) {
+      autoResumeCandidateRef.current = null;
+      autoResumeSinceRef.current = null;
+      return;
+    }
+
+    const candidateIdx = pickTargetIdxAheadFromTrace(Math.floor(traceApprox));
+
+    if (!Number.isFinite(candidateIdx) || candidateIdx <= targetIdx) {
+      autoResumeCandidateRef.current = null;
+      autoResumeSinceRef.current = null;
+      return;
+    }
+
+    const now = Date.now();
+
+    if (autoResumeCandidateRef.current !== candidateIdx) {
+      autoResumeCandidateRef.current = candidateIdx;
+      autoResumeSinceRef.current = now;
+      return;
+    }
+
+    const since = autoResumeSinceRef.current ?? now;
+    if (now - since < AUTO_RESUME_CONFIRM_MS) return;
+
+    setTargetIdx(candidateIdx);
+    resetStopGatesFor(candidateIdx);
+    clearNoteNow();
+    setPaused(false);
+
+    markAutoResumed();
+
+    void persistNavSession({
+      running: true,
+      paused: false,
+      targetIdx: candidateIdx,
+      activeNote: null,
+    });
+
+    try {
+      console.log("[NavLive] auto-resume", {
+        from: targetIdx,
+        to: candidateIdx,
+        traceApprox,
+        currentStopTraceIdx,
+      });
+    } catch {}
+  }
+
   /* =========================
      Mapbox
   ========================= */
@@ -988,17 +640,6 @@ export default function NavLive() {
   const MAP_ACTIVE_STOP_HALO = "active-stop-halo";
   const MAP_ACTIVE_STOP_FILL = "active-stop-fill";
   const MAP_ACTIVE_STOP_NUM = "active-stop-num";
-
-  const ACTIVE_MIN_POINTS = 12;
-
-  const JOIN_DIST_M = 40;
-  const SNAP_MAX_DIST_M = 45;
-  const SNAP_VISUAL_MAX_DIST_M = 70;
-  const SNAP_AHEAD_PTS = 240;
-  const SNAP_BACK_PTS = 12;
-
-  const PREDICT_AHEAD_MAX_MS = 950;
-  const SNAP_DISPLAY_AHEAD_SEC = 0.18;
 
   const manualZoomRef = useRef<number | null>(null);
   const manualZoomUntilRef = useRef<number>(0);
@@ -1263,6 +904,8 @@ export default function NavLive() {
     joinedTraceRef.current = true;
     traceIdxRef.current = traceIdxNow;
     snappedApproxIdxRef.current = traceIdxNow;
+    snappedPointRef.current = pos;
+    logicPosRef.current = pos;
 
     return true;
   }
@@ -1287,6 +930,36 @@ export default function NavLive() {
 
     if (end <= start) return { start: Math.max(0, end - 1), end };
     return { start, end };
+  }
+
+  function getSnapWindowForCurrentTarget(fullLineLen: number) {
+    const last = Math.max(0, fullLineLen - 1);
+
+    if (!stopIdxOnTrace.length) {
+      return {
+        start: 0,
+        end: Math.min(last, SNAP_AHEAD_PTS),
+      };
+    }
+
+    if (targetIdx <= 0) {
+      const firstStop = clamp(stopIdxOnTrace[0] ?? 0, 0, last);
+      return {
+        start: 0,
+        end: clamp(firstStop + 18, 1, last),
+      };
+    }
+
+    const prevStop = clamp(stopIdxOnTrace[targetIdx - 1] ?? 0, 0, last);
+    const curStop = clamp(stopIdxOnTrace[targetIdx] ?? prevStop + 1, 0, last);
+
+    const segStart = Math.min(prevStop, curStop);
+    const segEnd = Math.max(prevStop, curStop);
+
+    return {
+      start: clamp(segStart - SNAP_BACK_PTS, 0, last),
+      end: clamp(segEnd + 40, 1, last),
+    };
   }
 
   function applyOverlays() {
@@ -1734,21 +1407,6 @@ export default function NavLive() {
     });
   }
 
-  function speakNoteTTS(text: string) {
-    try {
-      if (!(window as any).speechSynthesis) return;
-      const s = (window as any).speechSynthesis as SpeechSynthesis;
-      try {
-        s.cancel();
-      } catch {}
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "fr-CA";
-      u.rate = 1;
-      u.pitch = 1;
-      s.speak(u);
-    } catch {}
-  }
-
   function resetStopGatesFor(idx: number) {
     stopWarnRef.current = null;
     stopWarnMaxRef.current = null;
@@ -1762,6 +1420,12 @@ export default function NavLive() {
 
     stopApproachStoppedAtRef.current = null;
     stopApproachHasStoppedRef.current = false;
+
+    closestDistToTargetRef.current = null;
+    skipArmedRef.current = false;
+
+    autoResumeCandidateRef.current = null;
+    autoResumeSinceRef.current = null;
 
     setStopBanner({ show: false, meters: 0, label: null, max: warnStopMeters() });
 
@@ -1822,6 +1486,12 @@ export default function NavLive() {
     stopApproachStoppedAtRef.current = null;
     stopApproachHasStoppedRef.current = false;
 
+    closestDistToTargetRef.current = null;
+    skipArmedRef.current = false;
+
+    autoResumeCandidateRef.current = null;
+    autoResumeSinceRef.current = null;
+
     setPaused(false);
     clearNoteNow();
     setShowAllNotes(false);
@@ -1864,7 +1534,8 @@ export default function NavLive() {
     if (d <= SNAP_MAX_DIST_M) {
       joinedTraceRef.current = true;
 
-      const snapped = snapPointToPolyline(p, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS));
+      const snapWindow = getSnapWindowForCurrentTarget(line.length);
+      const snapped = snapPointToPolyline(p, line, snapWindow.start, snapWindow.end);
       const idx = clamp(Math.floor(snapped?.approxIdx ?? 0), 0, line.length - 1);
 
       traceIdxRef.current = idx;
@@ -1905,6 +1576,9 @@ export default function NavLive() {
 
     setTargetIdx(idx);
     resetStopGatesFor(idx);
+
+    snappedApproxIdxRef.current = traceIdxNow;
+    snappedPointRef.current = logicPosRef.current ?? animPosRef.current ?? me ?? null;
 
     setPaused(false);
 
@@ -2017,6 +1691,13 @@ export default function NavLive() {
     stopApproachStoppedAtRef.current = null;
     stopApproachHasStoppedRef.current = false;
     peakKmhSinceTargetRef.current = 0;
+
+    closestDistToTargetRef.current = null;
+    skipArmedRef.current = false;
+
+    autoResumeCandidateRef.current = null;
+    autoResumeSinceRef.current = null;
+
     setStopBanner({ show: false, meters: 0, label: null, max: 50 });
 
     travelSinceTargetSetRef.current = 0;
@@ -2039,7 +1720,7 @@ export default function NavLive() {
     return { pts, line, generalNote };
   }
 
-  /* =========================
+    /* =========================
      Restore local session
   ========================= */
 
@@ -2066,6 +1747,13 @@ export default function NavLive() {
         setSpeed(local.speed ?? null);
         setHeading(local.heading ?? null);
 
+        accRef.current = local.acc ?? null;
+        speedRef.current = local.speed ?? null;
+        headingRef.current = local.heading ?? null;
+        if (local.heading != null && Number.isFinite(local.heading)) {
+          lastBearingRef.current = local.heading;
+        }
+
         setShowGeneralStartNote(local.showGeneralStartNote);
         setStartPrompt(local.startPrompt);
         setActiveNote(local.activeNote ?? null);
@@ -2080,6 +1768,8 @@ export default function NavLive() {
         logicPosRef.current = local.logicPos ?? local.me ?? null;
         animPosRef.current = local.me ?? null;
         targetPosRef.current = local.me ?? null;
+        rawGpsRef.current = local.me ?? null;
+        rawGpsAtRef.current = Date.now();
 
         if (!navigator.onLine) setSyncBadge("offline");
       } catch {
@@ -2343,10 +2033,17 @@ export default function NavLive() {
           if (!joinedTraceRef.current) {
             const d = minDistanceToPolylineMeters(predicted, line);
             if (d != null && d <= JOIN_DIST_M) {
-              joinedTraceRef.current = true;
+              const snapWindow = getSnapWindowForCurrentTarget(line.length);
 
-              const snapped = snapPointToPolyline(predicted, line, 0, Math.min(line.length - 1, SNAP_AHEAD_PTS));
+              const snapped = snapPointToPolyline(
+                predicted,
+                line,
+                snapWindow.start,
+                snapWindow.end
+              );
+
               if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
+                joinedTraceRef.current = true;
                 traceIdxRef.current = clamp(Math.floor(snapped.approxIdx), 0, line.length - 1);
                 snappedApproxIdxRef.current = snapped.approxIdx;
                 snappedPointRef.current = snapped.point;
@@ -2356,27 +2053,32 @@ export default function NavLive() {
 
           if (joinedTraceRef.current) {
             const curApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
-            const start = Math.max(0, Math.floor(curApprox - SNAP_BACK_PTS));
-            const end = Math.min(line.length - 1, Math.ceil(curApprox + SNAP_AHEAD_PTS));
+            const snapWindow = getSnapWindowForCurrentTarget(line.length);
+
+            const start = Math.max(
+              snapWindow.start,
+              Math.floor(curApprox - SNAP_BACK_PTS)
+            );
+
+            const end = Math.min(
+              snapWindow.end,
+              Math.ceil(curApprox + SNAP_AHEAD_PTS)
+            );
 
             const snapped =
               snapPointToPolyline(predicted, line, start, end) ??
               snapPointToPolyline(
                 predicted,
                 line,
-                Math.max(0, Math.floor(curApprox) - 4),
-                Math.min(line.length - 1, Math.ceil(curApprox) + SNAP_AHEAD_PTS)
+                Math.max(snapWindow.start, Math.floor(curApprox) - 4),
+                Math.min(snapWindow.end, Math.ceil(curApprox) + SNAP_AHEAD_PTS)
               );
 
             if (snapped && snapped.dist <= SNAP_VISUAL_MAX_DIST_M) {
               const rawPrev = animPosRef.current ?? rawGpsRef.current ?? predicted;
               const movedMeters = rawPrev ? haversineMeters(rawPrev, predicted) : 0;
 
-              const maxTraceAdvancePts =
-                movedMeters <= 3 ? 6 :
-                movedMeters <= 8 ? 12 :
-                movedMeters <= 15 ? 22 :
-                36;
+              const maxTraceAdvancePts = movedMeters <= 3 ? 6 : movedMeters <= 8 ? 12 : movedMeters <= 15 ? 22 : 36;
 
               const minAllowed = Math.max(0, curApprox - 2);
               const maxAllowed = Math.min(line.length - 1, curApprox + maxTraceAdvancePts);
@@ -2394,9 +2096,7 @@ export default function NavLive() {
 
               const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
 
-              const inPreciseZone =
-                dToTargetNow <= PRECISE_STOP_ZONE_M || liveKmh <= LOW_SPEED_PRECISE_KMH;
-
+              const inPreciseZone = dToTargetNow <= PRECISE_STOP_ZONE_M || liveKmh <= LOW_SPEED_PRECISE_KMH;
               const inVeryPreciseZone =
                 dToTargetNow <= VERY_PRECISE_STOP_ZONE_M || liveKmh <= VERY_LOW_SPEED_PRECISE_KMH;
 
@@ -2455,11 +2155,9 @@ export default function NavLive() {
         const inStopLockZoneForSmooth =
           dToTargetForSmooth <= STOP_LOCK_ZONE_M && liveKmhForSmooth <= STOP_LOCK_SPEED_KMH;
 
-        const inVeryNearStopLockZoneForSmooth =
-          dToTargetForSmooth <= STOP_LOCK_VERY_NEAR_M;
+        const inVeryNearStopLockZoneForSmooth = dToTargetForSmooth <= STOP_LOCK_VERY_NEAR_M;
 
-        const isAlmostStoppedForLock =
-          liveKmhForSmooth <= STOP_LOCK_STOPPED_KMH;
+        const isAlmostStoppedForLock = liveKmhForSmooth <= STOP_LOCK_STOPPED_KMH;
 
         let next: LatLng;
 
@@ -2588,7 +2286,7 @@ export default function NavLive() {
   }, [running, me, hasOfficial, officialLine]);
 
   /* =========================
-     Stops + bandeau + sons + notes
+     Stops + bandeau + sons + notes + skip
   ========================= */
 
   useEffect(() => {
@@ -2618,11 +2316,20 @@ export default function NavLive() {
     const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
     peakKmhSinceTargetRef.current = Math.max(peakKmhSinceTargetRef.current || 0, liveKmh);
 
+    maybeAutoResumeOnTrace();
+
     const dynamicMax = warnStopMetersFromKmh(Math.max(liveKmh, peakKmhSinceTargetRef.current || 0));
     stopWarnMaxRef.current = Math.max(stopWarnMaxRef.current ?? 0, dynamicMax);
     const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
 
     const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
+
+    if (closestDistToTargetRef.current == null || dStop < closestDistToTargetRef.current) {
+      closestDistToTargetRef.current = dStop;
+    }
+    if (dStop <= SKIP_ARM_DIST_M) {
+      skipArmedRef.current = true;
+    }
 
     const nearStopForComplete = rawStopM <= arriveM + 3;
 
@@ -2746,53 +2453,55 @@ export default function NavLive() {
     const allowArrive =
       initD == null || initD > arriveM + ARRIVE_EPS_M || travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
 
-    if (dStop <= arriveM && allowArrive) {
-      stopApproachHoldUntilRef.current = Date.now() + STOP_APPROACH_HOLD_MS;
-      stopApproachHoldActiveRef.current = true;
-      stopApproachStoppedAtRef.current = null;
-      stopApproachHasStoppedRef.current = false;
-
-      setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
-
-      const nextIdx = targetIdx + 1;
-      if (nextIdx < points.length) {
-        if (audioOn) sfx.play("stopReached", { volume: 1, cooldownMs: 1200 });
-        setTargetIdx(nextIdx);
-
-        stopWarnRef.current = null;
-        stopWarnMaxRef.current = null;
-        stopDingRef.current = null;
-        stopBannerLastMRef.current = null;
-
-        clearNoteNow();
-        setPaused(false);
-
-        resetStopGatesFor(nextIdx);
-
-        void persistNavSession({
-          targetIdx: nextIdx,
-          paused: false,
-          activeNote: null,
-        });
-      } else {
-        if (audioOn) sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
-        setFinished(true);
-
-        stopWarnRef.current = null;
-        stopWarnMaxRef.current = null;
-        stopDingRef.current = null;
-        stopBannerLastMRef.current = null;
-
-        clearNoteNow();
-        setPaused(false);
-
-        void persistNavSession({
-          finished: true,
-          running: true,
-          paused: false,
-          activeNote: null,
-        });
+    if (dStop <= arriveM && allowArrive && canAdvanceStopNow()) {
+      if (audioOn) {
+        if (targetIdx + 1 < points.length) sfx.play("stopReached", { volume: 1, cooldownMs: 1200 });
+        else sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
       }
+
+      advanceToNextTarget("arrival", WARN_STOP_M);
+      return;
+    }
+
+    const currentTraceApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
+    const stopTraceIdx = Number(stopIdxOnTrace[targetIdx] ?? -1);
+    const traceSkipOk =
+      hasOfficial &&
+      joinedTraceRef.current &&
+      Number.isFinite(stopTraceIdx) &&
+      stopTraceIdx >= 0 &&
+      skipArmedRef.current &&
+      liveKmh >= SKIP_MIN_SPEED_KMH &&
+      currentTraceApprox > stopTraceIdx + SKIP_TRACE_MARGIN_PTS &&
+      dStop > arriveM + 4;
+
+    if (traceSkipOk && canAdvanceStopNow()) {
+      if (audioOn) {
+        if (targetIdx + 1 < points.length) sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
+        else sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
+      }
+
+      advanceToNextTarget("skip_trace", WARN_STOP_M);
+      return;
+    }
+
+    const closest = closestDistToTargetRef.current ?? dStop;
+    const movedAway = dStop - closest;
+
+    const awaySkipOk =
+      skipArmedRef.current &&
+      liveKmh >= SKIP_MIN_SPEED_KMH &&
+      dStop >= SKIP_AWAY_DIST_M &&
+      movedAway >= SKIP_GROWTH_FROM_MIN_M;
+
+    if (awaySkipOk && canAdvanceStopNow()) {
+      if (audioOn) {
+        if (targetIdx + 1 < points.length) sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
+        else sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
+      }
+
+      advanceToNextTarget("skip_away", WARN_STOP_M);
+      return;
     }
   }, [
     running,
@@ -2811,7 +2520,7 @@ export default function NavLive() {
     showGeneralStartNote,
   ]);
 
-  /* =========================
+    /* =========================
      UI
   ========================= */
 
@@ -3449,6 +3158,19 @@ export default function NavLive() {
             >
               🎯
             </button>
+
+            {canResumeOnTrace ? (
+              <button
+                style={{ ...overlayBtn, fontSize: 24 }}
+                onPointerDown={tapHandler(resumeWhereIAmOnTrace)}
+                onTouchStart={tapHandler(resumeWhereIAmOnTrace)}
+                onClick={tapHandler(resumeWhereIAmOnTrace)}
+                aria-label="Reprendre où je suis"
+                title="Reprendre où je suis"
+              >
+                🔄
+              </button>
+            ) : null}
 
             <button
               style={{
