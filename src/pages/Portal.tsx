@@ -655,11 +655,11 @@ export default function Portal() {
                     }
                     goRecord();
                   }}
-                  title={!canUse ? "Connexion requise" : geoReady ? "Enregistrer un circuit" : "Localisation requise"}
+                  title={!canUse ? "Connexion requise" : geoReady ? "Ajouter un circuit" : "Localisation requise"}
                 >
                   <div style={overlayOrange} />
                   <div style={{ minWidth: 0, position: "relative", zIndex: 1 }}>
-                    <div style={newTitle}>ENREGISTRER UN CIRCUIT</div>
+                    <div style={newTitle}>NOUVEAU CIRCUIT</div>
                     <div style={newSub}>
                       {!canUse ? "Connexion requise" : geoReady ? "Enregistrer un circuit" : "Localisation requise (active-la)"}
                     </div>

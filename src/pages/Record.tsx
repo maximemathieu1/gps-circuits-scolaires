@@ -985,12 +985,8 @@ export default function Record() {
                 type="button"
                 style={{ ...btn("ghost"), paddingInline: 16, borderRadius: 14 }}
                 onClick={() => {
-                  if (step === "pick") nav("/");
-                  else {
-                    setStep("pick");
-                    setNewNom("");
-                  }
-                }}
+  nav("/");
+}}
                 disabled={busy}
               >
                 Retour
@@ -1186,19 +1182,7 @@ export default function Record() {
                       GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
                     </div>
 
-                    <div style={{ marginTop: 6 }}>
-                      <button
-                        type="button"
-                        style={btn("ghost")}
-                        onClick={() => {
-                          setStep("pick");
-                          setNewNom("");
-                        }}
-                        disabled={busy}
-                      >
-                        Retour
-                      </button>
-                    </div>
+                    
                   </div>
                 </div>
               )}
