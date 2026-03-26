@@ -1,4 +1,3 @@
-// src/pages/Record.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { callFn } from "@/lib/api";
@@ -115,46 +114,35 @@ export default function Record() {
   const [circuits, setCircuits] = useState<Circuit[]>([]);
   const [selectedCircuit, setSelectedCircuit] = useState<string>(q.get("circuit") || localStorage.getItem(LS_C) || "");
 
-  // Écran départ
-  const [step, setStep] = useState<"pick" | "new" | "update">("pick");
+  const [step, setStep] = useState<"pick" | "new">("pick");
 
-  // Nouveau
   const [newNom, setNewNom] = useState("");
 
-  // session
   const [recording, setRecording] = useState(false);
   const [versionId, setVersionId] = useState<string | null>(null);
 
-  // ARRÊTS
   const [points, setPoints] = useState<Point[]>([]);
 
-  // TRACE
   const [trace, setTrace] = useState<[number, number][]>([]);
   const [tracePaused, setTracePaused] = useState(false);
 
-  // Sauvegarde trace
   const [savingTrace, setSavingTrace] = useState(false);
 
-  // Sauvegarde arrêt
   const [stopSaveState, setStopSaveState] = useState<StopSaveState>("idle");
   const [stopSaveMessage, setStopSaveMessage] = useState("");
   const stopSaveTimerRef = useRef<number | null>(null);
 
-  // GPS
   const [gpsOk, setGpsOk] = useState<boolean | null>(null);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // auth
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // Sync état
   const [syncState, setSyncState] = useState<SyncState>("synced");
   const syncingStopsRef = useRef(false);
   const restoreDoneRef = useRef(false);
 
-  // Throttle trace
   const lastTracePointRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastTraceAtRef = useRef<number>(0);
 
@@ -162,7 +150,6 @@ export default function Record() {
   const TRACE_MIN_MS = 1200;
   const TRACE_MAX_POINTS = 12000;
 
-  // Wake Lock
   const wakeLockRef = useRef<any>(null);
 
   function clearStopSaveTimer() {
@@ -205,17 +192,13 @@ export default function Record() {
       const navAny = navigator as any;
       if (!navAny?.wakeLock?.request) return;
       wakeLockRef.current = await navAny.wakeLock.request("screen");
-    } catch {
-      // silence
-    }
+    } catch {}
   }
 
   async function releaseWakeLock() {
     try {
       await wakeLockRef.current?.release?.();
-    } catch {
-      // silence
-    }
+    } catch {}
     wakeLockRef.current = null;
   }
 
@@ -344,7 +327,6 @@ export default function Record() {
   useEffect(() => {
     localStorage.setItem(LS_T, transporteur);
     loadCircuits().catch((e) => alert(e.message));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transporteur]);
 
   useEffect(() => {
@@ -353,12 +335,18 @@ export default function Record() {
 
   useEffect(() => {
     refreshAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     return () => clearStopSaveTimer();
   }, []);
+
+  useEffect(() => {
+    const mode = q.get("mode");
+    if (mode === "new") {
+      setStep("new");
+    }
+  }, [q]);
 
   useEffect(() => {
     let cancelled = false;
@@ -391,9 +379,7 @@ export default function Record() {
 
         const hasPendingStops = (session.points ?? []).some((p) => !p.synced);
         setSyncState(!navigator.onLine ? "offline" : hasPendingStops ? "pending" : "synced");
-      } catch {
-        // silence
-      }
+      } catch {}
     }
 
     restoreSession();
@@ -456,22 +442,15 @@ export default function Record() {
     };
   }, [recording]);
 
-  // Persistance locale automatique pendant l'enregistrement
   useEffect(() => {
     if (!recording || !versionId) return;
-    persistCurrentSession().catch(() => {
-      // silence
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    persistCurrentSession().catch(() => {});
   }, [recording, versionId, trace, points, tracePaused, gpsAccuracy, transporteur, selectedCircuit]);
 
-  // État réseau
   useEffect(() => {
     const onOnline = () => {
       setSyncState(((points as LocalPoint[]).some((p) => !p.synced) ? "pending" : "synced"));
-      syncPendingStopsIfAny().catch(() => {
-        // silence
-      });
+      syncPendingStopsIfAny().catch(() => {});
     };
     const onOffline = () => setSyncState("offline");
 
@@ -484,20 +463,16 @@ export default function Record() {
     };
   }, [points, versionId]);
 
-  // Retry sync périodique des arrêts en attente
   useEffect(() => {
     if (!recording || !versionId) return;
 
     const id = window.setInterval(() => {
-      syncPendingStopsIfAny().catch(() => {
-        // silence
-      });
+      syncPendingStopsIfAny().catch(() => {});
     }, 15000);
 
     return () => window.clearInterval(id);
   }, [recording, versionId, points]);
 
-  // WATCH GPS pendant enregistrement
   useEffect(() => {
     if (!recording) return;
     if (!canGeo) return;
@@ -558,9 +533,12 @@ export default function Record() {
     };
   }, [recording, tracePaused, canGeo]);
 
-  function resetSessionForStart(nextVersionId: string) {
+  function resetSessionForStart(nextVersionId: string, nextSelectedCircuit?: string) {
+    const circuitToKeep = nextSelectedCircuit ?? selectedCircuit;
+
     setRecording(true);
     setVersionId(nextVersionId);
+    setSelectedCircuit(circuitToKeep);
     setPoints([]);
     setTrace([]);
     setTracePaused(false);
@@ -570,7 +548,7 @@ export default function Record() {
 
     void saveActiveRecordSession({
       transporteur,
-      selectedCircuit,
+      selectedCircuit: circuitToKeep,
       versionId: nextVersionId,
       recording: true,
       startedAt: new Date().toISOString(),
@@ -604,38 +582,9 @@ export default function Record() {
         user_id: uid,
       });
 
-      setSelectedCircuit(r.circuit_id);
-      resetSessionForStart(r.version_id);
-
       setNewNom("");
       await loadCircuits();
-    } catch (e: any) {
-      if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function startUpdate() {
-    if (!selectedCircuit) return;
-
-    setBusy(true);
-    try {
-      await requireAuth();
-
-      if (canGeo) {
-        const p = await getPos();
-        setGpsOk(true);
-        setGpsAccuracy(typeof p.accuracy === "number" ? Math.round(p.accuracy) : null);
-      }
-
-      const r = await callFn<{ version_id: string; version_no: number }>("circuits-api", {
-        action: "start_update",
-        circuit_id: selectedCircuit,
-        note: "Mise à jour",
-      });
-
-      resetSessionForStart(r.version_id);
+      resetSessionForStart(r.version_id, r.circuit_id);
     } catch (e: any) {
       if (e?.message !== "NOT_AUTHENTICATED") alert(e.message);
     } finally {
@@ -684,7 +633,6 @@ export default function Record() {
         synced: false,
       };
 
-      // Hors ligne: on garde localement
       if (!navigator.onLine) {
         const nextPoints = [...(points as LocalPoint[]), localPoint];
         setPoints(nextPoints as Point[]);
@@ -711,7 +659,6 @@ export default function Record() {
         setSyncState("synced");
         showStopSuccess("Arrêt enregistré");
       } catch (e: any) {
-        // Réseau instable: on tombe en local pour ne rien perdre
         if (isLikelyNetworkError(e) || !navigator.onLine) {
           const nextPoints = [...(points as LocalPoint[]), localPoint];
           setPoints(nextPoints as Point[]);
@@ -775,19 +722,14 @@ export default function Record() {
     setSavingTrace(true);
 
     try {
-      // On tente de sauvegarder, mais STOP doit toujours terminer
       if (vId) {
         try {
           await requireAuth();
-        } catch {
-          // on ignore ici: on termine pareil
-        }
+        } catch {}
 
         try {
           await syncPendingStopsIfAny();
-        } catch {
-          // on ignore ici: on termine pareil
-        }
+        } catch {}
 
         try {
           await saveTraceIfAny(vId);
@@ -796,7 +738,6 @@ export default function Record() {
         }
       }
     } finally {
-      // Terminer TOUJOURS la session locale
       setRecording(false);
       setVersionId(null);
       setPoints([]);
@@ -810,9 +751,7 @@ export default function Record() {
 
       try {
         await clearActiveRecordSession();
-      } catch {
-        // silence
-      }
+      } catch {}
 
       setSavingTrace(false);
 
@@ -929,20 +868,6 @@ export default function Record() {
     whiteSpace: "nowrap",
   };
 
-  const rightPillLight: React.CSSProperties = {
-    flex: "0 0 auto",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "10px 14px",
-    borderRadius: 999,
-    background: "rgba(124,45,18,.10)",
-    border: "1px solid rgba(124,45,18,.18)",
-    fontWeight: 950,
-    whiteSpace: "nowrap",
-    color: "rgba(124,45,18,.85)",
-  };
-
   const disabledAction: React.CSSProperties = { opacity: 0.55, cursor: "not-allowed", boxShadow: "none" };
 
   const actionBlue: React.CSSProperties = {
@@ -959,25 +884,6 @@ export default function Record() {
     ...actionBase,
     background: "linear-gradient(135deg, #7f1d1d 0%, #ef4444 55%, #dc2626 100%)",
   };
-
-  const actionLightRow: React.CSSProperties = {
-    width: "100%",
-    boxSizing: "border-box",
-    borderRadius: 28,
-    padding: "clamp(16px, 2.6vw, 20px)",
-    background: "linear-gradient(135deg, #fde68a 0%, #ffedd5 45%, #ffffff 100%)",
-    border: "1px solid rgba(2,6,23,.06)",
-    boxShadow: "0 14px 40px rgba(2,6,23,.10)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 14,
-    cursor: "pointer",
-    minHeight: 86,
-  };
-
-  const warnTitle: React.CSSProperties = { fontWeight: 950, fontSize: 18, color: "#7c2d12", letterSpacing: -0.2 };
-  const warnSub: React.CSSProperties = { marginTop: 6, fontWeight: 750, color: "rgba(124,45,18,.70)" };
 
   const statusLine: React.CSSProperties = {
     textAlign: "center",
@@ -1035,7 +941,6 @@ export default function Record() {
   };
 
   const canStartNew = !busy && Boolean(newNom.trim());
-  const canStartUpdate = !busy && Boolean(selectedCircuit);
   const stopOverlayVisible = stopSaveState !== "idle";
 
   return (
@@ -1126,12 +1031,7 @@ export default function Record() {
                     </div>
                   </div>
 
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: 14,
-                    }}
-                  >
+                  <div style={{ display: "grid", gap: 14 }}>
                     <div
                       style={{
                         ...actionGreen,
@@ -1231,20 +1131,6 @@ export default function Record() {
                     <div style={rightPill}>Ouvrir ›</div>
                   </div>
 
-                  <div
-                    style={actionLightRow}
-                    onClick={() => setStep("update")}
-                    role="button"
-                    title="Mettre à jour"
-                    aria-label="Mettre à jour"
-                  >
-                    <div style={{ minWidth: 0, flex: "1 1 auto" }}>
-                      <div style={warnTitle}>METTRE À JOUR</div>
-                      <div style={warnSub}>Modifier un circuit existant</div>
-                    </div>
-                    <div style={rightPillLight}>Ouvrir ›</div>
-                  </div>
-
                   <div style={{ ...muted, textAlign: "center", marginTop: 6 }}>
                     GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}
                   </div>
@@ -1266,77 +1152,35 @@ export default function Record() {
                       </select>
                     </div>
 
-                    {step === "new" ? (
-                      <>
-                        <div>
-                          <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Nom du circuit</div>
-                          <input
-                            style={input}
-                            value={newNom}
-                            onChange={(e) => setNewNom(e.target.value)}
-                            placeholder="Ex: Circuit matin – St-Joseph"
-                            disabled={busy}
-                          />
-                        </div>
+                    <div>
+                      <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Nom du circuit</div>
+                      <input
+                        style={input}
+                        value={newNom}
+                        onChange={(e) => setNewNom(e.target.value)}
+                        placeholder="Ex: Circuit matin – St-Joseph"
+                        disabled={busy}
+                      />
+                    </div>
 
-                        <div style={{ display: "grid", gap: 12, marginTop: 6 }}>
-                          <button
-                            type="button"
-                            style={{
-                              ...btn("primary"),
-                              width: "100%",
-                              opacity: canStartNew ? 1 : 0.55,
-                              boxSizing: "border-box",
-                              borderRadius: 18,
-                              padding: "14px 16px",
-                              fontWeight: 950,
-                            }}
-                            onClick={startNew}
-                            disabled={!canStartNew}
-                          >
-                            Démarrer (nouveau)
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div>
-                          <div style={{ ...muted, marginBottom: 6, fontWeight: 900 }}>Circuit</div>
-                          <select
-                            style={select}
-                            value={selectedCircuit}
-                            onChange={(e) => setSelectedCircuit(e.target.value)}
-                            disabled={busy}
-                          >
-                            <option value="">— Choisir —</option>
-                            {circuits.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.nom}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div style={{ display: "grid", gap: 12, marginTop: 6 }}>
-                          <button
-                            type="button"
-                            style={{
-                              ...btn("primary"),
-                              width: "100%",
-                              opacity: canStartUpdate ? 1 : 0.55,
-                              boxSizing: "border-box",
-                              borderRadius: 18,
-                              padding: "14px 16px",
-                              fontWeight: 950,
-                            }}
-                            onClick={startUpdate}
-                            disabled={!canStartUpdate}
-                          >
-                            Démarrer (mise à jour)
-                          </button>
-                        </div>
-                      </>
-                    )}
+                    <div style={{ display: "grid", gap: 12, marginTop: 6 }}>
+                      <button
+                        type="button"
+                        style={{
+                          ...btn("primary"),
+                          width: "100%",
+                          opacity: canStartNew ? 1 : 0.55,
+                          boxSizing: "border-box",
+                          borderRadius: 18,
+                          padding: "14px 16px",
+                          fontWeight: 950,
+                        }}
+                        onClick={startNew}
+                        disabled={!canStartNew}
+                      >
+                        Démarrer
+                      </button>
+                    </div>
 
                     <div style={{ ...muted, textAlign: "center", marginTop: 4 }}>
                       GPS : {gpsOk === null ? "…" : gpsOk ? `OK (± ${gpsAccuracy ?? "?"} m)` : "bloqué"}

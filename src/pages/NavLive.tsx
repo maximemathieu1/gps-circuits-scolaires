@@ -1297,6 +1297,7 @@ export default function NavLive() {
 
     mapRef.current = m;
 
+    m.on("dblclick", (e: any) => e?.originalEvent && (followRef.current = false));
     m.on("dragstart", (e: any) => e?.originalEvent && (followRef.current = false));
     m.on("pitchstart", (e: any) => e?.originalEvent && (followRef.current = false));
     m.on("rotatestart", (e: any) => e?.originalEvent && (followRef.current = false));
@@ -1359,34 +1360,53 @@ export default function NavLive() {
   }
 
   function recenter() {
-    followRef.current = true;
+  const m = mapRef.current;
+  const p = animPosRef.current ?? me;
+  if (!m || !p) return;
 
-    const m = mapRef.current;
-    const p = animPosRef.current ?? me;
-    if (!m || !p) return;
+  followRef.current = true;
 
-    try {
-      m.stop();
-    } catch {}
+  try {
+    m.stop();
+  } catch {}
 
-    manualZoomRef.current = null;
-    manualZoomUntilRef.current = 0;
+  manualZoomRef.current = null;
+  manualZoomUntilRef.current = 0;
 
-    const targetZoom = computeAutoFollowZoom();
-    const yOff = computeFollowOffsetPx(m);
-    const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
+  const targetZoom = computeAutoFollowZoom();
+  const yOff = computeFollowOffsetPx(m);
+  const b = wrap360((headingRef.current ?? lastBearingRef.current) || 0);
 
-    try {
-      (m as any).jumpTo({
-        center: [p.lng, p.lat],
-        zoom: targetZoom,
-        pitch: 55,
-        bearing: b,
-        offset: [0, yOff],
-      });
-    } catch {}
+  try {
+    m.easeTo({
+      center: [p.lng, p.lat],
+      zoom: targetZoom,
+      pitch: 55,
+      bearing: b,
+      offset: [0, yOff],
+      duration: 300,
+      essential: true,
+    });
+  } catch {}
+}
+
+function recenterOrResume() {
+  setErr(null);
+
+  // 1. Toujours recentrer IMMÉDIATEMENT
+  recenter();
+
+  // 2. Ensuite essayer de reprendre la trace (sans bloquer)
+  if (!followRef.current && canResumeOnTrace) {
+    setTimeout(() => {
+      const joinedOk = joinedTraceRef.current || tryJoinAndSnapNow().ok;
+
+      if (joinedOk) {
+        resumeWhereIAmOnTrace();
+      }
+    }, 50);
   }
-
+}
   function enableAudio() {
     if (audioOn) return;
     sfx.unlock();
@@ -3149,28 +3169,15 @@ export default function NavLive() {
             </button>
 
             <button
-              style={{ ...overlayBtn, fontSize: 30 }}
-              onPointerDown={tapHandler(recenter)}
-              onTouchStart={tapHandler(recenter)}
-              onClick={tapHandler(recenter)}
-              aria-label="Recentrer"
-              title="Recentrer"
-            >
-              🎯
-            </button>
-
-            {canResumeOnTrace ? (
-              <button
-                style={{ ...overlayBtn, fontSize: 24 }}
-                onPointerDown={tapHandler(resumeWhereIAmOnTrace)}
-                onTouchStart={tapHandler(resumeWhereIAmOnTrace)}
-                onClick={tapHandler(resumeWhereIAmOnTrace)}
-                aria-label="Reprendre où je suis"
-                title="Reprendre où je suis"
-              >
-                🔄
-              </button>
-            ) : null}
+  style={{ ...overlayBtn, fontSize: 30 }}
+  onPointerDown={tapHandler(recenterOrResume)}
+  onTouchStart={tapHandler(recenterOrResume)}
+  onClick={tapHandler(recenterOrResume)}
+  aria-label="Recentrer"
+  title={!followRef.current && canResumeOnTrace ? "Recentrer / reprendre où je suis" : "Recentrer"}
+>
+  🎯
+</button>
 
             <button
               style={{
