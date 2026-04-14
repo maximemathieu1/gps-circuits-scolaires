@@ -661,7 +661,7 @@ export default function Portal() {
                   <div style={{ minWidth: 0, position: "relative", zIndex: 1 }}>
                     <div style={newTitle}>CRÉER NOUVEAU CIRCUIT</div>
                     <div style={newSub}>
-                      {!canUse ? "Connexion requise" : geoReady ? "Enregistrer un circuit" : "Localisation requise (active-la)"}
+                      {!canUse ? "Connexion requise" : geoReady ? "" : "Localisation requise (active-la)"}
                     </div>
                   </div>
                   <div
