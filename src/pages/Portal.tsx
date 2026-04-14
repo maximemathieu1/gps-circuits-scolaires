@@ -629,7 +629,7 @@ export default function Portal() {
                 >
                   <div style={overlayBlue} />
                   <div style={navLeft}>
-                    <div style={navTitle}>NAVIGATION GPS</div>
+                    <div style={navTitle}>LES CIRCUITS SCOLAIRE</div>
                     <div style={navSub}>
                       {!canUse
                         ? "Connexion requise"
@@ -659,7 +659,7 @@ export default function Portal() {
                 >
                   <div style={overlayOrange} />
                   <div style={{ minWidth: 0, position: "relative", zIndex: 1 }}>
-                    <div style={newTitle}>NOUVEAU CIRCUIT</div>
+                    <div style={newTitle}>CRÉER NOUVEAU CIRCUIT</div>
                     <div style={newSub}>
                       {!canUse ? "Connexion requise" : geoReady ? "Enregistrer un circuit" : "Localisation requise (active-la)"}
                     </div>
