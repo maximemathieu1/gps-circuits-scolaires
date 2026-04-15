@@ -168,6 +168,8 @@ export default function NavLive() {
   const prevTraceApproxRef = useRef<number>(0);
   const lastAcceptedTraceApproxRef = useRef<number>(0);
 
+  const skipArmedOnTraceRef = useRef<boolean>(false);
+
   const [points, setPoints] = useState<StopPoint[]>([]);
   const [targetIdx, setTargetIdx] = useState(0);
   const target = points[targetIdx] ?? null;
@@ -1447,6 +1449,7 @@ function recenterOrResume() {
 
   closestDistToTargetRef.current = null;
   skipArmedRef.current = false;
+  skipArmedOnTraceRef.current = false;
 
   autoResumeCandidateRef.current = null;
   autoResumeSinceRef.current = null;
@@ -1517,6 +1520,7 @@ function recenterOrResume() {
 
     closestDistToTargetRef.current = null;
     skipArmedRef.current = false;
+    skipArmedOnTraceRef.current = false; // ✅ AJOUT IMPORTANT
 
     autoResumeCandidateRef.current = null;
     autoResumeSinceRef.current = null;
@@ -2356,293 +2360,370 @@ useEffect(() => {
     setOffRouteM(dLine);
   }, [running, me, hasOfficial, officialLine]);
 
-  /* =========================
-     Stops + bandeau + sons + notes + skip
-  ========================= */
+/* =========================
+   Stops + bandeau + sons + notes + skip
+========================= */
 
-  useEffect(() => {
-    if (!running) return;
-    const p = logicPosRef.current ?? animPosRef.current ?? me;
-    if (!p || !target) return;
-    if (finished) return;
+useEffect(() => {
+  if (!running) return;
+  const p = logicPosRef.current ?? animPosRef.current ?? me;
+  if (!p || !target) return;
+  if (finished) return;
 
-    if (startPrompt) return;
-    if (showGeneralStartNote) return;
+  if (startPrompt) return;
+  if (showGeneralStartNote) return;
 
-    if (lastMeRef.current) {
-      travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
+  if (lastMeRef.current) {
+    travelSinceTargetSetRef.current += haversineMeters(lastMeRef.current, p);
+  }
+  lastMeRef.current = p;
+
+  if (initialDistToTargetRef.current == null && target) {
+    initialDistToTargetRef.current = haversineMeters(p, target as any);
+  }
+
+  const t = stopTypeOrDefault(target.stop_type);
+  const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
+
+  const dStop = haversineMeters(p, target as any);
+  currentTargetDistRef.current = dStop;
+
+  const rawStopM = Math.round(dStop);
+
+  const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
+  peakKmhSinceTargetRef.current = Math.max(peakKmhSinceTargetRef.current || 0, liveKmh);
+
+  maybeAutoResumeOnTrace();
+
+  const dynamicMax = warnStopMetersFromKmh(
+    Math.max(liveKmh, peakKmhSinceTargetRef.current || 0)
+  );
+  stopWarnMaxRef.current = Math.max(stopWarnMaxRef.current ?? 0, dynamicMax);
+  const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
+
+  const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
+
+  if (closestDistToTargetRef.current == null || dStop < closestDistToTargetRef.current) {
+    closestDistToTargetRef.current = dStop;
+  }
+  if (dStop <= SKIP_ARM_DIST_M) {
+    skipArmedRef.current = true;
+  }
+
+  const nearStopForComplete = rawStopM <= arriveM + 3;
+
+  if (nearStopForComplete && liveKmh < 1) {
+    if (stopStillSinceRef.current == null) {
+      stopStillSinceRef.current = Date.now();
+    } else if (Date.now() - stopStillSinceRef.current >= 1000) {
+      stopCompletedForIdxRef.current = targetIdx;
     }
-    lastMeRef.current = p;
+  } else {
+    stopStillSinceRef.current = null;
+  }
 
-    if (initialDistToTargetRef.current == null && target) {
-      initialDistToTargetRef.current = haversineMeters(p, target as any);
+  if (rawStopM > WARN_STOP_M) {
+    if (stopBanner.show) {
+      setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
     }
+    stopBannerLastMRef.current = null;
+  }
 
-    const t = stopTypeOrDefault(target.stop_type);
-    const arriveM = isBlockingType(t) ? ARRIVE_STOP_M_BLOCKING : ARRIVE_STOP_M_DEFAULT;
+  if (rawStopM <= WARN_STOP_M && rawStopM > arriveM) {
+    const prevShown = stopBannerLastMRef.current;
+    let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
+    shown = Math.round(shown / 5) * 5;
+    stopBannerLastMRef.current = shown;
 
-    const dStop = haversineMeters(p, target as any);
-    currentTargetDistRef.current = dStop;
+    setStopBanner({
+      show: true,
+      meters: shown,
+      label: target.label ?? null,
+      max: WARN_STOP_M,
+    });
+  }
 
-    const rawStopM = Math.round(dStop);
+  const liveKmhVoice = Math.max(0, (speedRef.current ?? 0) * 3.6);
 
-    const liveKmh = Math.max(0, (speedRef.current ?? 0) * 3.6);
-    peakKmhSinceTargetRef.current = Math.max(peakKmhSinceTargetRef.current || 0, liveKmh);
+  let VOICE_TRIGGER_M = WARN_STOP_M;
 
-    maybeAutoResumeOnTrace();
+  if (liveKmhVoice > 70) {
+    const spNow = speedRef.current ?? null;
+    const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
+    const leadM = clamp(spAssume * 4.0, 15, 140);
+    VOICE_TRIGGER_M = WARN_STOP_M + leadM;
+  }
 
-    const dynamicMax = warnStopMetersFromKmh(
-      Math.max(liveKmh, peakKmhSinceTargetRef.current || 0)
-    );
-    stopWarnMaxRef.current = Math.max(stopWarnMaxRef.current ?? 0, dynamicMax);
-    const WARN_STOP_M = stopWarnMaxRef.current ?? dynamicMax;
-
-    const noteTriggerM = clamp(Number(target.note_trigger_m ?? WARN_STOP_M), 0, 1200);
-
-    if (closestDistToTargetRef.current == null || dStop < closestDistToTargetRef.current) {
-      closestDistToTargetRef.current = dStop;
+  if (audioOn && stopWarnRef.current !== targetIdx) {
+    if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
+      stopWarnRef.current = targetIdx;
+      const key = audioKeyForStopType(t);
+      sfx.play(key, { volume: 1, cooldownMs: 2500 });
     }
-    if (dStop <= SKIP_ARM_DIST_M) {
-      skipArmedRef.current = true;
+  }
+
+  if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
+    if (stopDingRef.current !== targetIdx) {
+      stopDingRef.current = targetIdx;
+      sfx.play("ding", { volume: 1, cooldownMs: 900 });
     }
+  }
 
-    const nearStopForComplete = rawStopM <= arriveM + 3;
+  let didShowBlockingNoteThisTick = false;
 
-    if (nearStopForComplete && liveKmh < 1) {
-      if (stopStillSinceRef.current == null) {
-        stopStillSinceRef.current = Date.now();
-      } else if (Date.now() - stopStillSinceRef.current >= 1000) {
-        stopCompletedForIdxRef.current = targetIdx;
+  const noteRaw = String(target.note ?? "").trim();
+  const hasNote = noteRaw.length > 0;
+  const inNoteZone = rawStopM <= noteTriggerM;
+
+  if (
+    noteSuppressForIdxRef.current.has(targetIdx) &&
+    rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M
+  ) {
+    noteSuppressForIdxRef.current.delete(targetIdx);
+  }
+
+  if (hasNote && inNoteZone) {
+    const once = Boolean(target.note_once ?? true);
+    const alreadyOnce = noteShownForIdxRef.current.has(targetIdx);
+
+    const now = Date.now();
+    const last = noteLastShowAtRef.current[targetIdx] ?? 0;
+    const cooldownOk = now - last >= NOTE_REPEAT_COOLDOWN_MS;
+
+    const canShow = once ? !alreadyOnce : cooldownOk;
+    const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
+
+    if (canShow && !suppressed) {
+      noteLastShowAtRef.current[targetIdx] = now;
+      if (once) noteShownForIdxRef.current.add(targetIdx);
+
+      noteSuppressForIdxRef.current.add(targetIdx);
+
+      if (isBlockingType(t)) {
+        clearNoteTimer();
+        setPaused(true);
+        setActiveNote(noteRaw);
+        if (audioOn) speakNoteTTS(noteRaw);
+        didShowBlockingNoteThisTick = true;
+
+        void persistNavSession({
+          paused: true,
+          activeNote: noteRaw,
+        });
+      } else {
+        clearNoteTimer();
+        setPaused(false);
+        setActiveNote(noteRaw);
+        if (audioOn) speakNoteTTS(noteRaw);
+
+        noteHoldIdxRef.current = targetIdx;
+        noteHoldUntilRef.current = Date.now() + NOTE_AUTO_HIDE_MS;
+
+        noteTimerRef.current = window.setTimeout(() => {
+          clearNoteNow();
+        }, NOTE_AUTO_HIDE_MS);
+
+        void persistNavSession({
+          paused: false,
+          activeNote: noteRaw,
+        });
       }
+    }
+  }
+
+  if (didShowBlockingNoteThisTick) return;
+  if (pausedRef.current) return;
+
+  if (!isBlockingType(t) && activeNote && noteHoldIdxRef.current === targetIdx) {
+    if (Date.now() < (noteHoldUntilRef.current || 0)) return;
+  }
+
+  const initD = initialDistToTargetRef.current;
+  const allowArrive =
+    initD == null ||
+    initD > arriveM + ARRIVE_EPS_M ||
+    travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+
+  if (dStop <= arriveM && allowArrive && canAdvanceStopNow()) {
+    if (audioOn) {
+      if (targetIdx + 1 < points.length) {
+        sfx.play("stopReached", { volume: 1, cooldownMs: 1200 });
+      } else {
+        sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
+      }
+    }
+
+    advanceToNextTarget("arrival", WARN_STOP_M);
+    return;
+  }
+
+  const currentTraceApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
+  const stopTraceIdx = Number(stopIdxOnTrace[targetIdx] ?? -1);
+  const distToTrace = minDistanceToPolylineMeters(p, officialLine);
+
+// vraie progression mémorisée entre deux ticks
+const prevApprox = prevTraceApproxRef.current;
+const deltaTrace =
+  prevApprox != null ? currentTraceApprox - prevApprox : 0;
+
+const traceSkipOk =
+  hasOfficial &&
+  joinedTraceRef.current &&
+  Number.isFinite(stopTraceIdx) &&
+  stopTraceIdx >= 0 &&
+  skipArmedRef.current &&
+  liveKmh >= SKIP_MIN_SPEED_KMH &&
+  liveKmh < 120 &&
+  travelSinceTargetSetRef.current > 30 &&
+
+  // très proche de la trace
+  distToTrace != null &&
+  distToTrace < 25 &&
+
+  // progression réelle vers l’avant
+  deltaTrace > 0.8 &&
+
+  // arrêt dépassé (fenêtre contrôlée)
+  currentTraceApprox > stopTraceIdx + SKIP_TRACE_MARGIN_PTS + 30 &&
+  currentTraceApprox < stopTraceIdx + SKIP_TRACE_MARGIN_PTS + 120 &&
+
+  // éloignement réel
+  dStop > arriveM + 10 &&
+  closestDistToTargetRef.current != null &&
+  dStop > closestDistToTargetRef.current + 12;
+
+if (traceSkipOk && canAdvanceStopNow()) {
+  if (audioOn) {
+    if (targetIdx + 1 < points.length) {
+      sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
     } else {
-      stopStillSinceRef.current = null;
+      sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
     }
+  }
 
-    if (rawStopM > WARN_STOP_M) {
-      if (stopBanner.show) {
-        setStopBanner({ show: false, meters: 0, label: null, max: WARN_STOP_M });
-      }
-      stopBannerLastMRef.current = null;
-    }
+  skipArmedRef.current = false;
+  skipArmedOnTraceRef.current = false;
 
-    if (rawStopM <= WARN_STOP_M && rawStopM > arriveM) {
-      const prevShown = stopBannerLastMRef.current;
-      let shown = prevShown == null ? rawStopM : Math.min(prevShown, rawStopM);
-      shown = Math.round(shown / 5) * 5;
-      stopBannerLastMRef.current = shown;
+  advanceToNextTarget("skip_trace", WARN_STOP_M);
+  return;
+}
 
-      setStopBanner({
-        show: true,
-        meters: shown,
-        label: target.label ?? null,
-        max: WARN_STOP_M,
-      });
-    }
+// ✅ IMPORTANT: une seule mise à jour ici
+prevTraceApproxRef.current = currentTraceApprox;
 
-    const liveKmhVoice = Math.max(0, (speedRef.current ?? 0) * 3.6);
+const nextStopTraceIdx = Number(stopIdxOnTrace[targetIdx + 1] ?? -1);
 
-    let VOICE_TRIGGER_M = WARN_STOP_M;
+let distBeforeStopOnTraceM = Infinity;
+let progressedPastStopM = 0;
 
-    if (liveKmhVoice > 70) {
-      const spNow = speedRef.current ?? null;
-      const spAssume = spNow != null && Number.isFinite(spNow) ? spNow : 10;
-      const leadM = clamp(spAssume * 4.0, 15, 140);
-      VOICE_TRIGGER_M = WARN_STOP_M + leadM;
-    }
+if (
+  hasOfficial &&
+  joinedTraceRef.current &&
+  Number.isFinite(stopTraceIdx) &&
+  stopTraceIdx >= 0 &&
+  officialLine.length >= 2
+) {
+  const curIdx = clamp(Math.floor(currentTraceApprox), 0, officialLine.length - 1);
+  const stopIdx = clamp(Math.floor(stopTraceIdx), 0, officialLine.length - 1);
 
-    if (audioOn && stopWarnRef.current !== targetIdx) {
-      if (rawStopM <= VOICE_TRIGGER_M && rawStopM > arriveM) {
-        stopWarnRef.current = targetIdx;
-        const key = audioKeyForStopType(t);
-        sfx.play(key, { volume: 1, cooldownMs: 2500 });
-      }
-    }
-
-    if (audioOn && rawStopM <= DING_AT_M && rawStopM > 1) {
-      if (stopDingRef.current !== targetIdx) {
-        stopDingRef.current = targetIdx;
-        sfx.play("ding", { volume: 1, cooldownMs: 900 });
+  if (curIdx <= stopIdx) {
+    let sum = 0;
+    for (let i = curIdx; i < stopIdx; i++) {
+      const p1 = officialLine[i];
+      const p2 = officialLine[i + 1];
+      if (p1 && p2) {
+        sum += haversineMeters(
+          { lat: p1[0], lng: p1[1] },
+          { lat: p2[0], lng: p2[1] }
+        );
       }
     }
-
-    let didShowBlockingNoteThisTick = false;
-
-    const noteRaw = String(target.note ?? "").trim();
-    const hasNote = noteRaw.length > 0;
-    const inNoteZone = rawStopM <= noteTriggerM;
-
-    if (
-      noteSuppressForIdxRef.current.has(targetIdx) &&
-      rawStopM > noteTriggerM + NOTE_SUPPRESS_HYSTERESIS_M
-    ) {
-      noteSuppressForIdxRef.current.delete(targetIdx);
-    }
-
-    if (hasNote && inNoteZone) {
-      const once = Boolean(target.note_once ?? true);
-      const alreadyOnce = noteShownForIdxRef.current.has(targetIdx);
-
-      const now = Date.now();
-      const last = noteLastShowAtRef.current[targetIdx] ?? 0;
-      const cooldownOk = now - last >= NOTE_REPEAT_COOLDOWN_MS;
-
-      const canShow = once ? !alreadyOnce : cooldownOk;
-      const suppressed = noteSuppressForIdxRef.current.has(targetIdx);
-
-      if (canShow && !suppressed) {
-        noteLastShowAtRef.current[targetIdx] = now;
-        if (once) noteShownForIdxRef.current.add(targetIdx);
-
-        noteSuppressForIdxRef.current.add(targetIdx);
-
-        if (isBlockingType(t)) {
-          clearNoteTimer();
-          setPaused(true);
-          setActiveNote(noteRaw);
-          if (audioOn) speakNoteTTS(noteRaw);
-          didShowBlockingNoteThisTick = true;
-
-          void persistNavSession({
-            paused: true,
-            activeNote: noteRaw,
-          });
-        } else {
-          clearNoteTimer();
-          setPaused(false);
-          setActiveNote(noteRaw);
-          if (audioOn) speakNoteTTS(noteRaw);
-
-          noteHoldIdxRef.current = targetIdx;
-          noteHoldUntilRef.current = Date.now() + NOTE_AUTO_HIDE_MS;
-
-          noteTimerRef.current = window.setTimeout(() => {
-            clearNoteNow();
-          }, NOTE_AUTO_HIDE_MS);
-
-          void persistNavSession({
-            paused: false,
-            activeNote: noteRaw,
-          });
-        }
+    distBeforeStopOnTraceM = sum;
+    progressedPastStopM = 0;
+  } else {
+    let sum = 0;
+    for (let i = stopIdx; i < curIdx; i++) {
+      const p1 = officialLine[i];
+      const p2 = officialLine[i + 1];
+      if (p1 && p2) {
+        sum += haversineMeters(
+          { lat: p1[0], lng: p1[1] },
+          { lat: p2[0], lng: p2[1] }
+        );
       }
     }
+    progressedPastStopM = sum;
+    distBeforeStopOnTraceM = 0;
+  }
+}
 
-    if (didShowBlockingNoteThisTick) return;
-    if (pausedRef.current) return;
+// armement seulement si on est passé à 50 m ou moins AVANT l'arrêt sur la trace
+if (
+  hasOfficial &&
+  joinedTraceRef.current &&
+  Number.isFinite(stopTraceIdx) &&
+  stopTraceIdx >= 0
+) {
+  if (distBeforeStopOnTraceM <= 50) {
+    skipArmedOnTraceRef.current = true;
+  } else if (distBeforeStopOnTraceM > 70) {
+    skipArmedOnTraceRef.current = false;
+  }
+}
 
-    if (!isBlockingType(t) && activeNote && noteHoldIdxRef.current === targetIdx) {
-      if (Date.now() < (noteHoldUntilRef.current || 0)) return;
+// synchronisation de secours entre l’armement distance et l’armement sur trace
+if (skipArmedRef.current && distBeforeStopOnTraceM <= 60) {
+  skipArmedOnTraceRef.current = true;
+}
+
+// on confirme qu'on avance vers le prochain arrêt
+const movingTowardNextStop =
+  Number.isFinite(nextStopTraceIdx) &&
+  nextStopTraceIdx > stopTraceIdx &&
+  currentTraceApprox > stopTraceIdx &&
+  currentTraceApprox < nextStopTraceIdx + 40;
+
+const awaySkipOk =
+  hasOfficial &&
+  joinedTraceRef.current &&
+  skipArmedOnTraceRef.current &&
+  movingTowardNextStop &&
+  liveKmh >= SKIP_MIN_SPEED_KMH &&
+  progressedPastStopM >= 80 &&
+  distToTrace != null &&
+  distToTrace < 35;
+
+if (awaySkipOk && canAdvanceStopNow()) {
+  if (audioOn) {
+    if (targetIdx + 1 < points.length) {
+      sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
+    } else {
+      sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
     }
+  }
 
-    const initD = initialDistToTargetRef.current;
-    const allowArrive =
-      initD == null ||
-      initD > arriveM + ARRIVE_EPS_M ||
-      travelSinceTargetSetRef.current >= MIN_TRAVEL_AFTER_TARGET_SET_M;
+  skipArmedOnTraceRef.current = false;
+  lastAcceptedTraceApproxRef.current = currentTraceApprox;
 
-    if (dStop <= arriveM && allowArrive && canAdvanceStopNow()) {
-      if (audioOn) {
-        if (targetIdx + 1 < points.length) {
-          sfx.play("stopReached", { volume: 1, cooldownMs: 1200 });
-        } else {
-          sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
-        }
-      }
-
-      advanceToNextTarget("arrival", WARN_STOP_M);
-      return;
-    }
-
-    const currentTraceApprox = snappedApproxIdxRef.current ?? traceIdxRef.current ?? 0;
-    const stopTraceIdx = Number(stopIdxOnTrace[targetIdx] ?? -1);
-    const distToTrace = minDistanceToPolylineMeters(p, officialLine);
-
-    // vraie progression mémorisée entre deux ticks
-    const prevApprox = prevTraceApproxRef.current ?? currentTraceApprox;
-    const deltaTrace = currentTraceApprox - prevApprox;
-
-    // on mémorise tout de suite pour le prochain tick
-    prevTraceApproxRef.current = currentTraceApprox;
-
-    const traceSkipOk =
-      hasOfficial &&
-      joinedTraceRef.current &&
-      Number.isFinite(stopTraceIdx) &&
-      stopTraceIdx >= 0 &&
-      skipArmedRef.current &&
-      liveKmh >= SKIP_MIN_SPEED_KMH &&
-
-      // très proche de la trace
-      distToTrace != null &&
-      distToTrace < 30 &&
-
-      // progression réelle vers l’avant
-      deltaTrace > -0.5 &&
-
-      // arrêt réellement dépassé mais sans téléportation lointaine
-      currentTraceApprox > stopTraceIdx + SKIP_TRACE_MARGIN_PTS + 5 &&
-      currentTraceApprox < stopTraceIdx + SKIP_TRACE_MARGIN_PTS + 20 &&
-
-      // on s’éloigne vraiment du stop
-      dStop > arriveM + 10 &&
-
-      // on s’est éloigné du meilleur point atteint
-      closestDistToTargetRef.current != null &&
-      dStop > closestDistToTargetRef.current + 12;
-
-    if (traceSkipOk && canAdvanceStopNow()) {
-      if (audioOn) {
-        if (targetIdx + 1 < points.length) {
-          sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
-        } else {
-          sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
-        }
-      }
-
-      advanceToNextTarget("skip_trace", WARN_STOP_M);
-      return;
-    }
-
-    const closest = closestDistToTargetRef.current ?? dStop;
-    const movedAway = dStop - closest;
-
-    const awaySkipOk =
-      skipArmedRef.current &&
-      liveKmh >= SKIP_MIN_SPEED_KMH &&
-      dStop >= SKIP_AWAY_DIST_M &&
-      movedAway >= SKIP_GROWTH_FROM_MIN_M;
-
-    if (awaySkipOk && canAdvanceStopNow()) {
-      if (audioOn) {
-        if (targetIdx + 1 < points.length) {
-          sfx.play("stopMissed", { volume: 1, cooldownMs: 1200 });
-        } else {
-          sfx.play("circuitDone", { volume: 1, cooldownMs: 1500 });
-        }
-      }
-
-      lastAcceptedTraceApproxRef.current = currentTraceApprox;
-
-      advanceToNextTarget("skip_away", WARN_STOP_M);
-      return;
-    }
-  }, [
-    running,
-    me,
-    target,
-    targetIdx,
-    points,
-    finished,
-    stopBanner?.show,
-    hasOfficial,
-    officialLine,
-    stopIdxOnTrace,
-    audioOn,
-    activeNote,
-    startPrompt,
-    showGeneralStartNote,
-  ]);
-
+  advanceToNextTarget("skip_away", WARN_STOP_M);
+  return;
+}
+}, [
+  running,
+  me,
+  target,
+  targetIdx,
+  points,
+  finished,
+  stopBanner?.show,
+  hasOfficial,
+  officialLine,
+  stopIdxOnTrace,
+  audioOn,
+  activeNote,
+  startPrompt,
+  showGeneralStartNote,
+]);
     /* =========================
      UI
   ========================= */
